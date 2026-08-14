@@ -50,7 +50,7 @@ Exit codes: `0` = all pass · `1` = problems found · `2` = usage/environment er
 | S8 | unknown event types without `ignorable` (wholesale refusal) | [#1538](https://github.com/deepseek-ai/deepseek-harness/discussions/1538) |
 | S9 | zstd container frame count (single-frame logs → `session.list` 500) | [#1043](https://github.com/deepseek-ai/deepseek-harness/discussions/1043) |
 | S10 | `sourceEventSeqs` referencing non-earlier events | [#1469](https://github.com/deepseek-ai/deepseek-harness/discussions/1469) |
-| S11 | whole-session scan: corrupt → quarantine suggestion; oversized → cold-open stall risk | [#1550](https://github.com/deepseek-ai/deepseek-harness/discussions/1550) |
+| S11 | whole-session scan: corrupt → quarantine suggestion; oversized / workspace estimated-heap (max(events×600B, bytes×6), default 1GiB, `DSH_DOCTOR_HEAP_MB`) → cold-start stall risk | [#1550](https://github.com/deepseek-ai/deepseek-harness/discussions/1550) |
 
 ## Notes
 

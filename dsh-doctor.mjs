@@ -17,7 +17,7 @@
  *     S9  zstd 容器结构（#1043：单帧容器 → session.list 整体 500，侧边栏全消失）
  *     S10 sourceEventSeqs 悬空引用（#1469：压缩未重映射溯源 → history unavailable）
  *     S8  未知事件类型且无 ignorable（#1538：插件写的事件 harness 读不了 → 整包拒绝；清单从安装的 dsh-session 解析，内置 0.1.0-rc.6 回退）
- *     S11 全会话扫描（#1550：损坏会话 → 隔离建议；超大会话 → 冷打开物化风险警告）
+ *     S11 全会话扫描（#1550：损坏会话 → 隔离建议；超大会话/工作区估算物化堆 → 冷启动风险警告；估算堆=解码MB×6+事件×200B，阈值默认 1GB，可设 DSH_DOCTOR_HEAP_MB）
  *   [env]
  *     E1  关键命令不在 PATH（#1270：node/pnpm/zstd）
  *     E2  .env 是目录而非文件（#71：failed to load .env: EISDIR）
@@ -307,7 +307,7 @@ function checkSession(targetPath) {
       const sd = join(root, u);
       if (!existsSync(sd)) continue;
       for (const s of readdirSync(sd)) {
-        const f = join(sd, s, 'session.jsonl.zstd');
+        const f = existsSync(join(sd, s, 'session.jsonl.zstd')) ? join(sd, s, 'session.jsonl.zstd') : join(sd, s, 'session.jsonl');
         if (!existsSync(f)) continue;
         const m = statSync(f).mtimeMs;
         if (m > bestM) { bestM = m; best = f; }
@@ -445,12 +445,13 @@ function scanAllSessions() {
     const sd = join(root, u);
     if (!existsSync(sd)) continue;
     for (const s of readdirSync(sd)) {
-      const f = join(sd, s, 'session.jsonl.zstd');
+      const f = existsSync(join(sd, s, 'session.jsonl.zstd')) ? join(sd, s, 'session.jsonl.zstd') : join(sd, s, 'session.jsonl');
       if (existsSync(f)) files.push(f);
     }
   }
   if (files.length === 0) { report('session', 'S11', true, '未发现会话日志', undefined); return; }
   const corrupt = []; const oversized = []; const clean = [];
+  let totalDS = 0; let totalEvents = 0;
   for (const f of files) {
     const cs = statSync(f).size;
     let raw, frames = 0;
@@ -458,11 +459,12 @@ function scanAllSessions() {
       raw = readFileSync(f);
       const magic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
       for (let i = 0; i <= raw.length - 4; i++) if (raw[i] === magic[0] && raw[i + 1] === magic[1] && raw[i + 2] === magic[2] && raw[i + 3] === magic[3]) frames++;
-    } catch { corrupt.push({ f, why: '读取失败' }); continue; }
+    } catch { corrupt.push({ id: f.split('/').slice(-2, -1)[0], problems: ['读取失败'] }); continue; }
     let text;
-    try { text = execFileSync('zstd', ['-dc', f], { maxBuffer: 512 * 1024 * 1024 }).toString('utf8'); }
-    catch { corrupt.push({ f, why: 'zstd 解压失败' }); continue; }
+    try { text = f.endsWith('.zstd') ? execFileSync('zstd', ['-dc', f], { maxBuffer: 512 * 1024 * 1024 }).toString('utf8') : readFileSync(f, 'utf8'); }
+    catch { corrupt.push({ id: f.split('/').slice(-2, -1)[0], problems: ['解压/读取失败'] }); continue; }
     const ds = Buffer.byteLength(text, 'utf8');
+    totalDS += ds;
     // 轻量损坏扫描：seq==index + end-seed 重放 + 未知类型
     const problems = [];
     let evIndex = 0, lastSeed = -1, seedIdx = -1, posList = [];
@@ -491,18 +493,29 @@ function scanAllSessions() {
       if (after.some((p) => p < lastSeed)) problems.push('end-seed 后重放已提交尾部');
     }
     const id = f.split('/').slice(-2, -1)[0];
+    totalEvents += evIndex;
     const entry = { id, csMB: (cs / 1048576).toFixed(1), dsMB: (ds / 1048576).toFixed(1), frames, events: evIndex, problems };
     if (problems.length) corrupt.push(entry);
     else if (ds > 10 * 1048576 || frames > 10000) oversized.push(entry);
     else clean.push(entry);
   }
   const quars = corrupt.map((c) => `${c.id}（${c.problems.slice(0, 3).join('; ')}）`);
+  const totalMB = Math.round(totalDS / 1048576);
+  // 校准后的物化风险：估算堆 = 解码字节×6（字节主导放大）+ 事件数×200B（小事件堆成本）
+  // 依据：#1550 7889545 场景 300-600MB 解码 → ~3GB 堆（5-10x）；警告线 1GB 提前留余量
+  // 校准公式（实测 2026-08-14 本机 41.9 万小事件会话：对象图 259B/事件，×克隆2-3 → ~600B；大事件 5-10x 字节）
+  const estHeapMB = Math.round(Math.max(totalEvents * 600, totalDS * 6) / 1048576);
+  const heapLimit = Number(process.env.DSH_DOCTOR_HEAP_MB || 1024);
+  const totalRisk = estHeapMB > heapLimit;
   if (quars.length) {
     report('session', 'S11', false, `全会话扫描：${corrupt.length} 个损坏会话（#1550：冷打开会拖垮服务器）: ${quars.join(' | ')}`, `隔离：把这些会话目录移出 ${join(HOME, 'sessions')}（如 mv 到备份目录）`);
-  } else if (oversized.length) {
-    report('session', 'S11', true, `⚠ 全会话扫描：${oversized.length} 个超大会话有冷打开物化风险（#1550，未损坏，可接受或归档）: ${oversized.map((o) => `${o.id}(${o.dsMB}MB/${o.events}事件)`).join(' | ')}`, '冷打开会明显变慢；必要时压缩/归档历史会话');
+  } else if (oversized.length || totalRisk) {
+    const parts = [];
+    if (oversized.length) parts.push(`${oversized.length} 个超大会话: ${oversized.map((o) => `${o.id}(${o.dsMB}MB/${o.events}事件)`).join(' | ')}`);
+    if (totalRisk) parts.push(`工作区估算物化堆 ~${estHeapMB}MB（估算= max(${totalEvents}事件×600B, ${totalMB}MB×6)，跨 ${files.length} 会话累积，#1550 场景；阈值 ${heapLimit}MB，可设 DSH_DOCTOR_HEAP_MB）`);
+    report('session', 'S11', true, `⚠ 全会话扫描：${parts.join('；')}（未损坏，可接受或归档）`, '冷启动会明显变慢；必要时压缩/归档历史会话');
   } else {
-    report('session', 'S11', true, `全会话扫描：${clean.length} 个会话均健康（损坏 0 / 超大 0）`, undefined);
+    report('session', 'S11', true, `全会话扫描：${clean.length} 个会话均健康（损坏 0 / 超大 0 / 估算物化堆 ${estHeapMB}MB）`, undefined);
   }
 }
 
