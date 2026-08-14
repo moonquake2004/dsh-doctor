@@ -1,0 +1,39 @@
+{
+  "name": "dsh-doctor",
+  "version": "0.1.0",
+  "description": "Offline diagnostic for DeepSeek Harness — 19 checks across env/profile/session, plus a 'Doctor' panel in the web UI settings.",
+  "main": "lib/index.js",
+  "files": [
+    "lib",
+    "client",
+    "dsh-doctor.mjs",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "license": "MIT"
+}

@@ -59,6 +59,23 @@ Exit codes: `0` = all pass · `1` = problems found · `2` = usage/environment er
 - In-flight tool calls in the current active turn are reported as warnings, not errors, so scanning a live session never false-positives.
 - Sibling implementation with the same scope: [boyin111-1/dsh-doctor](https://github.com/boyin111-1/dsh-doctor) — the two tools cross-verified against the same broken fixtures.
 
+
+
+## Also installable as a dsh plugin
+
+The tool ships as a proper dsh bundle (`plugin/`), so you can run the same 19 checks from inside the web UI:
+
+```bash
+# install into a profile (works from a checkout or a published path)
+dsh plugin --profile web add file:/path/to/dsh-doctor/plugin
+```
+
+What you get:
+- **Settings → Doctor** panel: one click runs all 19 checks and renders results grouped by env / profile / session, with per-check fixes and quarantine suggestions (suggestions are shown, never auto-executed);
+- **HTTP API**: `GET /dsh-doctor/run` returns the same checks as JSON (optional `?profile=` / `?session=` to narrow scope).
+
+Architecture: the plugin's server route shells out to the bundled `plugin/dsh-doctor.mjs --json` — the same single source of truth as the CLI (the checks are offline/filesystem-based by design, so they don't need harness internals). The repo-root `dsh-doctor.mjs` is a thin wrapper for `node dsh-doctor.mjs` compatibility.
+
 ## License
 
 MIT
