@@ -39,7 +39,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
+import { basename, delimiter as PATH_DELIM, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
 const HOME = process.env.DSH_HOME || join(homedir(), '.dsh');
@@ -65,7 +65,7 @@ const KNOWN_SESSION_EVENT_TYPES_FALLBACK = new Set([
 // 存储行类型与 header，不属于事件门禁
 const STORAGE_ROW_TYPES = new Set(['text-chunks', 'reasoning-chunks', 'tool-call-chunks', 'session']);
 function knownSessionEventTypes() {
-  for (const p of (process.env.PATH || '').split(':')) {
+  for (const p of (process.env.PATH || '').split(PATH_DELIM)) {
     if (!p.endsWith('node_modules/.bin') || !existsSync(join(p, 'dsh'))) continue;
     try {
       const src = readFileSync(join(dirname(p), '@deepseek-ai', 'dsh-session', 'lib', 'index.js'), 'utf8');
@@ -93,7 +93,7 @@ function resolveProfile(name) {
 /* ================= env ================= */
 function checkEnv() {
   if (!wants('env')) return;
-  const find = (cmd) => { const r = spawnSync('which', [cmd]); return r.status === 0 ? String(r.stdout).trim() : null; };
+  const find = (cmd) => { for (const w of process.platform === 'win32' ? ['where'] : ['which']) { const r = spawnSync(w, [cmd]); if (r.status === 0) { const p = String(r.stdout).split(/\r?\n/)[0].trim(); if (p) return p; } } return null; };
   for (const cmd of ['node', 'pnpm', 'zstd']) {
     const p = find(cmd);
     report('env', `E1-${cmd}`, !!p, p ? `${cmd}: ${p}` : `${cmd} 不在 PATH（${cmd === 'node' ? '创建会话会失败 #1270' : cmd === 'pnpm' ? 'dsh plugin 不可用' : '会话日志解压不可用'}）`, p ? undefined : `安装 ${cmd} 或加入 PATH`);
@@ -108,7 +108,7 @@ function checkEnv() {
 
   // E4：node-pty 原生模块完整性（#1219：pty.node 缺失 → dsh web 启动失败）
   const ptyDirs = [];
-  for (const p of (process.env.PATH || '').split(':')) {
+  for (const p of (process.env.PATH || '').split(PATH_DELIM)) {
     if (p.endsWith('node_modules/.bin') && existsSync(join(p, 'dsh'))) {
       ptyDirs.push(join(dirname(p), 'node-pty'));
       break;
@@ -155,7 +155,7 @@ function checkEnv() {
   // E6：锚点元检查（tripwire）——我们 S6/S7/S10 依赖的契约是否仍在安装的 dsh-session 里
   // 上游改名/重构会让我们的离线结论静默腐烂（boyin111-1 的 --verify-anchors 同款思路）
   let sessionLib = null;
-  for (const p of (process.env.PATH || '').split(':')) {
+  for (const p of (process.env.PATH || '').split(PATH_DELIM)) {
     if (p.endsWith('node_modules/.bin') && existsSync(join(p, 'dsh'))) {
       const lib = join(dirname(p), '@deepseek-ai', 'dsh-session', 'lib', 'index.js');
       if (existsSync(lib)) { sessionLib = lib; break; }
@@ -192,7 +192,7 @@ function checkProfile(name) {
 
   const installAnchor = (() => {
     // 从 PATH 找 dsh 的安装目录（node_modules），用于 bundle 双锚点解析
-    for (const p of (process.env.PATH || '').split(':')) {
+    for (const p of (process.env.PATH || '').split(PATH_DELIM)) {
       if (p.endsWith('node_modules/.bin') && existsSync(join(p, 'dsh'))) return dirname(p);
     }
     return null;
@@ -459,10 +459,10 @@ function scanAllSessions() {
       raw = readFileSync(f);
       const magic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
       for (let i = 0; i <= raw.length - 4; i++) if (raw[i] === magic[0] && raw[i + 1] === magic[1] && raw[i + 2] === magic[2] && raw[i + 3] === magic[3]) frames++;
-    } catch { corrupt.push({ id: f.split('/').slice(-2, -1)[0], problems: ['读取失败'] }); continue; }
+    } catch { corrupt.push({ id: basename(dirname(f)), problems: ['读取失败'] }); continue; }
     let text;
     try { text = f.endsWith('.zstd') ? execFileSync('zstd', ['-dc', f], { maxBuffer: 512 * 1024 * 1024 }).toString('utf8') : readFileSync(f, 'utf8'); }
-    catch { corrupt.push({ id: f.split('/').slice(-2, -1)[0], problems: ['解压/读取失败'] }); continue; }
+    catch { corrupt.push({ id: basename(dirname(f)), problems: ['解压/读取失败'] }); continue; }
     const ds = Buffer.byteLength(text, 'utf8');
     totalDS += ds;
     // 轻量损坏扫描：seq==index + end-seed 重放 + 未知类型
@@ -492,7 +492,7 @@ function scanAllSessions() {
       const after = posList.slice(seedIdx + 1);
       if (after.some((p) => p < lastSeed)) problems.push('end-seed 后重放已提交尾部');
     }
-    const id = f.split('/').slice(-2, -1)[0];
+    const id = basename(dirname(f));
     totalEvents += evIndex;
     const entry = { id, csMB: (cs / 1048576).toFixed(1), dsMB: (ds / 1048576).toFixed(1), frames, events: evIndex, problems };
     if (problems.length) corrupt.push(entry);
