@@ -1,5 +1,5 @@
 {
-  "name": "dsh-doctor",
+  "name": "@moonquake2004/dsh-doctor",
   "version": "0.1.0",
   "description": "Offline diagnostic for DeepSeek Harness — 19 checks across env/profile/session, plus a 'Doctor' panel in the web UI settings.",
   "main": "lib/index.js",
@@ -35,5 +35,11 @@
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "author": "moonquake2004 <moonquake2004@users.noreply.github.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moonquake2004/dsh-doctor.git"
+  },
+  "homepage": "https://github.com/moonquake2004/dsh-doctor"
 }
