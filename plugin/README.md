@@ -126,6 +126,16 @@ The built-in 20 checks are compiled into the tool. The **catalog** is a second, 
 
 Catalog check results are marked `src: "catalog"` in JSON output and `[目录]` in CLI output.
 
+## LLM observer (v0.3.0, Layer C)
+
+The third layer closes the loop between field signals and the catalog: **semi-automatic candidate-check proposals** from a diagnostics run, with a human certification gate. Design + details in [`docs/layer-c-observer.md`](docs/layer-c-observer.md).
+
+- `dsh-doctor --observe run.json` — cluster the fail/warn signals of a diagnostics run (a `--json` / `--envelope` output, or a directory of JSON files), then draft candidate checks in the catalog schema (deterministic, default `severity: warn`).
+- `--observe-llm "<cmd>"` (or `DSH_DOCTOR_LLM_CMD`) — enrich drafts with an LLM: `cmd` reads the prompt on stdin and writes a JSON reply on stdout. Replies are constrained to the closed probe vocabulary; any parse/schema violation silently falls back to the draft.
+- `--observe-apply proposals.json` — merge **validated** proposals into the local overlay `plugin/checks.local.json` (idempotent). The overlay runs in diagnostics until you certify the check, but is never distributed — certified checks belong in `plugin/checks.json`.
+
+Safety invariants: closed probe vocabulary (LLM output is data, never code), proposals default to `warn`, nothing auto-ships, and no external service is required (no `--observe-llm` = deterministic mode).
+
 ## Also installable as a dsh plugin
 
 The tool ships as a proper dsh bundle (`plugin/`), so you can run the same checks (20 built-in + catalog rules) from inside the web UI:

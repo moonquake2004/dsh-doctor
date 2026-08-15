@@ -1,0 +1,5 @@
+# macOS
+.DS_Store
+
+# Layer C 观察者本地覆盖层（未认证提案，不随包分发）
+plugin/checks.local.json

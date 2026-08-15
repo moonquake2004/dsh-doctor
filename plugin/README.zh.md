@@ -119,6 +119,16 @@ The `dsh-doctor/v1` envelope (`--json --envelope`) is the machine-readable form 
 
 目录检查的结果在 JSON 输出中标 `src: "catalog"`，CLI 输出标 `[目录]`。
 
+## LLM 观察者（v0.3.0，层 C）
+
+第三层把"现场信号 → 目录条目"的回路半自动化：从诊断运行产出**候选检查提案**，人做最后把关（认证门禁不变）。设计与细节见 [`docs/layer-c-observer.md`](docs/layer-c-observer.md)。
+
+- `dsh-doctor --observe run.json` —— 聚类诊断运行的 fail/warn 信号（`--json` / `--envelope` 输出，或含 JSON 的目录），按目录 schema 起草候选检查（确定性，默认 `severity: warn`）。
+- `--observe-llm "<cmd>"`（或 `DSH_DOCTOR_LLM_CMD`）—— 用 LLM 富化草稿：`cmd` 从 stdin 收 prompt，stdout 回 JSON。回复被封闭探测词表约束，任何解析/词表违规静默回退草稿。
+- `--observe-apply proposals.json` —— 把**校验通过**的提案并入本地覆盖层 `plugin/checks.local.json`（幂等）。覆盖层参与本地诊断直到你认证该检查，但永不随包分发——认证后的检查应进 `plugin/checks.json`。
+
+安全不变量：封闭探测词表（LLM 输出永远是数据、不是代码）、提案默认 warn、不自动上目录、不依赖任何外部服务（不带 `--observe-llm` 即确定性模式）。
+
 ## 也可作为 dsh 插件安装
 
 工具以标准 dsh bundle 形态发布（`plugin/`），可以在 web UI 里跑同样的检查（20 内置 + 目录规则）：

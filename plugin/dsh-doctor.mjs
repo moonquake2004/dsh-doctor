@@ -51,7 +51,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import net from 'node:net';
-import { basename, delimiter as PATH_DELIM, dirname, join } from 'node:path';
+import { basename, delimiter as PATH_DELIM, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
@@ -217,7 +217,17 @@ function portOccupierInfo(port) {
     const pid = parts[1] || '';
     let dsh = /dsh|deepseek/.test(cmd);
     if (!dsh && pid) {
-      try { dsh = /dsh web|deepseek-ai/.test(execFileSync('ps', ['-p', pid, '-o', 'command='], { encoding: 'utf8' })); } catch { /* 无法识别则按非 dsh 处理 */ }
+      try {
+        dsh = /dsh web|deepseek-ai|harness/.test(execFileSync('ps', ['-p', pid, '-o', 'command='], { encoding: 'utf8' }));
+      } catch { /* ps 不可用（权限/平台）→ 走 lsof 兜底 */ }
+      if (!dsh) {
+        try {
+          // 兜底：ps 命令串可能不含连续 "dsh web"（npx/pnpm 安装形态），改用 lsof 的 cwd/txt 路径识别 harness 安装。
+          // 只认真实安装签名（npx 缓存 / @deepseek-ai 包目录），避免把任意含 "dsh" 路径段的工作目录误判为 dsh。
+          const lsofP = execFileSync('lsof', ['-p', pid], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+          dsh = /\.npm\/_npx\/|node_modules\/@deepseek-ai\//.test(lsofP);
+        } catch { /* 无法识别则按非 dsh 处理 */ }
+      }
     }
     return { pid, cmd, dsh };
   } catch { return null; }
@@ -745,36 +755,52 @@ function bundledCatalog() {
   try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return { schemaVersion: 1, checks: [] }; }
 }
 
+/** 本地覆盖层（层 C 观察者 --observe-apply 写入）：合法则追加，非法/缺失 → []。 */
+function localOverlay(path) {
+  const p = path ?? fileURLToPath(new URL('./checks.local.json', import.meta.url));
+  try { const d = JSON.parse(readFileSync(p, 'utf8')); return validCatalog(d) ? d.checks : []; } catch { return []; }
+}
+
 function validCatalog(data) {
   return !!data && data.schemaVersion === 1 && Array.isArray(data.checks);
 }
 
-/** 拉取目录：新鲜缓存(≤TTL) → 远程(raw.githubusercontent，3s 超时) → 旧缓存(last-known-good) → 内置副本。 */
-async function loadCatalog({ noRemote = false, fetchImpl, home = HOME } = {}) {
+/** 拉取目录：新鲜缓存(≤TTL) → 远程(raw.githubusercontent，3s 超时) → 旧缓存(last-known-good) → 内置副本；末尾合并本地覆盖层。 */
+async function loadCatalog({ noRemote = false, fetchImpl, home = HOME, localPath } = {}) {
   const bundled = bundledCatalog();
-  if (noRemote || typeof fetchImpl !== 'function') return { checks: bundled.checks, source: 'bundled' };
-  const cachePath = join(home, '.cache', 'dsh-doctor', 'checks.json');
-  const readCache = () => { if (!existsSync(cachePath)) return null; try { const d = JSON.parse(readFileSync(cachePath, 'utf8')); return validCatalog(d) ? d : null; } catch { return null; } };
-  try {
-    const cached = readCache();
-    if (cached && Date.now() - statSync(cachePath).mtimeMs < CATALOG_TTL_MS) return { checks: cached.checks, source: 'cache' };
-  } catch { /* 回退 */ }
-  try {
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 3000);
-    const res = await fetchImpl(REMOTE_CATALOG_URL, { signal: ac.signal });
-    clearTimeout(timer);
-    if (res && res.ok) {
-      const data = await res.json();
-      if (validCatalog(data)) {
-        try { mkdirSync(dirname(cachePath), { recursive: true }); writeFileSync(cachePath, JSON.stringify(data, null, 2)); } catch { /* 缓存写入失败不影响本次运行 */ }
-        return { checks: data.checks, source: 'remote' };
-      }
+  let base;
+  if (noRemote || typeof fetchImpl !== 'function') {
+    base = { checks: bundled.checks, source: 'bundled' };
+  } else {
+    const cachePath = join(home, '.cache', 'dsh-doctor', 'checks.json');
+    const readCache = () => { if (!existsSync(cachePath)) return null; try { const d = JSON.parse(readFileSync(cachePath, 'utf8')); return validCatalog(d) ? d : null; } catch { return null; } };
+    try {
+      const cached = readCache();
+      if (cached && Date.now() - statSync(cachePath).mtimeMs < CATALOG_TTL_MS) base = { checks: cached.checks, source: 'cache' };
+    } catch { /* 回退 */ }
+    if (!base) {
+      try {
+        const ac = new AbortController();
+        const timer = setTimeout(() => ac.abort(), 3000);
+        const res = await fetchImpl(REMOTE_CATALOG_URL, { signal: ac.signal });
+        clearTimeout(timer);
+        if (res && res.ok) {
+          const data = await res.json();
+          if (validCatalog(data)) {
+            try { mkdirSync(dirname(cachePath), { recursive: true }); writeFileSync(cachePath, JSON.stringify(data, null, 2)); } catch { /* 缓存写入失败不影响本次运行 */ }
+            base = { checks: data.checks, source: 'remote' };
+          }
+        }
+      } catch { /* 离线/超时 → 回退 */ }
     }
-  } catch { /* 离线/超时 → 回退 */ }
-  const stale = readCache();
-  if (stale) return { checks: stale.checks, source: 'cache-stale' };
-  return { checks: bundled.checks, source: 'bundled' };
+    if (!base) {
+      const stale = readCache();
+      base = stale ? { checks: stale.checks, source: 'cache-stale' } : { checks: bundled.checks, source: 'bundled' };
+    }
+  }
+  const local = localOverlay(localPath);
+  if (!local.length) return base;
+  return { checks: [...base.checks, ...local], source: base.source === 'bundled' ? 'bundled+local' : `${base.source}+local` };
 }
 
 function expandPath(tpl, ctx) {
@@ -1004,10 +1030,43 @@ export function runUpdate() {
 }
 
 /* ================= main ================= */
+const flagValue = (name) => { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] : undefined; };
 const profileArg = (() => { const i = process.argv.indexOf('--profile'); return i >= 0 ? process.argv[i + 1] : 'web'; })();
 const sessionArg = (() => { const i = process.argv.indexOf('--session'); return i >= 0 ? process.argv[i + 1] : undefined; })();
 
 async function run() {
+  // 层 C 观察者（--observe / --observe-apply）：独立子命令，跑完即退出，不执行常规检查
+  const observeArg = flagValue('--observe');
+  const observeApplyArg = flagValue('--observe-apply');
+  const llmCmd = process.argv.includes('--observe-llm') ? flagValue('--observe-llm') : process.env.DSH_DOCTOR_LLM_CMD ?? null;
+  if (observeArg || observeApplyArg) {
+    const { runObserver, applyProposals, writeLocalOverlay, readLocalOverlay } = await import('./observer.mjs');
+    try {
+      if (observeApplyArg) {
+        const raw = JSON.parse(readFileSync(resolve(observeApplyArg), 'utf8'));
+        const list = Array.isArray(raw) ? raw : raw.proposals ?? [];
+        const overlayPath = join(dirname(fileURLToPath(import.meta.url)), 'checks.local.json');
+        // 覆盖层只追加新提案（loadCatalog 会 base + local 合并），且对已存在覆盖层幂等
+        const existing = readLocalOverlay(overlayPath);
+        const { catalog: merged, applied, rejected } = applyProposals({ schemaVersion: 1, checks: existing }, list);
+        if (applied.length) {
+          writeLocalOverlay(overlayPath, {
+            schemaVersion: 1,
+            description: 'Layer C 观察者本地覆盖层——未认证提案，不随包分发；认证通过后请合并进 checks.json 并删除本文件。',
+            checks: merged.checks,
+          });
+        }
+        console.log(JSON.stringify({ ok: true, written: applied.length ? overlayPath : null, applied: applied.map((p) => p.id), rejected }, null, 2));
+        process.exit(0);
+      }
+      const res = await runObserver({ path: observeArg, existingChecks: bundledCatalog().checks, llmCmd });
+      console.log(JSON.stringify(res, null, 2));
+      process.exit(0);
+    } catch (e) {
+      console.error(`观察者失败: ${e.message}`);
+      process.exit(1);
+    }
+  }
   try { checkEnv(); } catch (e) { report('env', 'E0', false, `env 检查异常: ${e.message.slice(0, 80)}`); }
   try { await checkPort3080(); } catch (e) { report('env', 'E10-port-3080', false, `端口检查异常: ${e.message.slice(0, 60)}`); }
   try { checkProfile(profileArg); } catch (e) { report('profile', 'P0', false, `profile 检查异常: ${e.message.slice(0, 100)}`); }
