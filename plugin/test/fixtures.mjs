@@ -503,3 +503,11 @@ test('P10：无客户端专属服务注入 → 通过', () => {
   assert.notEqual(map.get('P10'), false, '服务端依赖不应报 P10');
   rmSync(home, { recursive: true, force: true });
 });
+
+test('envelope：含 tool 字段（provenance，契约 v1）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', { manifest: { name: 'web' }, patch: '' });
+  const { d } = runEnvelope({ home, args: ['--profile', 'web'] });
+  assert.equal(d.tool, 'dsh-doctor');
+  rmSync(home, { recursive: true, force: true });
+});

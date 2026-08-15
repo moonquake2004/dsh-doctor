@@ -9,6 +9,7 @@ deepseek-ai/deepseek-harness discussions #1719 (doctor spec) and #1846 (RFC).
 ```json
 {
   "schema": "dsh-doctor/v1",
+  "tool": "<emitter id, e.g. dsh-doctor | dsh-plugin-doctor | dsh-diagnose>",
   "generatedAt": "ISO-8601",
   "profile": "<name or dir>",
   "exitCode": 0,
@@ -21,6 +22,7 @@ deepseek-ai/deepseek-harness discussions #1719 (doctor spec) and #1846 (RFC).
 - **status vocabulary**: lowercase `pass | warn | fail`
 - **exit codes**: `0` all pass · `1` any WARN · `2` any FAIL
 - `ok` = `exitCode === 0`
+- `tool` (optional but recommended): emitter id for provenance — `name` stays the tool-local check id, no global id registry required
 - `checks[].name` is the check id; `detail` is the human-readable verdict
 
 ## Minimal compatible subset
@@ -34,7 +36,7 @@ can be derived from `checks`.
 
 | Tool | Mode | Shape |
 |---|---|---|
-| moonquake2004/dsh-doctor | `--json --envelope` | full envelope (v1) |
+| moonquake2004/dsh-doctor | `--json --envelope` | full envelope (v1, emits `tool`) |
 | zoahdev/dsh-plugin-doctor | v1.6.0 `--profile --json` | full envelope (v1) |
 | worm-ai/dsh-diagnose | `--doctor-json` | subset — needs lowercase status to be v1-compatible |
 

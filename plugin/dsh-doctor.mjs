@@ -1034,6 +1034,7 @@ async function run() {
     const exitCode = summary.fail > 0 ? 2 : summary.warn > 0 ? 1 : 0;
     console.log(JSON.stringify({
       schema: 'dsh-doctor/v1',
+      tool: 'dsh-doctor',
       generatedAt: new Date().toISOString(),
       profile: profileArg,
       exitCode,
