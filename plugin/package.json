@@ -9,7 +9,8 @@
     "dsh-doctor.mjs",
     "checks.json",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "README.zh.md"
   ],
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
