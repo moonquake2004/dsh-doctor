@@ -75,6 +75,7 @@
 \newcommand{\VerbatimStringTok}[1]{\textcolor[rgb]{0.25,0.44,0.63}{#1}}
 \newcommand{\WarningTok}[1]{\textcolor[rgb]{0.38,0.63,0.69}{\textbf{\textit{#1}}}}
 \usepackage{longtable,booktabs,array}
+\usepackage[margin=1in]{geometry}
 \usepackage{tikz}
 \usetikzlibrary{positioning,calc}
 \usepackage{float}
@@ -113,6 +114,8 @@ Check Lifecycle, and Field Experience with DeepSeek Harness}
 
 \begin{document}
 \maketitle
+\tableofcontents
+\newpage
 
 \begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
 
@@ -395,6 +398,7 @@ compatibility.
 
 \begin{figure}[H]
 \centering
+\resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[node distance=1.1cm, box/.style={draw, rounded corners, align=center, font=\small, minimum width=8.5cm}]
 \node[box] (host) {dsh web host\\ settings panel $\leftrightarrow$ GET /dsh-doctor/run};
 \node[box, below=0.7cm of host] (engine) {check engine (zero-dep, offline)\\ env (11) $\cdot$ profile (10) $\cdot$ session (8) + catalog (5)};
@@ -404,6 +408,7 @@ compatibility.
 \draw[->] (engine) -- (catalog) node[midway, left] {fetch};
 \draw[->] (engine) -- (out) node[midway, right] {emit};
 \end{tikzpicture}
+}
 \caption{dsh-doctor architecture: one check engine, three output modes, remote catalog with TTL cache.}
 \label{fig:arch}
 \end{figure}
@@ -474,6 +479,7 @@ reports, as of v0.2.7).}
 \centering
 \caption{Check inventory (30 checks, 18 mapped community reports, v0.2.7).}
 \label{tab:checks}
+\resizebox{\textwidth}{!}{%
 \begin{tabular}{@{}llllp{6.2cm}@{}}
 \toprule
 Group & IDs & Count & Coverage class & Representative reports\\
@@ -484,6 +490,7 @@ profile & P1--P5, P7--P11 & 10 & composition: resolution / collisions / patch sy
 session & S1, S2, S6--S11 & 8 & log integrity: continuity / replay / types / containers / drift / heap & [\#1363] [\#466] [\#1333] [\#1497] [\#1538] [\#1043] [\#1469] [\#1550]\\
 \bottomrule
 \end{tabular}
+}
 \end{table}
 
 Coverage honesty: two symptom families (sandbox denials, approval
@@ -635,6 +642,7 @@ A working draft of this model is published as {[}33{]}.
 
 \begin{figure}[H]
 \centering
+\resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[node distance=1.6cm, box/.style={draw, rounded corners, align=center, font=\small}]
 \node[box] (report) {community report};
 \node[box, right=1.7cm of report] (cand) {candidate check\\ (probe + anchor + fixtures)};
@@ -651,6 +659,7 @@ A working draft of this model is published as {[}33{]}.
 \draw[->] (up.east) -- ++(1.5,0) |- (inst.south);
 \node[font=\small, below=0.15cm of up] {anchor introspection};
 \end{tikzpicture}
+}
 \caption{The check lifecycle: report $\rightarrow$ candidate $\rightarrow$ certify $\rightarrow$ distribute $\rightarrow$ verify (property 4), with introspection (property 2) guarding every upgrade.}
 \label{fig:lifecycle}
 \end{figure}
@@ -759,6 +768,7 @@ evidence that a shared contract can absorb independently built tools.
 \centering
 \caption{Independent diagnostic tools converging on the \texttt{dsh-doctor/v1} contract.}
 \label{tab:tools}
+\resizebox{\textwidth}{!}{%
 \begin{tabular}{@{}lllll@{}}
 \toprule
 Tool & Side & Checks & Envelope mode & Status vocabulary\\
@@ -768,6 +778,7 @@ dsh-plugin-doctor [21] & author (pre-publish) + profile tripwire & manifest/patc
 dsh-diagnose [22] & user (symptom, knowledge-anchored) & 17 \texttt{dsh-symptom.*} families & \texttt{--doctor-json} & lowercase (adopted)\\
 \bottomrule
 \end{tabular}
+}
 \end{table}
 
 \begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
