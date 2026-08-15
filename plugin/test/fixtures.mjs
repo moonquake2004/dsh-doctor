@@ -511,3 +511,28 @@ test('envelope：含 tool 字段（provenance，契约 v1）', () => {
   assert.equal(d.tool, 'dsh-doctor');
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- P11：main 入口产物缺失（#1965） ---------- */
+
+test('P11：bundle main 指向缺失的 lib/index.js → 失败', () => {
+  const home = tempHome();
+  // 模拟市场装源码树：package.json main=lib/index.js 但 lib/ 不存在
+  profileFixture(home, 'web', {
+    manifest: { name: 'web', dsh: { profile: { bundles: ['fake-unbuilt'] } } },
+    patch: '',
+    nodeModules: {
+      'fake-unbuilt/package.json': JSON.stringify({ name: 'fake-unbuilt', version: '0.1.0', main: 'lib/index.js', dsh: { bundle: { patch: './patch.yml' } } }),
+      'fake-unbuilt/patch.yml': '- insert:\n    - id: u1\n      name: u\n',
+    },
+  });
+  assertIsolated(home, ['--profile', 'web'], 'P11');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P11：main 产物存在 → 通过', () => {
+  const home = tempHome();
+  bundleFixture(home, 'web', 'fake-built', { mainJs: "export function apply(ctx) {}\n", patchId: 'b1' });
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(map.get('P11'), false, 'main 产物存在不应报 P11');
+  rmSync(home, { recursive: true, force: true });
+});

@@ -13,6 +13,7 @@
  *     P8  adapter provider 注册冲突（#1904②：两 bundle 抢注同一 provider → boot 时 DUPLICATE_ADAPTER 崩溃）
  *     P9  ctx.settings 未声明 inject: ['settings']（#1904⑤：先于 settings 就绪激活 → namespace not registered）
  *     P10 inject 引用客户端专属服务（#1947：@deepseek-ai/dsh-client-* 服务端永不提供 → Fiber 永久 PENDING → web boot 失败）
+ *     P11 已装 bundle 的 main 入口产物缺失（#1965：市场装未构建源码树 → ERR_MODULE_NOT_FOUND → boot 崩）
  *   [session]
  *     S1  孤儿 tool_call（#1363：assistant tool_calls 无对应 tool 结果 → INVALID_REQUEST）
  *     S2  未闭合 turn（#466/#1265：turn/start 无 turn/end → 会话永久"运行中"）
@@ -493,6 +494,19 @@ function checkProfile(name) {
   }
   if (clientInjectIssues.length) report('profile', 'P10', false, `插件 inject 引用客户端专属服务（服务端 cordis 树永不提供 → Fiber 永久 PENDING → web boot 失败，#1947）: ${clientInjectIssues.join('; ')}`, '客户端服务不能作为服务端插件依赖：把相关功能移到插件 client 半（package.json 的 dsh.client.inject），或删除该 inject');
   else report('profile', 'P10', true, '无客户端专属服务注入', undefined);
+
+  // P11：已装 bundle 的 main 入口产物缺失（#1965：市场把未构建源码树当插件装 → ERR_MODULE_NOT_FOUND → boot 崩）
+  const entryIssues = [];
+  for (const [b, d] of bundleDirs) {
+    let main;
+    try { main = JSON.parse(readFileSync(join(d, 'package.json'), 'utf8')).main; } catch { continue; }
+    if (typeof main !== 'string' || !main.endsWith('.js')) continue;
+    if (!existsSync(join(d, main))) {
+      entryIssues.push(`${b}（main=${main} 但产物缺失——未构建的源码树，或装错了仓库根而非 monorepo 子包）`);
+    }
+  }
+  if (entryIssues.length) report('profile', 'P11', false, `已装 bundle 的 main 入口缺失（#1965：市场装源码不跑构建 → ERR_MODULE_NOT_FOUND → dsh web boot 崩溃）: ${entryIssues.join('; ')}`, '在插件目录跑构建（pnpm install && pnpm run build 产出 main 指向的文件），或改用打包好的 npm 包安装；monorepo 插件需装子包（dsh-market #18 同族）');
+  else report('profile', 'P11', true, '已装 bundle 的 main 入口产物均在', undefined);
 }
 
 /* ================= session ================= */
