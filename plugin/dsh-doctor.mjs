@@ -235,7 +235,8 @@ function checkProfile(name) {
     const out = new Set();
     if (!existsSync(patchPath)) return out;
     const text = readFileSync(patchPath, 'utf8');
-    for (const m of text.matchAll(/^\s*-\s*name:\s*['"]?([^'"\s]+)/gm)) out.add(m[1]);
+    // 真实格式：`- id:` 下缩进的 `name:` 行（无破折号）——2026-08-15 fixtures 发现旧正则从未匹配
+    for (const m of text.matchAll(/^\s*name:\s*['"]?([^'"\s]+)/gm)) out.add(m[1]);
     return out;
   })();
 
@@ -707,10 +708,11 @@ export function runCatalogCheck(check, ctx) {
   }
 }
 
-/** 逐条执行目录检查，汇入统一 results 管线（src='catalog'）。 */
+/** 逐条执行目录检查，汇入统一 results 管线（src='catalog'）。尊重 --profile/--env/--session 收窄。 */
 function checkCatalog(ctx, catalog) {
   const platform = process.platform;
   for (const check of catalog.checks ?? []) {
+    if (!wants(check.section)) continue; // 与内置检查一致的 section 收窄
     const when = check.when ?? {};
     if (Array.isArray(when.os) && !when.os.includes(platform)) continue;
     if (check.section === 'profile' && !ctx.profileDir) continue; // profile 无效时跳过 profile 段

@@ -41,8 +41,9 @@
       "probe": {
         "type": "text-not-contains",
         "path": "{profile}/cordis.patch.yml",
-        "pattern": "^\\s*-\\s*name:\\s*['\"]?[^'\"\\n]*\\s[^'\"\\n]+",
-        "flags": "m"
+        "pattern": "^\\s*name:\\s*['\"]?[^'\"\\s]+[^'\"\\n]*\\s[^'\"\\n]+",
+        "flags": "m",
+        "required": false
       },
       "detailOk": "用户 patch 的 insert name 均无空格",
       "detailFail": "用户 patch 存在含空格的 insert name（Windows 下 spawn 参数解析会断，#1420 待实现 lint 的目录版）",

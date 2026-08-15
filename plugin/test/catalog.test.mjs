@@ -75,10 +75,10 @@ test('text-contains / text-not-contains（含 flags）', () => {
   assert.equal(runCatalogCheck({ probe: { type: 'text-contains', path: '{profile}/cfg.txt', pattern: 'ignore-workspace-root-check\\s*=\\s*false' } }, c).ok, false);
   assert.equal(runCatalogCheck({ probe: { type: 'text-not-contains', path: '{profile}/cfg.txt', pattern: 'GONE' } }, c).ok, true);
   assert.equal(runCatalogCheck({ probe: { type: 'text-not-contains', path: '{profile}/cfg.txt', pattern: 'foo bar' } }, c).ok, false);
-  // 多行标志 m + 行首锚定（与种子规则 P6 同款正则）
-  const patch = '- insert:\n    - id: x\n    - name: "My Plugin"\n';
+  // 多行标志 m + 行首锚定（真实格式：`- id:` 下缩进的 `name:`，无破折号；与种子规则 P6 同款正则）
+  const patch = '- insert:\n    - id: x\n      name: "My Plugin"\n';
   writeFileSync(join(c.profileDir, 'cordis.patch.yml'), patch);
-  assert.equal(runCatalogCheck({ probe: { type: 'text-contains', path: '{profile}/cordis.patch.yml', pattern: '^\\s*-\\s*name:\\s*[\'"]?[^\'"\\n]*\\s[^\'"\\n]+', flags: 'm' } }, c).ok, true);
+  assert.equal(runCatalogCheck({ probe: { type: 'text-contains', path: '{profile}/cordis.patch.yml', pattern: '^\\s*name:\\s*[\'"]?[^\'"\\s]+[^\'"\\n]*\\s[^\'"\\n]+', flags: 'm' } }, c).ok, true);
   // 缺失 + required:false → ok
   assert.equal(runCatalogCheck({ probe: { type: 'text-contains', path: '{profile}/nope.txt', pattern: 'x', required: false } }, c).ok, true);
   rmSync(home, { recursive: true, force: true });
@@ -210,7 +210,7 @@ test('种子规则：P6-patch-name-space 在含空格 name 的 patch 上 fail', 
   const home = tempHome();
   const c = ctx(home);
   mkdirSync(c.profileDir, { recursive: true });
-  writeFileSync(join(c.profileDir, 'cordis.patch.yml'), '- insert:\n    - id: x\n    - name: "My Plugin"\n');
+  writeFileSync(join(c.profileDir, 'cordis.patch.yml'), '- insert:\n    - id: x\n      name: "My Plugin"\n');
   const cat = bundledCatalog();
   const p6 = cat.checks.find((x) => x.id === 'P6-patch-name-space');
   const r = runCatalogCheck(p6, c);
