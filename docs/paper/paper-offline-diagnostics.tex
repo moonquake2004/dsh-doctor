@@ -5,7 +5,7 @@
 ]{article}
 \usepackage{xcolor}
 \usepackage{amsmath,amssymb}
-\setcounter{secnumdepth}{5}
+\setcounter{secnumdepth}{-\maxdimen} % remove section numbering
 \usepackage{iftex}
 \ifPDFTeX
   \usepackage[T1]{fontenc}
@@ -76,7 +76,8 @@
 \newcommand{\WarningTok}[1]{\textcolor[rgb]{0.38,0.63,0.69}{\textbf{\textit{#1}}}}
 \usepackage{longtable,booktabs,array}
 \usepackage{tikz}
-\usetikzlibrary{positioning}
+\usetikzlibrary{positioning,calc}
+\usepackage{float}
 \usepackage{caption}
 \captionsetup[table]{skip=6pt}
 \newcounter{none} % for unnumbered tables
@@ -112,18 +113,6 @@ Check Lifecycle, and Field Experience with DeepSeek Harness}
 
 \begin{document}
 \maketitle
-
-{
-\setcounter{tocdepth}{3}
-\tableofcontents
-}
-\section{Offline Diagnostics for Plugin-Based Agent Harnesses: Design,
-Check Lifecycle, and Field Experience with DeepSeek
-Harness}\label{offline-diagnostics-for-plugin-based-agent-harnesses-design-check-lifecycle-and-field-experience-with-deepseek-harness}
-
-\textbf{Author:} moonquake2004
-
-\textbf{Version:} 1.0 (working draft, 2026-08-15)
 
 \begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
 
@@ -404,7 +393,7 @@ so the CLI, the settings panel, and the HTTP API
 repo-root entry is a thin wrapper for \texttt{node\ dsh-doctor.mjs}
 compatibility.
 
-\begin{figure}[t]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[node distance=1.1cm, box/.style={draw, rounded corners, align=center, font=\small, minimum width=8.5cm}]
 \node[box] (host) {dsh web host\\ settings panel $\leftrightarrow$ GET /dsh-doctor/run};
@@ -481,7 +470,7 @@ certification model of Section 5.
 \textbf{Table 1 --- Check inventory (30 checks, 18 mapped community
 reports, as of v0.2.7).}
 
-\begin{table}[t]
+\begin{table}[H]
 \centering
 \caption{Check inventory (30 checks, 18 mapped community reports, v0.2.7).}
 \label{tab:checks}
@@ -644,22 +633,23 @@ We also propose a check-entry schema:
 
 A working draft of this model is published as {[}33{]}.
 
-\begin{figure}[t]
+\begin{figure}[H]
 \centering
-\begin{tikzpicture}[node distance=1.7cm, box/.style={draw, rounded corners, align=center, font=\small}]
-\node[box] (report) {community\\ report};
-\node[box, right of=report] (cand) {candidate check\\ (probe + anchor + fixtures)};
-\node[box, right of=cand] (cert) {fixture\\ certification\\ (no FP / catches bad)};
-\node[box, right of=cert] (reg) {check registry\\ (data, TTL)};
-\node[box, right of=reg] (inst) {installed instances\\ ($\le$6h, no release)};
-\node[box, below of=report] (up) {harness upgrade};
+\begin{tikzpicture}[node distance=1.6cm, box/.style={draw, rounded corners, align=center, font=\small}]
+\node[box] (report) {community report};
+\node[box, right=1.7cm of report] (cand) {candidate check\\ (probe + anchor + fixtures)};
+\node[box, right=1.7cm of cand] (cert) {fixture\\ certification\\ (no FP / catches bad)};
+\node[box, right=1.7cm of cert] (reg) {check registry\\ (data, TTL)};
+\node[box, right=1.7cm of reg] (inst) {installed instances\\ ($\le$6h, no release)};
+\node[box, below=1.4cm of report] (up) {harness upgrade};
 \draw[->] (report) -- (cand);
 \draw[->] (cand) -- (cert);
 \draw[->] (cert) -- node[above] {pass} (reg);
 \draw[->] (reg) -- (inst);
-\draw[->] (inst.north) -- ++(0,0.7) node[above] {feedback} -| (report.north);
-\draw[->] (up) -- ++(1.4,0) |- node[midway, below] {anchor introspection} (inst.south);
-\draw[->] (up) -| (report.south);
+\draw[->] (inst.south) -- ++(0,-1.9) -| (report.south);
+\node[font=\small] at ($(inst.south)+(0,-1.35)$) {feedback};
+\draw[->] (up.east) -- ++(1.5,0) |- (inst.south);
+\node[font=\small, below=0.15cm of up] {anchor introspection};
 \end{tikzpicture}
 \caption{The check lifecycle: report $\rightarrow$ candidate $\rightarrow$ certify $\rightarrow$ distribute $\rightarrow$ verify (property 4), with introspection (property 2) guarding every upgrade.}
 \label{fig:lifecycle}
@@ -765,7 +755,7 @@ evidence that a shared contract can absorb independently built tools.
 \textbf{Table 2 --- Independent diagnostic tools converging on the
 \texttt{dsh-doctor/v1} contract.}
 
-\begin{table}[t]
+\begin{table}[H]
 \centering
 \caption{Independent diagnostic tools converging on the \texttt{dsh-doctor/v1} contract.}
 \label{tab:tools}
