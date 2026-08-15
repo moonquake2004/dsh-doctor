@@ -94,8 +94,12 @@ function report(section, id, ok, detail, fix, src) {
   results.push({ section, id, ok, detail, fix, src: src ?? 'builtin' });
 }
 
+/** 解析 --profile 参数：名字（如 web）→ $DSH_HOME/profiles/<name>；含路径分隔符/~/开头 → 直接当 profile 目录（契约 harness 传绝对路径）。 */
 function resolveProfile(name) {
-  if (!name || name.includes('/') || name.includes('\\')) throw new Error(`无效 profile 名: ${JSON.stringify(name)}`);
+  if (!name) throw new Error('无效 profile 名');
+  if (name.includes('/') || name.includes('\\') || name.startsWith('~') || name.startsWith('.')) {
+    return name.startsWith('~') ? join(homedir(), name.slice(1)) : name;
+  }
   return join(HOME, 'profiles', name);
 }
 
@@ -917,7 +921,23 @@ async function run() {
 
   // 退出码只计内置失败 + catalog 中 severity=error 的失败；warn 失败提示但不改退出码
   const bad = results.filter((r) => !r.ok && catalogSeverity.get(r.id) !== 'warn');
-  if (jsonOut) {
+  if (jsonOut && process.argv.includes('--envelope')) {
+    // v1 契约信封（dsh doctor 规格，zoahdev/doctor 对齐）：status 小写 + 退出码 0/1/2
+    const st = (r) => (!r.ok ? (catalogSeverity.get(r.id) === 'warn' ? 'warn' : 'fail') : 'pass');
+    const summary = { pass: 0, warn: 0, fail: 0 };
+    const checks = results.map((r) => { summary[st(r)]++; return { name: r.id, status: st(r), detail: r.detail }; });
+    const exitCode = summary.fail > 0 ? 2 : summary.warn > 0 ? 1 : 0;
+    console.log(JSON.stringify({
+      schema: 'dsh-doctor/v1',
+      generatedAt: new Date().toISOString(),
+      profile: profileArg,
+      exitCode,
+      summary,
+      ok: exitCode === 0,
+      checks,
+    }, null, 2));
+    process.exit(exitCode);
+  } else if (jsonOut) {
     console.log(JSON.stringify({ ok: bad.length === 0, checks: results, catalog: catalogMeta, update: updateInfo }, null, 2));
   } else {
     const sectionOrder = { env: 0, profile: 1, session: 2, catalog: 3 };
@@ -940,7 +960,7 @@ async function run() {
   process.exit(bad.length === 0 ? 0 : 1);
 }
 
-// 直接执行（CLI：根目录薄封装或 plugin 本体均可）；被 import（测试/宿主）时不自动运行
-if (process.argv[1] && basename(process.argv[1]) === 'dsh-doctor.mjs') run();
+// 直接执行（CLI：根目录薄封装、plugin 本体、npm bin 均可）；被 import（测试/宿主）时不自动运行
+if (process.argv[1] && /^dsh-doctor(\.mjs)?$/.test(basename(process.argv[1]))) run();
 
 export { loadCatalog, bundledCatalog, validCatalog, expandPath, globCount, checkCatalog };

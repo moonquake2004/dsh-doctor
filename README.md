@@ -19,9 +19,12 @@ node dsh-doctor.mjs --session <path>     # session checks (default: latest sessi
 node dsh-doctor.mjs --env                # env checks
 node dsh-doctor.mjs --json               # machine-readable output
 node dsh-doctor.mjs --no-catalog         # skip remote catalog fetch (bundled copy only)
+node dsh-doctor.mjs --json --envelope    # v1 doctor-contract envelope (lowercase status, exit 0/1/2)
 ```
 
-Exit codes: `0` = all pass · `1` = problems found (built-in checks + catalog `severity: error`) · warn-level catalog failures don't flip the exit code.
+Exit codes (default mode): `0` = all pass · `1` = problems found (built-in checks + catalog `severity: error`) · warn-level catalog failures don't flip the exit code.
+
+With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2` = any FAIL. The envelope follows the shared `dsh-doctor/v1` schema (`{ schema, generatedAt, profile, exitCode, summary, ok, checks:[{name,status,detail}] }`) so implementations are interchangeable for CI/marketplace use. Installed via npm, the CLI is also available as the `dsh-doctor` bin.
 
 ## Checks (20)
 

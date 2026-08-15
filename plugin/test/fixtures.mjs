@@ -344,3 +344,71 @@ test('P7：顶层映射+序列混排（#1724 真实机制）→ 失败', () => {
   assertIsolated(home, ['--profile', 'web'], 'P7');
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- v1 契约信封（--envelope） ---------- */
+
+function runEnvelope({ home, args = [], env = {} }) {
+  const r = spawnSync(process.execPath, [CLI, '--json', '--envelope', '--no-catalog', ...args], {
+    encoding: 'utf8', env: { ...process.env, DSH_HOME: home, ...env }, timeout: 60000,
+  });
+  assert.ok(r.stdout, `CLI 无输出: ${r.stderr?.slice(0, 300)}`);
+  const d = JSON.parse(r.stdout);
+  return { d, code: r.status };
+}
+
+test('envelope：干净 profile → exit 0 / status pass / schema v1', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', { manifest: { name: 'web' }, patch: '' });
+  const { d, code } = runEnvelope({ home, args: ['--profile', 'web'] });
+  assert.equal(d.schema, 'dsh-doctor/v1');
+  assert.equal(code, 0);
+  assert.equal(d.ok, true);
+  assert.equal(d.exitCode, 0);
+  assert.ok(d.summary.fail === 0);
+  assert.ok(d.checks.every((c) => ['pass', 'warn', 'fail'].includes(c.status)));
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('envelope：P2 冲突 fixture → exit 2 / status fail', () => {
+  const home = tempHome();
+  const bundlePatch = '- insert:\n    - id: dup-id\n      name: bundle-x\n';
+  profileFixture(home, 'web', {
+    manifest: { name: 'web', dsh: { profile: { bundles: ['fake-bundle'] } } },
+    patch: '- insert:\n    - id: dup-id\n      name: user-x\n',
+    nodeModules: {
+      'fake-bundle/package.json': JSON.stringify({ name: 'fake-bundle', dsh: { bundle: { patch: './patch.yml' } } }),
+      'fake-bundle/patch.yml': bundlePatch,
+      'user-x/package.json': JSON.stringify({ name: 'user-x', version: '1.0.0', main: 'index.js' }),
+      'user-x/index.js': 'module.exports = 1;\n',
+    },
+  });
+  const { d, code } = runEnvelope({ home, args: ['--profile', 'web'] });
+  assert.equal(code, 2, '有 FAIL 应 exit 2');
+  assert.equal(d.exitCode, 2);
+  assert.equal(d.ok, false);
+  const p2 = d.checks.find((c) => c.name === 'P2');
+  assert.equal(p2.status, 'fail');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('envelope：缺 .npmrc → E8 warn → exit 1', () => {
+  const home = tempHome();
+  // tempHome 默认带 .npmrc；删掉它让 E8（warn）失败
+  rmSync(join(home, 'profiles', 'web', '.npmrc'));
+  const { d, code } = runEnvelope({ home, args: ['--env'], env: { DSH_DOCTOR_PORT: '31987' } });
+  assert.equal(code, 1, '只有 warn 应 exit 1');
+  assert.equal(d.exitCode, 1);
+  const e8 = d.checks.find((c) => c.name === 'E8-npmrc-workspace-flag');
+  assert.equal(e8.status, 'warn');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('envelope：--profile 传目录路径（契约 harness 形态）→ 可用', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', { manifest: { name: 'web' }, patch: '' });
+  const dir = join(home, 'profiles', 'web');
+  const { d, code } = runEnvelope({ home, args: ['--profile', dir] });
+  assert.equal(code, 0);
+  assert.equal(d.profile, dir);
+  rmSync(home, { recursive: true, force: true });
+});

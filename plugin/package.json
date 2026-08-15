@@ -43,5 +43,8 @@
     "type": "git",
     "url": "git+https://github.com/moonquake2004/dsh-doctor.git"
   },
-  "homepage": "https://github.com/moonquake2004/dsh-doctor"
+  "homepage": "https://github.com/moonquake2004/dsh-doctor",
+  "bin": {
+    "dsh-doctor": "./dsh-doctor.mjs"
+  }
 }
