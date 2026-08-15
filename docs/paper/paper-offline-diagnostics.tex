@@ -75,6 +75,7 @@
 \newcommand{\VerbatimStringTok}[1]{\textcolor[rgb]{0.25,0.44,0.63}{#1}}
 \newcommand{\WarningTok}[1]{\textcolor[rgb]{0.38,0.63,0.69}{\textbf{\textit{#1}}}}
 \usepackage{longtable,booktabs,array}
+\usepackage{tikz}
 \usepackage{caption}
 \captionsetup[table]{skip=6pt}
 \newcounter{none} % for unnumbered tables
@@ -402,27 +403,21 @@ so the CLI, the settings panel, and the HTTP API
 repo-root entry is a thin wrapper for \texttt{node\ dsh-doctor.mjs}
 compatibility.
 
-\begin{verbatim}
-                     +-----------------------------------------------+
-                     |                dsh web host                    |
-                     |  settings panel  <--->  GET /dsh-doctor/run    |
-                     |                    (spawns CLI --json)          |
-                     +---------------------+-------------------------+
-                                           | spawn
-                     +---------------------v-------------------------+
-   dsh-doctor.mjs    |  check engine (zero-dep, offline)             |
-   (single file)     |  env (11) | profile (10) | session (8)        |
-                     |  + catalog rules (5, declarative probes)      |
-                     +-----+----------------------+------------------+
-                           | fetch (TTL 6h)       | emit
-                     +-----v------+        +------v------------------+
-                     | checks.json|        |  human text / legacy json|
-                     | (repo/raw) |        |  / dsh-doctor/v1 envelope|
-                     +------------+        +-------------------------+
-\end{verbatim}
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[node distance=1.1cm, box/.style={draw, rounded corners, align=center, font=\small, minimum width=8.5cm}]
+\node[box] (host) {dsh web host\\ settings panel $\leftrightarrow$ GET /dsh-doctor/run};
+\node[box, below=0.7cm of host] (engine) {check engine (zero-dep, offline)\\ env (11) $\cdot$ profile (10) $\cdot$ session (8) + catalog (5)};
+\node[box, below=0.7cm of engine, xshift=-3.4cm] (catalog) {checks.json\\ (repo/raw, TTL 6h)};
+\node[box, below=0.7cm of engine, xshift=3.4cm] (out) {human text / legacy JSON\\ / dsh-doctor/v1 envelope};
+\draw[->] (host) -- (engine);
+\draw[->] (engine) -- (catalog) node[midway, left] {fetch};
+\draw[->] (engine) -- (out) node[midway, right] {emit};
+\end{tikzpicture}
+\caption{dsh-doctor architecture: one check engine, three output modes, remote catalog with TTL cache.}
+\label{fig:arch}
+\end{figure}
 
-\textbf{Figure 1 --- dsh-doctor architecture: one check engine, three
-output modes, remote catalog with TTL cache.}
 
 The tool runs three groups of checks --- \texttt{env}, \texttt{profile},
 \texttt{session} --- plus a remote catalog layer, and emits either
@@ -485,47 +480,21 @@ certification model of Section 5.
 \textbf{Table 1 --- Check inventory (30 checks, 18 mapped community
 reports, as of v0.2.7).}
 
-{\def\LTcaptype{none} % do not increment counter
-\begin{longtable}[]{@{}
-  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}@{}}
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Group
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-IDs
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Count
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Coverage class
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Representative reports
-\end{minipage} \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-env (built-in) & E1--E6, E10 & 7 & PATH / files / native binary /
-storage / anchors / port & {[}\#1270{]} {[}\#71{]} {[}\#113{]}
-{[}\#1219{]} {[}\#1357{]} {[}\#1534{]} {[}\#1719{]} \\
-env (catalog) & E7--E9, E11 & 4 & declarative probes
-(path/JSON/text/writable) & {[}\#1270{]} {[}23{]} {[}\#1357{]}
-{[}34{]} \\
-profile & P1--P5, P7--P11 & 10 & composition: resolution / collisions /
-patch syntax / dual-instance / inject semantics / artifacts &
-{[}\#1404{]} {[}\#1486{]} {[}\#1697{]} {[}\#1724{]} {[}\#1904{]}
-{[}\#1947{]} {[}\#1965{]} \\
-session & S1, S2, S6--S11 & 8 & log integrity: continuity / replay /
-types / containers / drift / heap & {[}\#1363{]} {[}\#466{]}
-{[}\#1333{]} {[}\#1497{]} {[}\#1538{]} {[}\#1043{]} {[}\#1469{]}
-{[}\#1550{]} \\
-\textbf{Total} & & \textbf{29 built-in/catalog + 1 (E10) = 30} & & 18
-distinct reports \\
-\end{longtable}
-}
+\begin{table}[t]
+\centering
+\caption{Check inventory (30 checks, 18 mapped community reports, v0.2.7).}
+\label{tab:checks}
+\begin{tabular}{@{}llllp{6.2cm}@{}}
+\toprule
+Group & IDs & Count & Coverage class & Representative reports\\
+\midrule
+env (built-in) & E1--E6, E10 & 7 & PATH / files / native binary / storage / anchors / port & [\#1270] [\#71] [\#113] [\#1219] [\#1357] [\#1534] [\#1719]\\
+env (catalog) & E7--E9, E11 & 4 & declarative probes (path/JSON/text/writable) & [\#1270] [23] [\#1357] [34]\\
+profile & P1--P5, P7--P11 & 10 & composition: resolution / collisions / patch syntax / dual-instance / inject semantics / artifacts & [\#1404] [\#1486] [\#1697] [\#1724] [\#1904] [\#1947] [\#1965]\\
+session & S1, S2, S6--S11 & 8 & log integrity: continuity / replay / types / containers / drift / heap & [\#1363] [\#466] [\#1333] [\#1497] [\#1538] [\#1043] [\#1469] [\#1550]\\
+\bottomrule
+\end{tabular}
+\end{table}
 
 Coverage honesty: two symptom families (sandbox denials, approval
 policy) have \textbf{no} offline probe and are explicitly documented as
@@ -674,24 +643,27 @@ We also propose a check-entry schema:
 
 A working draft of this model is published as {[}33{]}.
 
-\begin{verbatim}
-  community report ──► candidate check (probe + anchor + fixture pair)
-         ▲                        │
-         │                   fixture certification  (good: no FP, bad: caught)
-         │                        │ pass
-         │                        ▼
-   harness upgrade         check registry (data, TTL cache)
-         │                        │
-         │ anchor introspection   ▼
-         └── tripwire fails ──► every installed instance (≤6h, no release)
-         loud, no silent rot            │
-                                        ▼
-                              feedback into next report
-\end{verbatim}
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[node distance=1.7cm, box/.style={draw, rounded corners, align=center, font=\small}]
+\node[box] (report) {community\\ report};
+\node[box, right of=report] (cand) {candidate check\\ (probe + anchor + fixtures)};
+\node[box, right of=cand] (cert) {fixture\\ certification\\ (no FP / catches bad)};
+\node[box, right of=cert] (reg) {check registry\\ (data, TTL)};
+\node[box, right of=reg] (inst) {installed instances\\ ($\le$6h, no release)};
+\node[box, below of=report] (up) {harness upgrade};
+\draw[->] (report) -- (cand);
+\draw[->] (cand) -- (cert);
+\draw[->] (cert) -- node[above] {pass} (reg);
+\draw[->] (reg) -- (inst);
+\draw[->] (inst.north) -- ++(0,0.7) node[above] {feedback} -| (report.north);
+\draw[->] (up) -- ++(1.4,0) |- node[midway, below] {anchor introspection} (inst.south);
+\draw[->] (up) -| (report.south);
+\end{tikzpicture}
+\caption{The check lifecycle: report $\rightarrow$ candidate $\rightarrow$ certify $\rightarrow$ distribute $\rightarrow$ verify (property 4), with introspection (property 2) guarding every upgrade.}
+\label{fig:lifecycle}
+\end{figure}
 
-\textbf{Figure 2 --- The check lifecycle: report → candidate → certify →
-distribute → verify (property 4), with introspection (property 2)
-guarding every upgrade.}
 
 \begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
 
@@ -792,40 +764,20 @@ evidence that a shared contract can absorb independently built tools.
 \textbf{Table 2 --- Independent diagnostic tools converging on the
 \texttt{dsh-doctor/v1} contract.}
 
-{\def\LTcaptype{none} % do not increment counter
-\begin{longtable}[]{@{}
-  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2000}}@{}}
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Tool
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Author side / user side
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Checks
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Envelope mode
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Status vocabulary
-\end{minipage} \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-dsh-doctor {[}26{]} & user side (env/profile/session) & 30 (25 built-in
-+ 5 catalog) & \texttt{-\/-json\ -\/-envelope} & lowercase
-pass/warn/fail \\
-dsh-plugin-doctor {[}21{]} & author side (pre-publish) + profile
-tripwire & manifest/patch/entry/files/build/pack/install/profile-shadow
-& v1.6.0 \texttt{-\/-profile\ -\/-json} & lowercase pass/warn/fail \\
-dsh-diagnose {[}22{]} & user side (symptom diagnosis,
-knowledge-anchored) & 17 \texttt{dsh-symptom.*} families &
-\texttt{-\/-doctor-json} & lowercase (adopted) \\
-\end{longtable}
-}
+\begin{table}[t]
+\centering
+\caption{Independent diagnostic tools converging on the \texttt{dsh-doctor/v1} contract.}
+\label{tab:tools}
+\begin{tabular}{@{}lllll@{}}
+\toprule
+Tool & Side & Checks & Envelope mode & Status vocabulary\\
+\midrule
+dsh-doctor [26] & user (env/profile/session) & 30 (25 built-in + 5 catalog) & \texttt{--json --envelope} & lowercase pass/warn/fail\\
+dsh-plugin-doctor [21] & author (pre-publish) + profile tripwire & manifest/patch/entry/files/build/pack/install/profile-shadow & v1.6.0 \texttt{--profile --json} & lowercase pass/warn/fail\\
+dsh-diagnose [22] & user (symptom, knowledge-anchored) & 17 \texttt{dsh-symptom.*} families & \texttt{--doctor-json} & lowercase (adopted)\\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
 
