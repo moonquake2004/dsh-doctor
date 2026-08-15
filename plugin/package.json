@@ -1,16 +1,17 @@
 {
   "name": "@moonquake2004/dsh-doctor",
-  "version": "0.2.7",
-  "description": "Offline diagnostic for DeepSeek Harness — 19 built-in checks + self-updating catalog (Layer A) + self-update check (Layer B); 'Doctor' panel in web UI settings.",
+  "version": "0.3.0",
+  "description": "Offline diagnostic for DeepSeek Harness — 25 built-in + 5 catalog checks across env/profile/session (Layer A checks-as-data), self-update (Layer B), and a semi-automatic LLM observer (Layer C, --observe); Doctor panel in web UI settings.",
   "main": "lib/index.js",
   "files": [
-    "lib",
-    "client",
-    "dsh-doctor.mjs",
-    "checks.json",
-    "cordis.patch.yml",
     "README.md",
-    "README.zh.md"
+    "README.zh.md",
+    "checks.json",
+    "client",
+    "cordis.patch.yml",
+    "dsh-doctor.mjs",
+    "lib",
+    "observer.mjs"
   ],
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
