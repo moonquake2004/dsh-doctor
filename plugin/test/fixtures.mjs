@@ -56,8 +56,8 @@ function profileFixture(home, name, { manifest, patch, nodeModules = {} }) {
 }
 
 /** 断言：指定检查必须失败，其余全部通过（无误报；absent = 通过，因为部分检查只在失败时报告） */
-function assertIsolated(home, args, mustFail) {
-  const { map } = runCli({ home, args });
+function assertIsolated(home, args, mustFail, env = {}) {
+  const { map } = runCli({ home, args, env });
   for (const [id, ok] of map) {
     if (id === mustFail) assert.equal(ok, false, `${id} 应该失败（fixture 目标）`);
     else assert.equal(ok, true, `${id} 不该失败（误报）: fixture=${mustFail}`);
@@ -242,7 +242,7 @@ test('S9：单帧 zstd 容器 → 失败（zstd 可用时）', { skip: !existsSy
 test('E2：.env 是目录 → 失败', () => {
   const home = tempHome();
   mkdirSync(join(home, '.env'));
-  assertIsolated(home, ['--env'], 'E2-env');
+  assertIsolated(home, ['--env'], 'E2-env', { DSH_DOCTOR_PORT: '31987' });
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -250,7 +250,7 @@ test('E5：storages JSON 损坏 → 失败', () => {
   const home = tempHome();
   mkdirSync(join(home, 'storages'), { recursive: true });
   writeFileSync(join(home, 'storages', 'workspace.json'), '{"a":1,}');
-  assertIsolated(home, ['--env'], 'E5');
+  assertIsolated(home, ['--env'], 'E5', { DSH_DOCTOR_PORT: '31987' });
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -267,5 +267,68 @@ test('目录 P6：patch name 含空格 → 失败', () => {
   const p6 = data.checks.find((c) => c.id === 'P6-patch-name-space');
   assert.ok(p6, 'P6 目录检查应存在');
   assert.equal(p6.ok, false, '含空格 name 应报 P6');
+  rmSync(home, { recursive: true, force: true });
+});
+
+/* ---------- E10：端口可用性 ---------- */
+
+test('E10-port：空闲端口 → PASS', () => {
+  const home = tempHome();
+  const { map } = runCli({ home, args: ['--env'], env: { DSH_DOCTOR_PORT: '31987' } });
+  assert.notEqual(map.get('E10-port-3080'), false, '空闲端口不应报失败');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('E10-port：被其他程序占用 → FAIL', async () => {
+  const home = tempHome();
+  // 起一个非 dsh 的 node server 占用端口
+  const { spawn } = await import('node:child_process');
+  const port = 31988;
+  const child = spawn(process.execPath, ['-e', `require('net').createServer().listen(${port}, '127.0.0.1')`], { stdio: 'ignore' });
+  // 等端口被监听
+  for (let i = 0; i < 30; i++) {
+    const r = spawnSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN']);
+    if (r.status === 0 && String(r.stdout).includes('LISTEN')) break;
+    await new Promise((res) => setTimeout(res, 200));
+  }
+  const { map } = runCli({ home, args: ['--env'], env: { DSH_DOCTOR_PORT: String(port) } });
+  assert.equal(map.get('E10-port-3080'), false, '非 dsh 程序占用端口应报失败');
+  child.kill();
+  rmSync(home, { recursive: true, force: true });
+});
+
+/* ---------- P7：patch YAML 结构 lint ---------- */
+
+test('P7：~ insert:（YAML null 字面量，#1724）→ 失败', () => {
+  const home = tempHome();
+  // name 需可解析（加 node_modules 条目），否则 P3 也会触发（破坏隔离性）
+  profileFixture(home, 'web', {
+    manifest: { name: 'web' },
+    patch: '# @linenxi-ctrl/dsh-vision\n~ insert:\n    - id: vision\n      name: x\n',
+    nodeModules: { 'x/package.json': JSON.stringify({ name: 'x', version: '1.0.0', main: 'index.js' }), 'x/index.js': 'module.exports = 1;\n' },
+  });
+  assertIsolated(home, ['--profile', 'web'], 'P7');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P7：tab 缩进 → 失败', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', { manifest: { name: 'web' }, patch: '- insert:\n\t- id: x\n' });
+  assertIsolated(home, ['--profile', 'web'], 'P7');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P7：- insert 缺冒号 → 失败', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', { manifest: { name: 'web' }, patch: '- insert\n    - id: x\n' });
+  assertIsolated(home, ['--profile', 'web'], 'P7');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P7：合法 patch → 通过', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', { manifest: { name: 'web' }, patch: '- insert:\n    - id: x\n      name: "@local/a"\n' });
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(map.get('P7'), false, '合法 patch 不应报 P7');
   rmSync(home, { recursive: true, force: true });
 });

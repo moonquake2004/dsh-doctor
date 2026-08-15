@@ -32,6 +32,7 @@ Exit codes: `0` = all pass · `1` = problems found (built-in checks + catalog `s
 | E4 | node-pty native binary present (`prebuilds/<platform>-<arch>/pty.node`) | [#1219](https://github.com/deepseek-ai/deepseek-harness/discussions/1219) |
 | E5 | storage JSON files valid (strict UTF-8 + parse) | [#1357](https://github.com/deepseek-ai/deepseek-harness/discussions/1357) |
 | E6 | anchor tripwire: our S6/S7/S10 contracts still in installed `dsh-session` | [anti-rot idea](https://github.com/deepseek-ai/deepseek-harness/discussions/1534) |
+| E10 | web port 3080 availability before launch (dsh web itself = OK; other process = FAIL; `DSH_DOCTOR_PORT` override) | [#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719) |
 
 ### profile
 | ID | Checks | Discussion |
@@ -39,7 +40,8 @@ Exit codes: `0` = all pass · `1` = problems found (built-in checks + catalog `s
 | P2 | bundle-layer vs user-patch insert id collisions (boot crash) | [#1404](https://github.com/deepseek-ai/deepseek-harness/discussions/1404) |
 | P3 | user-patch insert `name:` resolvable from the profile anchor | [#1197](https://github.com/deepseek-ai/deepseek-harness/discussions/1197), [#880](https://github.com/deepseek-ai/deepseek-harness/discussions/880) |
 | P4 | `file:` dependencies intact | [#1197](https://github.com/deepseek-ai/deepseek-harness/discussions/1197) |
-| P5 | no top-level `@deepseek-ai/*` duplication (dual module instances) | [#1486](https://github.com/deepseek-ai/deepseek-harness/discussions/1486) |
+| P5 | no top-level `@deepseek-ai/*` duplication (dual module instances) | [#1486](https://github.com/deepseek-ai/deepseek-harness/discussions/1486), [#1697](https://github.com/deepseek-ai/deepseek-harness/discussions/1697) |
+| P7 | `cordis.patch.yml` structural lint (`~ insert:` null-literal typo, tab indentation, missing colon → UI won't boot) | [#1724](https://github.com/deepseek-ai/deepseek-harness/discussions/1724) |
 
 ### session
 | ID | Checks | Discussion |

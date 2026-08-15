@@ -9,6 +9,7 @@
  *     P3  用户 patch 的 insert name 从 profile 锚点不可解析（#1197/#880）
  *     P4  file: 依赖指向不存在的目录（#1197：悬空 file: 链接）
  *     P5  profile 顶层 @deepseek-ai/* 与框架重复（#1486：双模块实例 → Symbol 不匹配）
+ *     P7  cordis.patch.yml 结构 lint（#1724：~ insert: 是 YAML null → parsePatchList 崩溃 → UI 打不开；tab 缩进/缺冒号同族）
  *   [session]
  *     S1  孤儿 tool_call（#1363：assistant tool_calls 无对应 tool 结果 → INVALID_REQUEST）
  *     S2  未闭合 turn（#466/#1265：turn/start 无 turn/end → 会话永久"运行中"）
@@ -25,6 +26,7 @@
  *     E4  node-pty 原生模块完整性（#1219：pty.node 缺失 → dsh web 启动失败）
  *     E5  存储 JSON 文件合法性（#1357：并发写 workspace.json 乱码 → 工作区列表消失）
  *     E6  锚点元检查（tripwire：S6 的 expandRow seq0+k、S7 的 session/end-seed、S10 的 sourceEventSeqs 是否仍在安装的 dsh-session 中）
+ *     E10 3080 Web 端口可用性（#1719：启动 dsh web 前检查；dsh web 自身占用=正常，其他程序占用=FAIL；DSH_DOCTOR_PORT 可覆盖）
  *     （P6 Windows 空格参数 lint，#1420 —— 待实现）
  *
  * 用法：
@@ -44,6 +46,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import net from 'node:net';
 import { basename, delimiter as PATH_DELIM, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -185,6 +188,55 @@ function checkEnv() {
   }
 }
 
+/* ================= E10：Web 端口可用性（#1719 提案；启动 dsh web 前检查，避免 address in use） =================
+ * 本地 socket bind 探测（离线兼容）：端口空闲 → PASS；被 dsh web 实例占用 → PASS+提示
+ * （宿主自身或另一实例，正常）；被其他程序占用 → FAIL。
+ * 默认 3080，可用 DSH_DOCTOR_PORT 覆盖（测试/换端口）。
+ */
+function portOccupierInfo(port) {
+  try {
+    if (process.platform === 'win32') {
+      const r = execFileSync('netstat', ['-ano'], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+      const m = new RegExp(`TCP\\s+[^\\s]+:${port}\\s+.*?LISTENING\\s+(\\d+)`).exec(r);
+      if (!m) return null;
+      return { pid: m[1], cmd: '', dsh: false };
+    }
+    const r = execFileSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN'], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
+    const lines = r.trim().split('\n').slice(1).filter(Boolean);
+    if (!lines.length) return null;
+    const parts = lines[0].trim().split(/\s+/);
+    const cmd = parts[0] || '';
+    const pid = parts[1] || '';
+    let dsh = /dsh|deepseek/.test(cmd);
+    if (!dsh && pid) {
+      try { dsh = /dsh web|deepseek-ai/.test(execFileSync('ps', ['-p', pid, '-o', 'command='], { encoding: 'utf8' })); } catch { /* 无法识别则按非 dsh 处理 */ }
+    }
+    return { pid, cmd, dsh };
+  } catch { return null; }
+}
+
+function checkPort3080() {
+  return new Promise((resolve) => {
+    if (!wants('env')) { resolve(); return; }
+    const port = Number(process.env.DSH_DOCTOR_PORT || 3080);
+    const srv = net.createServer();
+    srv.unref();
+    let done = false;
+    const finish = (fn) => (...args) => { if (done) return; done = true; try { fn(...args); } catch { } resolve(); };
+    srv.on('error', finish((e) => {
+      if (e.code === 'EADDRINUSE') {
+        const info = portOccupierInfo(port);
+        if (info && info.dsh) report('env', 'E10-port-3080', true, `端口 ${port} 被 dsh web 实例占用（PID ${info.pid}）——宿主自身或另一实例，正常`, undefined);
+        else if (info) report('env', 'E10-port-3080', false, `端口 ${port} 被其他程序占用（PID ${info.pid}: ${info.cmd}），dsh web 启动会 address in use（#1719）`, `关掉占用进程，或让 dsh web 用别的端口`);
+        else report('env', 'E10-port-3080', true, `⚠ 端口 ${port} 被占用但无法识别占用者`, undefined);
+      } else {
+        report('env', 'E10-port-3080', false, `端口 ${port} 探测异常: ${e.message.slice(0, 60)}`, undefined);
+      }
+    }));
+    srv.listen(port, '127.0.0.1', finish(() => { srv.close(); report('env', 'E10-port-3080', true, `端口 ${port} 空闲`, undefined); }));
+  });
+}
+
 /* ================= profile ================= */
 function checkProfile(name) {
   if (!wants('profile')) return;
@@ -316,6 +368,21 @@ function checkProfile(name) {
   }
   if (topDup.length) report('profile', 'P5', false, `profile 顶层存在 @deepseek-ai/* 重复（#1486/#1697 双实例风险，hoisted 布局会让同版本工具包互相遮蔽导致 Symbol 不匹配）: ${topDup.join(', ')}`, '清理 profile 顶层 node_modules/@deepseek-ai 中与宿主同名的独立副本（真实目录）；指向宿主的 link: symlink 是安全的（#1697 workaround）');
   else report('profile', 'P5', true, '无顶层 @deepseek-ai 重复', undefined);
+
+  // P7 patch YAML 结构 lint（#1724：~ insert: 是 YAML null 字面量 → parsePatchList 崩溃 → UI 打不开）
+  // 离线、零依赖的保守检查：tab 缩进（YAML 硬错误）+ ~ / null 等非法 insert 标记 + insert 缺冒号
+  const yamlProblems = [];
+  const patchText = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : '';
+  if (patchText) {
+    patchText.split('\n').forEach((line, i) => {
+      if (!line.trim()) return;
+      if (line.includes('\t')) yamlProblems.push(`第 ${i + 1} 行含制表符缩进（YAML 禁止 tab）`);
+      if (/^\s*(~|null|Null|NULL)\s*insert\s*:/.test(line)) yamlProblems.push(`第 ${i + 1} 行 "${line.trim()}" —— ~ 是 YAML null 字面量，应为 "- insert:"（#1724）`);
+      else if (/^\s*-\s*insert(\s|$)/.test(line) && !/^\s*-\s*insert\s*:/.test(line)) yamlProblems.push(`第 ${i + 1} 行 "${line.trim()}" —— "- insert" 缺冒号`);
+    });
+  }
+  if (yamlProblems.length) report('profile', 'P7', false, `cordis.patch.yml 结构错误（boot 会崩，UI 打不开 #1724）: ${yamlProblems.join('; ')}`, '修正对应行：标准形式是 "- insert:"，~ 是 YAML null 字面量；缩进必须用空格');
+  else report('profile', 'P7', true, 'cordis.patch.yml 结构正常（无 tab 缩进 / 无 ~ insert 类错误）', undefined);
 }
 
 /* ================= session ================= */
@@ -808,6 +875,7 @@ const sessionArg = (() => { const i = process.argv.indexOf('--session'); return 
 
 async function run() {
   try { checkEnv(); } catch (e) { report('env', 'E0', false, `env 检查异常: ${e.message.slice(0, 80)}`); }
+  try { await checkPort3080(); } catch (e) { report('env', 'E10-port-3080', false, `端口检查异常: ${e.message.slice(0, 60)}`); }
   try { checkProfile(profileArg); } catch (e) { report('profile', 'P0', false, `profile 检查异常: ${e.message.slice(0, 100)}`); }
   try { checkSession(sessionArg); } catch (e) { report('session', 'S0', false, `session 检查异常: ${e.message.slice(0, 100)}`); }
   try { scanAllSessions(); } catch (e) { report('session', 'S11', false, `全会话扫描异常: ${e.message.slice(0, 100)}`); }
