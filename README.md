@@ -60,6 +60,11 @@ Exit codes: `0` = all pass · `1` = problems found (built-in checks + catalog `s
 - In-flight tool calls in the current active turn are reported as warnings, not errors, so scanning a live session never false-positives.
 - Sibling implementation with the same scope: [boyin111-1/dsh-doctor](https://github.com/boyin111-1/dsh-doctor) — the two tools cross-verified against the same broken fixtures.
 
+## Related community tools
+
+- [zoahdev/dsh-plugin-doctor](https://github.com/zoahdev/dsh-plugin-doctor) — pre-publish plugin bundle health checks (manifest/patch/entry/files/build/pack+fresh-profile install) plus a `profile-shadow` tripwire for host-shadowing (author/CI side). Complementary to this tool's user-side profile/session/env diagnostics; its `profile-shadow` and our P5 flag the same host-shadowing precondition from two sides.
+- [boyin111-1/dsh-doctor](https://github.com/boyin111-1/dsh-doctor) — sibling offline diagnostic, cross-verified against the same broken fixtures.
+
 
 
 ## Self-update check (v0.2.1, Layer B)
