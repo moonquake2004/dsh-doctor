@@ -42,7 +42,7 @@
  * 退出码：0 = 全部通过；1 = 发现可修复问题（内置 + catalog severity=error）；warn 级失败不改退出码。
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, delimiter as PATH_DELIM, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -294,16 +294,27 @@ function checkProfile(name) {
   const dangling = Object.entries(deps).filter(([, spec]) => spec.startsWith('file:')).filter(([, spec]) => !existsSync(resolveFileSpec(spec)));
   if (dangling.length) report('profile', 'P4', false, `悬空 file: 依赖（#1197）: ${dangling.map(([n, s]) => `${n} (${s})`).join(', ')}`, '恢复目录或移除依赖');
   else report('profile', 'P4', true, 'file: 依赖完整', undefined);
-  // P5 顶层 @deepseek-ai/* 重复
+  // P5 顶层 @deepseek-ai/* 重复（#1486/#1697：hoisted 布局下同版本双实例 → 模块级 Symbol 不匹配）
+  // symlink 指向宿主同一份（#1697 的 link: workaround / pnpm file: 正常形态）= 单实例，放行
   const topDup = [];
   const topDir = join(dir, 'node_modules', '@deepseek-ai');
+  const hostScope = installAnchor ? join(installAnchor, '@deepseek-ai') : null;
   if (existsSync(topDir)) {
     for (const p of readdirSync(topDir)) {
       const fp = join(topDir, p);
+      let st;
+      try { st = lstatSync(fp); } catch { continue; }
+      if (st.isSymbolicLink() && hostScope) {
+        try {
+          const real = realpathSync(fp);
+          const hostPkg = join(hostScope, p);
+          if (existsSync(hostPkg) && realpathSync(hostPkg) === real) continue; // 宿主同一份
+        } catch { /* 无法解析 → 按独立副本处理 */ }
+      }
       if (existsSync(join(fp, 'package.json'))) topDup.push(p);
     }
   }
-  if (topDup.length) report('profile', 'P5', false, `profile 顶层存在 @deepseek-ai/* 重复（#1486 双实例风险）: ${topDup.join(', ')}`, '清理 profile node_modules 中与框架版本相同的 @deepseek-ai 包（pnpm install 后会重建，需在 doctor 中提醒）');
+  if (topDup.length) report('profile', 'P5', false, `profile 顶层存在 @deepseek-ai/* 重复（#1486/#1697 双实例风险，hoisted 布局会让同版本工具包互相遮蔽导致 Symbol 不匹配）: ${topDup.join(', ')}`, '清理 profile 顶层 node_modules/@deepseek-ai 中与宿主同名的独立副本（真实目录）；指向宿主的 link: symlink 是安全的（#1697 workaround）');
   else report('profile', 'P5', true, '无顶层 @deepseek-ai 重复', undefined);
 }
 

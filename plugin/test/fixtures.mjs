@@ -14,7 +14,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -123,6 +123,24 @@ test('P5：顶层 @deepseek-ai/* 重复 → 失败', () => {
     nodeModules: { '@deepseek-ai/dsh-base/package.json': JSON.stringify({ name: '@deepseek-ai/dsh-base', version: '1.0.0' }) },
   });
   assertIsolated(home, ['--profile', 'web'], 'P5');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P5：symlink 指向宿主同一份（#1697 link: workaround）→ 不误报', { skip: !process.env.PATH.split(':').some((p) => p.endsWith('node_modules/.bin') && existsSync(join(p, 'dsh'))) }, () => {
+  // 找宿主 @deepseek-ai scope 里的一个 dsh-* 包，用 symlink 模拟 #1697 的 link: workaround
+  const installNM = process.env.PATH.split(':').find((p) => p.endsWith('node_modules/.bin') && existsSync(join(p, 'dsh')));
+  const hostScope = join(installNM, '@deepseek-ai');
+  const hostPkg = existsSync(hostScope)
+    ? readdirSync(hostScope).find((n) => n.startsWith('dsh-') && existsSync(join(hostScope, n, 'package.json')))
+    : null;
+  if (!hostPkg) return; // 无宿主可参照时跳过
+  const home = tempHome();
+  const dir = join(home, 'profiles', 'web');
+  mkdirSync(join(dir, 'node_modules', '@deepseek-ai'), { recursive: true });
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'web' }));
+  symlinkSync(join(hostScope, hostPkg), join(dir, 'node_modules', '@deepseek-ai', hostPkg), 'dir');
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(map.get('P5'), false, `指向宿主的 symlink（${hostPkg}）不应报 P5`);
   rmSync(home, { recursive: true, force: true });
 });
 
