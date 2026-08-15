@@ -412,3 +412,62 @@ test('envelope：--profile 传目录路径（契约 harness 形态）→ 可用'
   assert.equal(d.profile, dir);
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- P8/P9：bundle 产物扫描（#1904②⑤） ---------- */
+
+function bundleFixture(home, name, bundleName, { mainJs, patchId = 'x1', patchName = 'x' }) {
+  profileFixture(home, name, {
+    manifest: { name, dsh: { profile: { bundles: [bundleName] } } },
+    patch: '',
+    nodeModules: {
+      [`${bundleName}/package.json`]: JSON.stringify({ name: bundleName, version: '1.0.0', main: 'lib/index.js', dsh: { bundle: { patch: './patch.yml' } } }),
+      [`${bundleName}/patch.yml`]: `- insert:\n    - id: ${patchId}\n      name: ${patchName}\n`,
+      [`${bundleName}/lib/index.js`]: mainJs,
+    },
+  });
+}
+
+test('P8：两个 bundle 抢注同一 adapter provider → 失败', () => {
+  const home = tempHome();
+  const m = { name: 'web', dsh: { profile: { bundles: ['fake-a', 'fake-b'] } } };
+  profileFixture(home, 'web', {
+    manifest: m, patch: '',
+    nodeModules: {
+      'fake-a/package.json': JSON.stringify({ name: 'fake-a', version: '1.0.0', main: 'lib/index.js', dsh: { bundle: { patch: './patch.yml' } } }),
+      'fake-a/patch.yml': '- insert:\n    - id: a1\n      name: a\n',
+      'fake-a/lib/index.js': "export const inject = ['tools'];\nexport function apply(ctx) { ctx.llm.registerAdapter(['dup-provider'], adapter); }\n",
+      'fake-b/package.json': JSON.stringify({ name: 'fake-b', version: '1.0.0', main: 'lib/index.js', dsh: { bundle: { patch: './patch.yml' } } }),
+      'fake-b/patch.yml': '- insert:\n    - id: b1\n      name: b\n',
+      'fake-b/lib/index.js': "registerAdapter(['dup-provider'])\n",
+    },
+  });
+  assertIsolated(home, ['--profile', 'web'], 'P8');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P8：不同 provider → 通过', () => {
+  const home = tempHome();
+  bundleFixture(home, 'web', 'fake-a', { mainJs: "ctx.llm.registerAdapter(['alpha'], a);\n", patchId: 'a1' });
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(map.get('P8'), false, '不同 provider 不应报 P8');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P9：用 ctx.settings 但 inject 未声明 settings → 失败', () => {
+  const home = tempHome();
+  bundleFixture(home, 'web', 'fake-c', {
+    mainJs: "export const inject = ['tools'];\nexport function apply(ctx) { ctx.get('settings').register('ns', v); }\n",
+  });
+  assertIsolated(home, ['--profile', 'web'], 'P9');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P9：inject 含 settings → 通过', () => {
+  const home = tempHome();
+  bundleFixture(home, 'web', 'fake-d', {
+    mainJs: "export const inject = ['tools', 'settings'];\nexport function apply(ctx) { ctx.settings.register('ns', v); }\n",
+  });
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(map.get('P9'), false, '声明了 settings inject 不应报 P9');
+  rmSync(home, { recursive: true, force: true });
+});

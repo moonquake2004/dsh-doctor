@@ -10,6 +10,8 @@
  *     P4  file: 依赖指向不存在的目录（#1197：悬空 file: 链接）
  *     P5  profile 顶层 @deepseek-ai/* 与框架重复（#1486：双模块实例 → Symbol 不匹配）
  *     P7  cordis.patch.yml 结构 lint（#1724：~ insert: 是 YAML null → parsePatchList 崩溃 → UI 打不开；tab 缩进/缺冒号同族）
+ *     P8  adapter provider 注册冲突（#1904②：两 bundle 抢注同一 provider → boot 时 DUPLICATE_ADAPTER 崩溃）
+ *     P9  ctx.settings 未声明 inject: ['settings']（#1904⑤：先于 settings 就绪激活 → namespace not registered）
  *   [session]
  *     S1  孤儿 tool_call（#1363：assistant tool_calls 无对应 tool 结果 → INVALID_REQUEST）
  *     S2  未闭合 turn（#466/#1265：turn/start 无 turn/end → 会话永久"运行中"）
@@ -398,6 +400,81 @@ function checkProfile(name) {
   }
   if (yamlProblems.length) report('profile', 'P7', false, `cordis.patch.yml 结构错误（boot 会崩，UI 打不开 #1724）: ${yamlProblems.join('; ')}`, 'patch 必须是顶层纯列表（只有 - insert: / - id: 条目）：删掉顶层 key: value 行；~ 是 YAML null；缩进用空格不用 tab');
   else report('profile', 'P7', true, 'cordis.patch.yml 结构正常（无 tab / 无 ~ insert / 无映射-序列混排）', undefined);
+
+  // P8/P9 需要扫描 bundle 构建产物：收集目录下有限深度的 .js 文件（lib/dist/根 + main 入口，跳过 node_modules）
+  const bundleDirs = new Map(); // bundle 名 → 目录（可解析的）
+  for (const b of bundles) {
+    const d = findPkg(b);
+    if (d) bundleDirs.set(b, d);
+  }
+  const collectJsFiles = (root, maxDepth = 3) => {
+    const out = [];
+    const walk = (dir, depth) => {
+      if (depth > maxDepth) return;
+      let entries;
+      try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+        // client/web 是浏览器端产物，不在宿主进程运行（避免 ctx.settings 误报）
+        if (e.isDirectory() && (e.name === 'client' || e.name === 'web')) continue;
+        const fp = join(dir, e.name);
+        if (e.isDirectory()) walk(fp, depth + 1);
+        else if (e.name.endsWith('.js') && e.name !== 'cordis.patch.yml') out.push(fp);
+      }
+    };
+    walk(root, 0);
+    // 主入口（main 指向的 .js）单独兜底
+    try {
+      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+      if (typeof pkg.main === 'string' && pkg.main.endsWith('.js')) {
+        const mp = join(root, pkg.main);
+        if (existsSync(mp) && !out.includes(mp)) out.push(mp);
+      }
+    } catch { /* 无 manifest */ }
+    return out;
+  };
+  const readJs = (fp) => { try { return readFileSync(fp, 'utf8'); } catch { return ''; } };
+
+  // P8：adapter provider 注册冲突（#1904②：两个 bundle 抢注同一 provider → boot 时 DUPLICATE_ADAPTER 崩溃）
+  const providerRegs = new Map(); // provider → Set(bundle)
+  for (const [b, d] of bundleDirs) {
+    for (const f of collectJsFiles(d)) {
+      const src = readJs(f);
+      for (const m of src.matchAll(/registerAdapter\s*\(\s*\[([^\]]*)\]/g)) {
+        for (const pm of m[1].matchAll(/['"]([^'"]+)['"]/g)) {
+          if (!providerRegs.has(pm[1])) providerRegs.set(pm[1], new Set());
+          providerRegs.get(pm[1]).add(b);
+        }
+      }
+    }
+  }
+  const adapterConflicts = [...providerRegs].filter(([, v]) => v.size > 1);
+  if (adapterConflicts.length) {
+    report('profile', 'P8', false, `adapter provider 注册冲突（#1904②：boot 时 DUPLICATE_ADAPTER 崩溃）: ${adapterConflicts.map(([p, v]) => `${p}（${[...v].join(' ↔ ')}}）`).join('; ')}`, '冲突 provider 只能注册一次：让第三方路由插件用 registerConfigurableProviders 或只注册新路由，移除抢注一方');
+  } else {
+    report('profile', 'P8', true, '无 adapter provider 注册冲突', undefined);
+  }
+
+  // P9：ctx.settings/ctx.get('settings') 未声明 settings 依赖（#1904⑤：先于 settings 就绪激活 → namespace not registered）
+  // 注意边界：sctx.settings 不算（sctx 是别的变量）；ctx.inject(["settings"], cb) 运行时声明算满足
+  const injectIssues = [];
+  for (const [b, d] of bundleDirs) {
+    const files = collectJsFiles(d);
+    const all = files.map(readJs).join('\n');
+    const usesSettings = /(?<![A-Za-z0-9_$])ctx\.(?:get\(\s*['"]settings['"]\s*\)|settings\b)/.test(all);
+    if (!usesSettings) continue;
+    const declared = [];
+    const modInject = all.match(/inject\s*=\s*\[([^\]]*)\]/s);
+    if (modInject) declared.push(...[...modInject[1].matchAll(/['"]([^'"]+)['"]/g)].map((x) => x[1]));
+    for (const m of all.matchAll(/ctx\.inject\s*\(\s*\[([^\]]*)\]/g)) {
+      declared.push(...[...m[1].matchAll(/['"]([^'"]+)['"]/g)].map((x) => x[1]));
+    }
+    if (!declared.includes('settings')) {
+      injectIssues.push(`${b}（用 ctx.settings 但 settings 依赖未声明${modInject ? `，模块 inject: [${declared.filter((v, i) => declared.indexOf(v) === i).join(', ')}]` : '，未找到任何 inject 声明'}）`);
+    }
+  }
+  if (injectIssues.length) report('profile', 'P9', false, `插件用 ctx.settings 但未声明 settings 依赖（#1904⑤：激活时 settings 可能未就绪 → namespace not registered）: ${injectIssues.join('; ')}`, '在插件代码加 export const inject = ["settings"]（或对可选服务做 undefined 处理）');
+  else report('profile', 'P9', true, 'bundle 的 ctx.settings 用法均声明了 settings 依赖（模块 inject 或 ctx.inject）', undefined);
 }
 
 /* ================= session ================= */
