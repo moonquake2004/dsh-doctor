@@ -471,3 +471,14 @@ test('P9：inject 含 settings → 通过', () => {
   assert.notEqual(map.get('P9'), false, '声明了 settings inject 不应报 P9');
   rmSync(home, { recursive: true, force: true });
 });
+
+test('P9：内部模块 inject 在前 + 插件自身 inject 含 settings → 通过（回归：勿抓首个数组）', () => {
+  const home = tempHome();
+  // 模拟 bundle 产物：前面是内部模块的 inject（无 settings），后面才是插件自身的 inject（含 settings）
+  bundleFixture(home, 'web', 'fake-e', {
+    mainJs: "const inject = ['inputTriggers', 'sessions'];\n// ...内部模块...\nexport const inject = ['typert', 'settings', 'agents'];\nexport function apply(ctx) { ctx.settings.register('ns', v); }\n",
+  });
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(map.get('P9'), false, '插件自身 inject 含 settings 不应报 P9');
+  rmSync(home, { recursive: true, force: true });
+});

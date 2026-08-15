@@ -464,13 +464,16 @@ function checkProfile(name) {
     const usesSettings = /(?<![A-Za-z0-9_$])ctx\.(?:get\(\s*['"]settings['"]\s*\)|settings\b)/.test(all);
     if (!usesSettings) continue;
     const declared = [];
-    const modInject = all.match(/inject\s*=\s*\[([^\]]*)\]/s);
-    if (modInject) declared.push(...[...modInject[1].matchAll(/['"]([^'"]+)['"]/g)].map((x) => x[1]));
+    // 收集全部 inject 声明（bundle 里可能混有内部模块的 inject；任一含 settings 即满足）
+    for (const m of all.matchAll(/inject\s*=\s*\[([^\]]*)\]/gs)) {
+      declared.push(...[...m[1].matchAll(/['"]([^'"]+)['"]/g)].map((x) => x[1]));
+    }
     for (const m of all.matchAll(/ctx\.inject\s*\(\s*\[([^\]]*)\]/g)) {
       declared.push(...[...m[1].matchAll(/['"]([^'"]+)['"]/g)].map((x) => x[1]));
     }
-    if (!declared.includes('settings')) {
-      injectIssues.push(`${b}（用 ctx.settings 但 settings 依赖未声明${modInject ? `，模块 inject: [${declared.filter((v, i) => declared.indexOf(v) === i).join(', ')}]` : '，未找到任何 inject 声明'}）`);
+    const uniq = declared.filter((v, i) => declared.indexOf(v) === i);
+    if (!uniq.includes('settings')) {
+      injectIssues.push(`${b}（用 ctx.settings 但 settings 依赖未声明${uniq.length ? `，全部 inject: [${uniq.join(', ')}]` : '，未找到任何 inject 声明'}）`);
     }
   }
   if (injectIssues.length) report('profile', 'P9', false, `插件用 ctx.settings 但未声明 settings 依赖（#1904⑤：激活时 settings 可能未就绪 → namespace not registered）: ${injectIssues.join('; ')}`, '在插件代码加 export const inject = ["settings"]（或对可选服务做 undefined 处理）');
