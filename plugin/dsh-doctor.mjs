@@ -12,6 +12,7 @@
  *     P7  cordis.patch.yml 结构 lint（#1724：~ insert: 是 YAML null → parsePatchList 崩溃 → UI 打不开；tab 缩进/缺冒号同族）
  *     P8  adapter provider 注册冲突（#1904②：两 bundle 抢注同一 provider → boot 时 DUPLICATE_ADAPTER 崩溃）
  *     P9  ctx.settings 未声明 inject: ['settings']（#1904⑤：先于 settings 就绪激活 → namespace not registered）
+ *     P10 inject 引用客户端专属服务（#1947：@deepseek-ai/dsh-client-* 服务端永不提供 → Fiber 永久 PENDING → web boot 失败）
  *   [session]
  *     S1  孤儿 tool_call（#1363：assistant tool_calls 无对应 tool 结果 → INVALID_REQUEST）
  *     S2  未闭合 turn（#466/#1265：turn/start 无 turn/end → 会话永久"运行中"）
@@ -455,6 +456,18 @@ function checkProfile(name) {
     report('profile', 'P8', true, '无 adapter provider 注册冲突', undefined);
   }
 
+  // 提取 bundle 构建产物里声明的全部 inject 依赖名（模块 inject + ctx.inject；bundle 可能混入内部模块的 inject）
+  const bundleInjectDecls = (all) => {
+    const declared = [];
+    for (const m of all.matchAll(/inject\s*=\s*\[([^\]]*)\]/gs)) {
+      declared.push(...[...m[1].matchAll(/['"]([^'"]+)['"]/g)].map((x) => x[1]));
+    }
+    for (const m of all.matchAll(/ctx\.inject\s*\(\s*\[([^\]]*)\]/g)) {
+      declared.push(...[...m[1].matchAll(/['"]([^'"]+)['"]/g)].map((x) => x[1]));
+    }
+    return declared.filter((v, i) => declared.indexOf(v) === i);
+  };
+
   // P9：ctx.settings/ctx.get('settings') 未声明 settings 依赖（#1904⑤：先于 settings 就绪激活 → namespace not registered）
   // 注意边界：sctx.settings 不算（sctx 是别的变量）；ctx.inject(["settings"], cb) 运行时声明算满足
   const injectIssues = [];
@@ -463,21 +476,23 @@ function checkProfile(name) {
     const all = files.map(readJs).join('\n');
     const usesSettings = /(?<![A-Za-z0-9_$])ctx\.(?:get\(\s*['"]settings['"]\s*\)|settings\b)/.test(all);
     if (!usesSettings) continue;
-    const declared = [];
-    // 收集全部 inject 声明（bundle 里可能混有内部模块的 inject；任一含 settings 即满足）
-    for (const m of all.matchAll(/inject\s*=\s*\[([^\]]*)\]/gs)) {
-      declared.push(...[...m[1].matchAll(/['"]([^'"]+)['"]/g)].map((x) => x[1]));
-    }
-    for (const m of all.matchAll(/ctx\.inject\s*\(\s*\[([^\]]*)\]/g)) {
-      declared.push(...[...m[1].matchAll(/['"]([^'"]+)['"]/g)].map((x) => x[1]));
-    }
-    const uniq = declared.filter((v, i) => declared.indexOf(v) === i);
+    const uniq = bundleInjectDecls(all);
     if (!uniq.includes('settings')) {
       injectIssues.push(`${b}（用 ctx.settings 但 settings 依赖未声明${uniq.length ? `，全部 inject: [${uniq.join(', ')}]` : '，未找到任何 inject 声明'}）`);
     }
   }
   if (injectIssues.length) report('profile', 'P9', false, `插件用 ctx.settings 但未声明 settings 依赖（#1904⑤：激活时 settings 可能未就绪 → namespace not registered）: ${injectIssues.join('; ')}`, '在插件代码加 export const inject = ["settings"]（或对可选服务做 undefined 处理）');
   else report('profile', 'P9', true, 'bundle 的 ctx.settings 用法均声明了 settings 依赖（模块 inject 或 ctx.inject）', undefined);
+
+  // P10：inject 引用客户端专属服务（@deepseek-ai/dsh-client-*）→ 服务端永不提供 → Fiber 永久 PENDING → web boot 失败（#1947）
+  const clientInjectIssues = [];
+  for (const [b, d] of bundleDirs) {
+    const all = collectJsFiles(d).map(readJs).join('\n');
+    const clientDeps = bundleInjectDecls(all).filter((n) => /^(@deepseek-ai\/)?dsh-client-/.test(n));
+    if (clientDeps.length) clientInjectIssues.push(`${b}（inject 引用客户端专属服务: ${clientDeps.join(', ')}）`);
+  }
+  if (clientInjectIssues.length) report('profile', 'P10', false, `插件 inject 引用客户端专属服务（服务端 cordis 树永不提供 → Fiber 永久 PENDING → web boot 失败，#1947）: ${clientInjectIssues.join('; ')}`, '客户端服务不能作为服务端插件依赖：把相关功能移到插件 client 半（package.json 的 dsh.client.inject），或删除该 inject');
+  else report('profile', 'P10', true, '无客户端专属服务注入', undefined);
 }
 
 /* ================= session ================= */

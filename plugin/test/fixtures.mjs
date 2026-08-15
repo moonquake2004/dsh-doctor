@@ -482,3 +482,24 @@ test('P9：内部模块 inject 在前 + 插件自身 inject 含 settings → 通
   assert.notEqual(map.get('P9'), false, '插件自身 inject 含 settings 不应报 P9');
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- P10：客户端专属服务注入（#1947） ---------- */
+
+test('P10：inject 引用 @deepseek-ai/dsh-client-* → 失败', () => {
+  const home = tempHome();
+  bundleFixture(home, 'web', 'fake-token', {
+    mainJs: "export const inject = ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-ui-conversation'];\nexport function apply(ctx) {}\n",
+  });
+  assertIsolated(home, ['--profile', 'web'], 'P10');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P10：无客户端专属服务注入 → 通过', () => {
+  const home = tempHome();
+  bundleFixture(home, 'web', 'fake-server', {
+    mainJs: "export const inject = ['tools', 'settings'];\nexport function apply(ctx) {}\n",
+  });
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(map.get('P10'), false, '服务端依赖不应报 P10');
+  rmSync(home, { recursive: true, force: true });
+});
