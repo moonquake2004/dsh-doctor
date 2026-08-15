@@ -94,6 +94,27 @@ The Cordis paper [2] provides the theoretical backing for the harness's composit
 
 dsh-doctor is a single-file, zero-dependency Node.js program (currently ~1,050 lines) that also ships as a proper dsh plugin: the plugin's server route shells out to the same CLI with `--json`, so the CLI, the settings panel, and the HTTP API (`GET /dsh-doctor/run`) share one source of truth [26]. The repo-root entry is a thin wrapper for `node dsh-doctor.mjs` compatibility.
 
+```
+                     +-----------------------------------------------+
+                     |                dsh web host                    |
+                     |  settings panel  <--->  GET /dsh-doctor/run    |
+                     |                    (spawns CLI --json)          |
+                     +---------------------+-------------------------+
+                                           | spawn
+                     +---------------------v-------------------------+
+   dsh-doctor.mjs    |  check engine (zero-dep, offline)             |
+   (single file)     |  env (11) | profile (10) | session (8)        |
+                     |  + catalog rules (5, declarative probes)      |
+                     +-----+----------------------+------------------+
+                           | fetch (TTL 6h)       | emit
+                     +-----v------+        +------v------------------+
+                     | checks.json|        |  human text / legacy json|
+                     | (repo/raw) |        |  / dsh-doctor/v1 envelope|
+                     +------------+        +-------------------------+
+```
+
+**Figure 1 — dsh-doctor architecture: one check engine, three output modes, remote catalog with TTL cache.**
+
 The tool runs three groups of checks — `env`, `profile`, `session` — plus a remote catalog layer, and emits either human-readable output or machine-readable JSON. Exit codes: `0` all pass, `1` problems found (or any WARN in envelope mode), `2` any FAIL in envelope mode.
 
 ### 4.2 The 30 Checks
@@ -107,6 +128,18 @@ As of this writing the tool ships 25 built-in checks and 5 catalog checks (Secti
 **Session (8 built-in):** S1 orphan `tool_call` [#1363]/[#1544]; S2 unclosed turns [#466]/[#1265]; S6 `seq == index` continuity with chunk expansion [#1333]/[#1452]/[#1469]; S7 post-`end-seed` replay [#1497]; S8 unknown event types without `ignorable` [#1538]; S9 zstd container frame count [#1043]; S10 `sourceEventSeqs` drift [#1469]; S11 whole-session scan: corrupt → quarantine, oversized → cold-start heap risk [#1550].
 
 Each built-in check is validated by at least one synthetic fixture asserting isolation: on a *bad* fixture the target check must fail while every other check passes, and healthy baselines must not false-positive. This discipline is what makes the corpus useful for the certification model of Section 5.
+
+**Table 1 — Check inventory (30 checks, 18 mapped community reports, as of v0.2.7).**
+
+| Group | IDs | Count | Coverage class | Representative reports |
+|---|---|---|---|---|
+| env (built-in) | E1–E6, E10 | 7 | PATH / files / native binary / storage / anchors / port | [#1270] [#71] [#113] [#1219] [#1357] [#1534] [#1719] |
+| env (catalog) | E7–E9, E11 | 4 | declarative probes (path/JSON/text/writable) | [#1270] [23] [#1357] [34] |
+| profile | P1–P5, P7–P11 | 10 | composition: resolution / collisions / patch syntax / dual-instance / inject semantics / artifacts | [#1404] [#1486] [#1697] [#1724] [#1904] [#1947] [#1965] |
+| session | S1, S2, S6–S11 | 8 | log integrity: continuity / replay / types / containers / drift / heap | [#1363] [#466] [#1333] [#1497] [#1538] [#1043] [#1469] [#1550] |
+| **Total** | | **29 built-in/catalog + 1 (E10) = 30** | | 18 distinct reports |
+
+Coverage honesty: two symptom families (sandbox denials, approval policy) have **no** offline probe and are explicitly documented as gaps in the published symptom→check mapping [26], [34].
 
 ### 4.3 Layer A: Remote Check Catalog (Checks-as-Data)
 
@@ -171,6 +204,25 @@ We also propose a check-entry schema:
 
 A working draft of this model is published as [33].
 
+```
+  community report ──► candidate check (probe + anchor + fixture pair)
+         ▲                        │
+         │                   fixture certification  (good: no FP, bad: caught)
+         │                        │ pass
+         │                        ▼
+   harness upgrade         check registry (data, TTL cache)
+         │                        │
+         │ anchor introspection   ▼
+         └── tripwire fails ──► every installed instance (≤6h, no release)
+         loud, no silent rot            │
+                                        ▼
+                              feedback into next report
+```
+
+**Figure 2 — The check lifecycle: report → candidate → certify → distribute → verify (property 4), with introspection (property 2) guarding every upgrade.**
+
+---
+
 ---
 
 ## 6. Empirical Evaluation
@@ -202,9 +254,36 @@ On the author's production profile, the tool reports a clean bill for all 30 che
 
 Three independent community tools — dsh-plugin-doctor [21], dsh-diagnose [22], and dsh-doctor — converged on the `dsh-doctor/v1` envelope: lowercase status, `{ok, checks:[{name,status,detail}]}` minimal subset, and a provenance `tool` field. A symptom→check mapping (16 symptom families ↔ our 30 checks, with honest coverage marks including two documented gaps: sandbox denials and approval policy have no offline probe) is published in the dsh-doctor README [26], and a contract document pins the shape [27]. This convergence was driven by discussion threads [20], [32], [34] and is the concrete evidence that a shared contract can absorb independently built tools.
 
+**Table 2 — Independent diagnostic tools converging on the `dsh-doctor/v1` contract.**
+
+| Tool | Author side / user side | Checks | Envelope mode | Status vocabulary |
+|---|---|---|---|---|
+| dsh-doctor [26] | user side (env/profile/session) | 30 (25 built-in + 5 catalog) | `--json --envelope` | lowercase pass/warn/fail |
+| dsh-plugin-doctor [21] | author side (pre-publish) + profile tripwire | manifest/patch/entry/files/build/pack/install/profile-shadow | v1.6.0 `--profile --json` | lowercase pass/warn/fail |
+| dsh-diagnose [22] | user side (symptom diagnosis, knowledge-anchored) | 17 `dsh-symptom.*` families | `--doctor-json` | lowercase (adopted) |
+
 ---
 
 ## 7. Discussion and Open Problems
+
+### 7.1 Threats to Validity
+
+**Construct validity.** The check inventory and failure taxonomy were induced from 18 community reports plus the tool's own field history; both are subject to selection bias (reports that reached the discussion forum, not the full population of incidents). The "30 checks" count is a snapshot (v0.2.7) and grows as new reports arrive — we treat the inventory as data (Property 1), not as a fixed benchmark.
+
+**Internal validity.** The fixture corpus is single-developer and synthetic: the good/bad fixtures encode the author's interpretation of each failure class. Two mitigations: (i) the isolation property (target fails, others pass) is machine-checked in CI; (ii) several fixtures were cross-verified against independent implementations (boyin111-1's sibling tool, dsh-plugin-doctor's acceptance harness [32]). Cross-implementation fixture sharing remains partial.
+
+**External validity.** dsh-doctor is evaluated on one harness (DeepSeek Harness 0.1.0-rc.6 train) and one production profile. The check-lifecycle *model* (Section 5) is claimed as general, but its evidence base is a single ecosystem; generalization to other plugin-based harnesses (e.g., Koishi [5]) is untested. The environment checks are partially platform-dependent (verified on macOS; Windows-specific paths exercised only through reported cases [#1724], [#1965]).
+
+**Conclusion validity.** The empirical claims are case-based (Section 6): real bugs caught and false positives eliminated are documented incidents, not randomized trials. We report precision/recall as open work rather than over-claiming them.
+
+### 7.2 Reproducibility
+
+- **Artifact:** the tool and all fixtures are in [26]; the paper's claims map to the fixed commit `189f3e2` of `moonquake2004/dsh-doctor`.
+- **Regression suite:** `node --test plugin/test/` (64 tests: 39 fixtures + 25 catalog) reproduces Section 6.1's detection cases and the Section 6.2 false-positive eliminations.
+- **Contract:** `docs/doctor-contract.md` [27] pins the envelope; `docs/check-lifecycle.md` [28] pins the model; `docs/paper-offline-diagnostics.md` is this paper.
+- **Environment:** Node ≥18 (tested on 22), pnpm 9.15.9, macOS/Windows reports from the cited discussions.
+
+### 7.3 Open Problems
 
 **Limitations.** The checks are heuristic and name/regex-based; they detect *symptoms* (e.g., an inject list naming a client service) not *proofs*. Semantic boundaries reduce but cannot eliminate false positives; the certification gate (Property 3) is the only honest mitigation. Two documented coverage gaps — sandbox denials and approval policy — are runtime-only phenomena with no offline static probe, and we deliberately do not claim coverage there. The corpus is single-developer; cross-implementation fixture sharing (with boyin111-1's sibling tool, for example) is ongoing.
 
