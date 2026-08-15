@@ -332,3 +332,15 @@ test('P7：合法 patch → 通过', () => {
   assert.notEqual(map.get('P7'), false, '合法 patch 不应报 P7');
   rmSync(home, { recursive: true, force: true });
 });
+
+test('P7：顶层映射+序列混排（#1724 真实机制）→ 失败', () => {
+  const home = tempHome();
+  // 复刻 #1724：someKey: someValue 后跟 - insert:（js-yaml 报 document separator expected）
+  profileFixture(home, 'web', {
+    manifest: { name: 'web' },
+    patch: '# @linenxi-ctrl/dsh-vision\nsomeKey: someValue\n- insert:\n    - id: vision\n      name: "x"\n',
+    nodeModules: { 'x/package.json': JSON.stringify({ name: 'x', version: '1.0.0', main: 'index.js' }), 'x/index.js': 'module.exports = 1;\n' },
+  });
+  assertIsolated(home, ['--profile', 'web'], 'P7');
+  rmSync(home, { recursive: true, force: true });
+});

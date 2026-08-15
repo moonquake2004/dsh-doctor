@@ -369,20 +369,31 @@ function checkProfile(name) {
   if (topDup.length) report('profile', 'P5', false, `profile 顶层存在 @deepseek-ai/* 重复（#1486/#1697 双实例风险，hoisted 布局会让同版本工具包互相遮蔽导致 Symbol 不匹配）: ${topDup.join(', ')}`, '清理 profile 顶层 node_modules/@deepseek-ai 中与宿主同名的独立副本（真实目录）；指向宿主的 link: symlink 是安全的（#1697 workaround）');
   else report('profile', 'P5', true, '无顶层 @deepseek-ai 重复', undefined);
 
-  // P7 patch YAML 结构 lint（#1724：~ insert: 是 YAML null 字面量 → parsePatchList 崩溃 → UI 打不开）
-  // 离线、零依赖的保守检查：tab 缩进（YAML 硬错误）+ ~ / null 等非法 insert 标记 + insert 缺冒号
+  // P7 patch YAML 结构 lint（#1724：~ insert: / 顶层映射+序列混排 / tab / 缺冒号 → parsePatchList 崩 → UI 打不开）
+  // 离线、零依赖的保守检查，覆盖已实测的崩溃机制：
+  //   1) ~ / null 等非法 insert 标记（~ 是 YAML null）
+  //   2) 顶层映射(key: value)与顶层序列(- xxx)混排 → js-yaml "document separator expected"
+  //   3) tab 缩进（YAML 硬错误）；4) insert 缺冒号
   const yamlProblems = [];
   const patchText = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : '';
   if (patchText) {
-    patchText.split('\n').forEach((line, i) => {
-      if (!line.trim()) return;
+    const topLines = patchText.split('\n');
+    let hasTopMapping = false, hasTopSeq = false;
+    topLines.forEach((line, i) => {
+      if (!line.trim() || line.trim().startsWith('#')) return;
       if (line.includes('\t')) yamlProblems.push(`第 ${i + 1} 行含制表符缩进（YAML 禁止 tab）`);
       if (/^\s*(~|null|Null|NULL)\s*insert\s*:/.test(line)) yamlProblems.push(`第 ${i + 1} 行 "${line.trim()}" —— ~ 是 YAML null 字面量，应为 "- insert:"（#1724）`);
       else if (/^\s*-\s*insert(\s|$)/.test(line) && !/^\s*-\s*insert\s*:/.test(line)) yamlProblems.push(`第 ${i + 1} 行 "${line.trim()}" —— "- insert" 缺冒号`);
+      // 顶层混排检测：col 0 的映射键 vs col 0 的序列项
+      if (!/^\s/.test(line)) {
+        if (/^[^\s#-][^:]*:\s/.test(line)) hasTopMapping = true;
+        if (/^-\s/.test(line)) hasTopSeq = true;
+      }
     });
+    if (hasTopMapping && hasTopSeq) yamlProblems.push('顶层同时存在 key: value 映射与 - xxx 序列（js-yaml 报 "stream or a document separator is expected"，#1724 实测）');
   }
-  if (yamlProblems.length) report('profile', 'P7', false, `cordis.patch.yml 结构错误（boot 会崩，UI 打不开 #1724）: ${yamlProblems.join('; ')}`, '修正对应行：标准形式是 "- insert:"，~ 是 YAML null 字面量；缩进必须用空格');
-  else report('profile', 'P7', true, 'cordis.patch.yml 结构正常（无 tab 缩进 / 无 ~ insert 类错误）', undefined);
+  if (yamlProblems.length) report('profile', 'P7', false, `cordis.patch.yml 结构错误（boot 会崩，UI 打不开 #1724）: ${yamlProblems.join('; ')}`, 'patch 必须是顶层纯列表（只有 - insert: / - id: 条目）：删掉顶层 key: value 行；~ 是 YAML null；缩进用空格不用 tab');
+  else report('profile', 'P7', true, 'cordis.patch.yml 结构正常（无 tab / 无 ~ insert / 无映射-序列混排）', undefined);
 }
 
 /* ================= session ================= */
