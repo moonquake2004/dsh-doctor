@@ -15,6 +15,9 @@ import {
   validCatalog,
   expandPath,
   globCount,
+  localVersion,
+  checkForUpdate,
+  profileDirOfModule,
 } from '../dsh-doctor.mjs';
 
 function tempHome() {
@@ -226,4 +229,50 @@ test('种子规则：E8-npmrc-workspace-flag 在缺 flag 的 profile 上 fail（
   const r = runCatalogCheck(e8, c);
   assert.equal(r.ok, false);
   rmSync(home, { recursive: true, force: true });
+});
+
+/* ---------- 层 B：版本检查 ---------- */
+
+test('localVersion: 读到插件自身版本', () => {
+  const v = localVersion();
+  assert.match(v, /^\d+\.\d+\.\d+/);
+});
+
+test('checkForUpdate: noRemote → 不调网络', async () => {
+  let called = false;
+  const r = await checkForUpdate({ noRemote: true, fetchImpl: async () => { called = true; throw new Error('不应调用'); } });
+  assert.equal(called, false);
+  assert.equal(r.available, false);
+  assert.equal(r.latest, null);
+});
+
+test('checkForUpdate: 远程返回新版本 → available', async () => {
+  const home = tempHome();
+  const r = await checkForUpdate({
+    home,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ 'dist-tags': { latest: '99.99.99' } }) }),
+  });
+  assert.equal(r.available, true);
+  assert.equal(r.latest, '99.99.99');
+  assert.equal(r.current, localVersion());
+  // 缓存已写入
+  assert.ok(existsSync(join(home, '.cache', 'dsh-doctor', 'update.json')));
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('checkForUpdate: 远程失败 → 回退 last-known-good 缓存', async () => {
+  const home = tempHome();
+  const cacheDir = join(home, '.cache', 'dsh-doctor');
+  mkdirSync(cacheDir, { recursive: true });
+  const cacheFile = join(cacheDir, 'update.json');
+  writeFileSync(cacheFile, JSON.stringify({ latest: '88.88.88' }));
+  const { utimesSync } = await import('node:fs');
+  utimesSync(cacheFile, new Date(Date.now() - 2 * 24 * 3600 * 1000), new Date(Date.now() - 2 * 24 * 3600 * 1000));
+  const r = await checkForUpdate({ home, fetchImpl: async () => { throw new Error('offline'); } });
+  assert.equal(r.latest, '88.88.88');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('profileDirOfModule: 仓库 checkout 返回 null', () => {
+  assert.equal(profileDirOfModule(), null);
 });

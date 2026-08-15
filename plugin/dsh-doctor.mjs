@@ -46,7 +46,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, 
 import { createRequire } from 'node:module';
 import { basename, delimiter as PATH_DELIM, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
 const HOME = process.env.DSH_HOME || join(homedir(), '.dsh');
 const results = []; // { section, id, ok, detail, fix? }
@@ -723,6 +723,72 @@ function checkCatalog(ctx, catalog) {
   }
 }
 
+/* ================= 层 B：版本检查与更新（v0.2.1） =================
+ * 检查 npm dist-tags.latest 是否比本地版本新（TTL 6h 缓存 + 离线回退 last-known-good）。
+ * 默认只提示；--update 手动执行更新；DSH_DOCTOR_AUTO_UPDATE=1 可用时自动更新。
+ * 诚实边界：cordis 启动时加载插件，更新后需重启 dsh web 才生效。
+ */
+const UPDATE_URL = 'https://registry.npmjs.org/@moonquake2004%2Fdsh-doctor';
+const UPDATE_TTL_MS = 6 * 60 * 60 * 1000;
+
+export function localVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+    return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
+  } catch { return '0.0.0'; }
+}
+
+/** 返回 { current, latest, available }；latest=null 表示无法确认（离线且无缓存）。 */
+export async function checkForUpdate({ noRemote = false, fetchImpl, home = HOME } = {}) {
+  const current = localVersion();
+  if (noRemote || typeof fetchImpl !== 'function') return { current, latest: null, available: false };
+  const cachePath = join(home, '.cache', 'dsh-doctor', 'update.json');
+  const readCache = () => { try { const d = JSON.parse(readFileSync(cachePath, 'utf8')); return d && typeof d.latest === 'string' ? d : null; } catch { return null; } };
+  try {
+    const c = readCache();
+    if (c && Date.now() - statSync(cachePath).mtimeMs < UPDATE_TTL_MS) return { current, latest: c.latest, available: c.latest !== current };
+  } catch { /* 回退 */ }
+  try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 3000);
+    const res = await fetchImpl(UPDATE_URL, { signal: ac.signal });
+    clearTimeout(timer);
+    if (res && res.ok) {
+      const data = await res.json();
+      const latest = data?.['dist-tags']?.latest;
+      if (typeof latest === 'string') {
+        try { mkdirSync(dirname(cachePath), { recursive: true }); writeFileSync(cachePath, JSON.stringify({ latest, checkedAt: new Date().toISOString() })); } catch { /* 缓存失败不影响 */ }
+        return { current, latest, available: latest !== current };
+      }
+    }
+  } catch { /* 离线/超时 → last-known-good */ }
+  const stale = readCache();
+  if (stale) return { current, latest: stale.latest, available: stale.latest !== current };
+  return { current, latest: null, available: false };
+}
+
+/** 判断本模块是否安装在某个 profile 的 node_modules 下；返回 profile 目录或 null。 */
+export function profileDirOfModule() {
+  const here = fileURLToPath(new URL('.', import.meta.url));
+  const m = here.match(/(\/\.dsh\/profiles\/[^/]+)\/node_modules\//);
+  return m ? m[1] : null;
+}
+
+/** 执行更新（profile 内 pnpm install 刷新 file:/npm 依赖；可用 DSH_DOCTOR_UPDATE_CMD 覆盖命令）。 */
+export function runUpdate() {
+  const override = process.env.DSH_DOCTOR_UPDATE_CMD;
+  if (override) {
+    const r = spawnSync(override, { shell: true, stdio: 'inherit' });
+    return r.status === 0 ? '更新命令执行完成，请重启 dsh web 生效' : `更新命令失败（exit ${r.status ?? r.error?.message}）`;
+  }
+  const profileDir = profileDirOfModule();
+  if (profileDir) {
+    const r = spawnSync('pnpm', ['install'], { cwd: profileDir, stdio: 'inherit' });
+    return r.status === 0 ? `已更新 ${profileDir}，请重启 dsh web 使新版本生效` : `pnpm install 失败（exit ${r.status ?? r.error?.message}）`;
+  }
+  return '仓库 checkout 模式：请 git pull 后重新安装插件（file: 依赖指向仓库）';
+}
+
 /* ================= main ================= */
 const profileArg = (() => { const i = process.argv.indexOf('--profile'); return i >= 0 ? process.argv[i + 1] : 'web'; })();
 const sessionArg = (() => { const i = process.argv.indexOf('--session'); return i >= 0 ? process.argv[i + 1] : undefined; })();
@@ -745,10 +811,22 @@ async function run() {
     catalogMeta = { source: 'error', checks: 0, error: e.message.slice(0, 80) };
   }
 
+  // 层 B：版本检查与更新（--no-catalog 同时禁用网络检查；--update 手动更新；DSH_DOCTOR_AUTO_UPDATE=1 自动）
+  const noRemote = process.argv.includes('--no-catalog');
+  let updateInfo = { current: localVersion(), latest: null, available: false };
+  try {
+    updateInfo = await checkForUpdate({ noRemote, fetchImpl: typeof fetch === 'function' ? fetch : undefined });
+  } catch (e) {
+    updateInfo = { current: localVersion(), latest: null, available: false, error: e.message.slice(0, 60) };
+  }
+  if (process.argv.includes('--update') || (process.env.DSH_DOCTOR_AUTO_UPDATE === '1' && updateInfo.available)) {
+    updateInfo.applied = runUpdate();
+  }
+
   // 退出码只计内置失败 + catalog 中 severity=error 的失败；warn 失败提示但不改退出码
   const bad = results.filter((r) => !r.ok && catalogSeverity.get(r.id) !== 'warn');
   if (jsonOut) {
-    console.log(JSON.stringify({ ok: bad.length === 0, checks: results, catalog: catalogMeta }, null, 2));
+    console.log(JSON.stringify({ ok: bad.length === 0, checks: results, catalog: catalogMeta, update: updateInfo }, null, 2));
   } else {
     const sectionOrder = { env: 0, profile: 1, session: 2, catalog: 3 };
     const ordered = [...results].sort((a, b) => (sectionOrder[a.section] ?? 9) - (sectionOrder[b.section] ?? 9));
@@ -759,6 +837,11 @@ async function run() {
       const mark = !r.ok && sev === 'warn' ? '⚠' : (r.ok ? '✓' : '✗');
       console.log(` ${mark} [${r.id}] ${r.detail}${r.src === 'catalog' ? '  [目录]' : ''}`);
       if (!r.ok && r.fix) console.log(`     ↳ 修复: ${r.fix}`);
+    }
+    if (updateInfo.available && !updateInfo.applied) {
+      console.log(`\n⚠ 新版本 ${updateInfo.latest} 可用（当前 ${updateInfo.current}）→ 运行 \`dsh-doctor --update\` 或 \`dsh plugin update\``);
+    } else if (updateInfo.applied) {
+      console.log(`\n✓ ${updateInfo.applied}`);
     }
     console.log(`\n${bad.length === 0 ? '✓ 全部通过' : `✗ ${bad.length} 个问题`}（profile=${profileArg}，目录=${catalogMeta.source}，${catalogMeta.checks} 条）`);
   }

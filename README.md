@@ -62,6 +62,15 @@ Exit codes: `0` = all pass · `1` = problems found (built-in checks + catalog `s
 
 
 
+## Self-update check (v0.2.1, Layer B)
+
+The tool also watches its own npm version: each run compares the installed version against `dist-tags.latest` (same 6h TTL cache + offline fallback as the catalog). When a newer release exists it prints a notice and reports `update: { current, latest, available }` in JSON — it never touches your install without being asked.
+
+- `--update` — apply the update now: runs `pnpm install` in the profile that hosts the plugin (or `DSH_DOCTOR_UPDATE_CMD` to override), then tells you to restart `dsh web`.
+- `DSH_DOCTOR_AUTO_UPDATE=1` — apply updates automatically when one is available.
+- Honest boundary: cordis loads plugins at boot, so the new engine only activates after a restart — Layer B replaces files and reminds you to restart, it doesn't hot-swap the running plugin.
+- `--no-catalog` also disables the update check (pure offline mode).
+
 ## Remote check catalog (v0.2.0)
 
 The built-in 19 checks are compiled into the tool. The **catalog** is a second, self-updating layer: `plugin/checks.json` in this repo holds declarative rules (data, not code), and every installed instance picks up new rules automatically — no reinstall needed.
