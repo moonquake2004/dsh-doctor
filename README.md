@@ -6,7 +6,7 @@ Zero npm dependencies. One file. Runs anywhere `node` exists (`zstd` needed only
 
 ## Why
 
-dsh's plugin tree is "fragile by install": a dangling reference, a broken `file:` link, a duplicate entry id, or a corrupted session log can brick the profile at boot or stall the whole web server — and `--dump-config` never mounts the loader, so it passes on broken setups. This class of failure was consolidated in [dsh discussion #1496](https://github.com/deepseek-ai/deepseek-harness/discussions/1496) (Advisory: plugin-install path needs guardrails). `dsh-doctor` is the offline check that advisory calls for — 19 checks mapped to 18 community reports, each verified with synthetic negative fixtures.
+dsh's plugin tree is "fragile by install": a dangling reference, a broken `file:` link, a duplicate entry id, or a corrupted session log can brick the profile at boot or stall the whole web server — and `--dump-config` never mounts the loader, so it passes on broken setups. This class of failure was consolidated in [dsh discussion #1496](https://github.com/deepseek-ai/deepseek-harness/discussions/1496) (Advisory: plugin-install path needs guardrails). `dsh-doctor` is the offline check that advisory calls for — 19 built-in checks mapped to 18 community reports, each verified with synthetic negative fixtures, plus a self-updating remote catalog of declarative pattern checks (v0.2.0).
 
 ## Usage
 
@@ -16,9 +16,10 @@ node dsh-doctor.mjs --profile web        # profile checks only
 node dsh-doctor.mjs --session <path>     # session checks (default: latest session)
 node dsh-doctor.mjs --env                # env checks
 node dsh-doctor.mjs --json               # machine-readable output
+node dsh-doctor.mjs --no-catalog         # skip remote catalog fetch (bundled copy only)
 ```
 
-Exit codes: `0` = all pass · `1` = problems found · `2` = usage/environment error.
+Exit codes: `0` = all pass · `1` = problems found (built-in checks + catalog `severity: error`) · warn-level catalog failures don't flip the exit code.
 
 ## Checks (19)
 
@@ -61,9 +62,27 @@ Exit codes: `0` = all pass · `1` = problems found · `2` = usage/environment er
 
 
 
+## Remote check catalog (v0.2.0)
+
+The built-in 19 checks are compiled into the tool. The **catalog** is a second, self-updating layer: `plugin/checks.json` in this repo holds declarative rules (data, not code), and every installed instance picks up new rules automatically — no reinstall needed.
+
+- **How it works**: each run tries to fetch `plugin/checks.json` from GitHub (3s timeout) → on success it's cached to `$DSH_HOME/.cache/dsh-doctor/checks.json` (TTL 6h) → on failure it falls back to the last-known-good cache, then to the bundled copy. New checks therefore arrive within ≤6h of being committed upstream.
+- **Safety**: rules are **read-only probes** executed by the built-in engine (`command-exists`, `path-*`, `json-valid`, `text-contains` / `text-not-contains`, `file-size-above`, `glob-count`). The remote payload can never run code — it can only add pattern checks.
+- **Severity**: `error` (default, flips exit code) or `warn` (reported, exit code unaffected). Disable remote fetch with `--no-catalog`.
+- **Adding a check** (that's the whole point — no plugin release needed): append an entry to `plugin/checks.json` and commit. Catalog checks shipped so far:
+
+| ID | Probe | Checks | Discussion |
+|---|---|---|---|
+| E7 | `command-exists` | `dsh` on PATH | [#1270](https://github.com/deepseek-ai/deepseek-harness/discussions/1270) family |
+| E8 | `text-contains` (warn) | `ignore-workspace-root-check=true` present in profile `.npmrc` | [dsh-market #20](https://github.com/dsh-market/dsh-market/issues/20) |
+| E9 | `json-valid` | `config/workspace.json` parses | [#1357](https://github.com/deepseek-ai/deepseek-harness/discussions/1357) family |
+| P6 | `text-not-contains` | patch insert `name:` with spaces (Windows spawn lint) | [#1420](https://github.com/deepseek-ai/deepseek-harness/discussions/1420) |
+
+Catalog check results are marked `src: "catalog"` in JSON output and `[目录]` in CLI output.
+
 ## Also installable as a dsh plugin
 
-The tool ships as a proper dsh bundle (`plugin/`), so you can run the same 19 checks from inside the web UI:
+The tool ships as a proper dsh bundle (`plugin/`), so you can run the same checks (19 built-in + catalog rules) from inside the web UI:
 
 ```bash
 # install into a profile (works from a checkout or a published path)
@@ -71,7 +90,7 @@ dsh plugin --profile web add file:/path/to/dsh-doctor/plugin
 ```
 
 What you get:
-- **Settings → Doctor** panel: one click runs all 19 checks and renders results grouped by env / profile / session, with per-check fixes and quarantine suggestions (suggestions are shown, never auto-executed);
+- **Settings → Doctor** panel: one click runs all checks and renders results grouped by env / profile / session, with per-check fixes and quarantine suggestions (suggestions are shown, never auto-executed);
 - **HTTP API**: `GET /dsh-doctor/run` returns the same checks as JSON (optional `?profile=` / `?session=` to narrow scope).
 
 Architecture: the plugin's server route shells out to the bundled `plugin/dsh-doctor.mjs --json` — the same single source of truth as the CLI (the checks are offline/filesystem-based by design, so they don't need harness internals). The repo-root `dsh-doctor.mjs` is a thin wrapper for `node dsh-doctor.mjs` compatibility.

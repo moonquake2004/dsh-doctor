@@ -33,14 +33,20 @@
  *   node dsh-doctor.mjs --session <path>  # 仅会话检查（默认自动找最新会话）
  *   node dsh-doctor.mjs --env          # 仅环境检查
  *   node dsh-doctor.mjs --json         # 输出 JSON
+ *   node dsh-doctor.mjs --no-catalog   # 不拉远程检查目录（只用内置副本）
  *
- * 退出码：0 = 全部通过；1 = 发现可修复问题；2 = 用法/环境错误。
+ * 远程检查目录（层 A，v0.2.0）：内置 19 项之外，追加执行仓库 checks.json 里的声明式规则
+ * （规则是数据、不是代码；只读探测原语，引擎不执行远程代码）。每次运行尝试拉取
+ * raw.githubusercontent（3s 超时）→ 失败回退缓存（TTL 6h）→ 内置副本；新检查最长 6h 自动生效。
+ *
+ * 退出码：0 = 全部通过；1 = 发现可修复问题（内置 + catalog severity=error）；warn 级失败不改退出码。
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, delimiter as PATH_DELIM, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 
 const HOME = process.env.DSH_HOME || join(homedir(), '.dsh');
 const results = []; // { section, id, ok, detail, fix? }
@@ -81,8 +87,8 @@ function knownSessionEventTypes() {
 }
 const KNOWN = knownSessionEventTypes();
 
-function report(section, id, ok, detail, fix) {
-  results.push({ section, id, ok, detail, fix });
+function report(section, id, ok, detail, fix, src) {
+  results.push({ section, id, ok, detail, fix, src: src ?? 'builtin' });
 }
 
 function resolveProfile(name) {
@@ -523,26 +529,243 @@ function scanAllSessions() {
   }
 }
 
+/* ================= 远程检查目录（层 A：规则是数据，不是代码） =================
+ * 新检查 = 在 checks.json 追加一条 JSON，已装实例在缓存 TTL 内自动生效，无需重装插件。
+ * 安全属性：目录内容只能声明"只读探测原语"，引擎不执行远程代码。
+ */
+const REMOTE_CATALOG_URL = 'https://raw.githubusercontent.com/moonquake2004/dsh-doctor/main/plugin/checks.json';
+const CATALOG_TTL_MS = 6 * 60 * 60 * 1000; // 6h：新检查最长 6h 内自动生效
+const catalogSeverity = new Map(); // catalog 检查 id → severity（'error' | 'warn'）
+
+function bundledCatalog() {
+  const p = new URL('./checks.json', import.meta.url);
+  try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return { schemaVersion: 1, checks: [] }; }
+}
+
+function validCatalog(data) {
+  return !!data && data.schemaVersion === 1 && Array.isArray(data.checks);
+}
+
+/** 拉取目录：新鲜缓存(≤TTL) → 远程(raw.githubusercontent，3s 超时) → 旧缓存(last-known-good) → 内置副本。 */
+async function loadCatalog({ noRemote = false, fetchImpl, home = HOME } = {}) {
+  const bundled = bundledCatalog();
+  if (noRemote || typeof fetchImpl !== 'function') return { checks: bundled.checks, source: 'bundled' };
+  const cachePath = join(home, '.cache', 'dsh-doctor', 'checks.json');
+  const readCache = () => { if (!existsSync(cachePath)) return null; try { const d = JSON.parse(readFileSync(cachePath, 'utf8')); return validCatalog(d) ? d : null; } catch { return null; } };
+  try {
+    const cached = readCache();
+    if (cached && Date.now() - statSync(cachePath).mtimeMs < CATALOG_TTL_MS) return { checks: cached.checks, source: 'cache' };
+  } catch { /* 回退 */ }
+  try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 3000);
+    const res = await fetchImpl(REMOTE_CATALOG_URL, { signal: ac.signal });
+    clearTimeout(timer);
+    if (res && res.ok) {
+      const data = await res.json();
+      if (validCatalog(data)) {
+        try { mkdirSync(dirname(cachePath), { recursive: true }); writeFileSync(cachePath, JSON.stringify(data, null, 2)); } catch { /* 缓存写入失败不影响本次运行 */ }
+        return { checks: data.checks, source: 'remote' };
+      }
+    }
+  } catch { /* 离线/超时 → 回退 */ }
+  const stale = readCache();
+  if (stale) return { checks: stale.checks, source: 'cache-stale' };
+  return { checks: bundled.checks, source: 'bundled' };
+}
+
+function expandPath(tpl, ctx) {
+  return String(tpl)
+    .replace(/\{home\}/g, ctx.home)
+    .replace(/\{profile\}/g, ctx.profileDir ?? '{profile}')
+    .replace(/\{profileName\}/g, ctx.profile);
+}
+
+function findCommand(cmd) {
+  for (const w of process.platform === 'win32' ? ['where'] : ['which']) {
+    const r = spawnSync(w, [cmd]);
+    if (r.status === 0) { const p = String(r.stdout).split(/\r?\n/)[0].trim(); if (p) return p; }
+  }
+  return null;
+}
+
+function countRecursive(dir) {
+  let n = 0;
+  try { for (const e of readdirSync(dir, { withFileTypes: true })) { const fp = join(dir, e.name); if (e.isFile()) n++; else if (e.isDirectory()) n += countRecursive(fp); } } catch { /* 不可读目录跳过 */ }
+  return n;
+}
+
+/** 极简 glob：`*` 匹配段内任意、`?` 单字符、`**` 递归目录；返回文件匹配数。 */
+function globCount(base, pattern) {
+  if (!existsSync(base)) return 0;
+  const segs = String(pattern).split('/').filter(Boolean);
+  if (segs.length === 0) return 0;
+  let dirs = [base];
+  let count = 0;
+  for (let i = 0; i < segs.length; i++) {
+    const seg = segs[i];
+    const last = i === segs.length - 1;
+    const next = [];
+    if (seg === '**') {
+      if (last) { for (const d of dirs) count += countRecursive(d); return count; }
+      // `**` 匹配零层或多层目录：保留当前 dirs（零层）并追加所有递归子目录
+      const all = [...dirs];
+      const stack = [...dirs];
+      while (stack.length) {
+        const d = stack.pop();
+        if (!existsSync(d)) continue;
+        for (const e of readdirSync(d, { withFileTypes: true })) {
+          if (!e.isDirectory()) continue;
+          const fp = join(d, e.name);
+          all.push(fp);
+          stack.push(fp);
+        }
+      }
+      dirs = all;
+      continue;
+    }
+    const re = new RegExp('^' + seg.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
+    for (const d of dirs) {
+      if (!existsSync(d)) continue;
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        if (!re.test(e.name)) continue;
+        const fp = join(d, e.name);
+        if (last) { if (e.isFile()) count++; }
+        else if (e.isDirectory()) next.push(fp);
+      }
+    }
+    dirs = next;
+  }
+  return count;
+}
+
+/** 执行一条目录检查（只读探测原语）。返回 { ok, detail, skipped? }。 */
+export function runCatalogCheck(check, ctx) {
+  const probe = check.probe ?? {};
+  const p = (tpl) => expandPath(tpl, ctx);
+  switch (probe.type) {
+    case 'command-exists': {
+      const found = findCommand(probe.cmd);
+      return found ? { ok: true, detail: check.detailOk ?? `${probe.cmd} 在 PATH: ${found}` }
+                   : { ok: false, detail: check.detailFail ?? `${probe.cmd} 不在 PATH` };
+    }
+    case 'path-exists':
+    case 'path-is-dir':
+    case 'path-is-file': {
+      const fp = p(probe.path);
+      let ok = existsSync(fp);
+      if (ok && probe.type === 'path-is-dir') ok = lstatSync(fp).isDirectory();
+      if (ok && probe.type === 'path-is-file') ok = lstatSync(fp).isFile();
+      return ok ? { ok: true, detail: check.detailOk ?? `${fp} 存在` }
+                : { ok: false, detail: check.detailFail ?? `${fp} 不存在/类型不符` };
+    }
+    case 'json-valid': {
+      const fp = p(probe.path);
+      if (!existsSync(fp)) return probe.required === false
+        ? { ok: true, detail: check.detailOk ?? `${fp} 不存在（跳过）` }
+        : { ok: false, detail: check.detailFail ?? `${fp} 缺失` };
+      let utf8ok = true, jsonok = false;
+      try { new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(fp)); } catch { utf8ok = false; }
+      if (utf8ok) { try { JSON.parse(readFileSync(fp, 'utf8')); jsonok = true; } catch { /* 非法 JSON */ } }
+      return jsonok ? { ok: true, detail: check.detailOk ?? `${fp} 为合法 JSON` }
+                    : { ok: false, detail: check.detailFail ?? `${fp} 不是合法 JSON（UTF-8:${utf8ok ? 'OK' : 'BAD'}）` };
+    }
+    case 'text-contains':
+    case 'text-not-contains': {
+      const fp = p(probe.path);
+      if (!existsSync(fp)) return probe.required === false
+        ? { ok: true, detail: check.detailOk ?? `${fp} 不存在（跳过）` }
+        : { ok: false, detail: check.detailFail ?? `${fp} 缺失` };
+      let re;
+      try { re = new RegExp(probe.pattern, probe.flags ?? ''); } catch (e) { return { ok: false, detail: `目录规则正则非法: ${e.message.slice(0, 60)}` }; }
+      const hit = re.test(readFileSync(fp, 'utf8'));
+      const want = probe.type === 'text-contains';
+      return hit === want ? { ok: true, detail: check.detailOk ?? `${fp} ${want ? '匹配' : '未匹配'} ${probe.pattern}` }
+                          : { ok: false, detail: check.detailFail ?? `${fp} ${want ? '未匹配' : '意外匹配'} ${probe.pattern}` };
+    }
+    case 'file-size-above': {
+      const fp = p(probe.path);
+      if (!existsSync(fp)) return probe.required === true
+        ? { ok: false, detail: check.detailFail ?? `${fp} 缺失` }
+        : { ok: true, detail: check.detailOk ?? `${fp} 不存在（跳过）` };
+      const size = statSync(fp).size;
+      return size > probe.minBytes
+        ? { ok: false, detail: check.detailFail ?? `${fp} 过大: ${size}B > ${probe.minBytes}B` }
+        : { ok: true, detail: check.detailOk ?? `${fp} 大小 ${size}B 在限内` };
+    }
+    case 'glob-count': {
+      const base = p(probe.base ?? probe.path);
+      const count = globCount(base, probe.pattern);
+      const min = probe.min ?? 1;
+      const max = probe.max ?? Infinity;
+      if (count < min) return { ok: false, detail: check.detailFail ?? `${probe.pattern} 匹配 ${count} 个（< ${min}）` };
+      if (count > max) return { ok: false, detail: check.detailFail ?? `${probe.pattern} 匹配 ${count} 个（> ${max}）` };
+      return { ok: true, detail: check.detailOk ?? `${probe.pattern} 匹配 ${count} 个（${min}..${max}）` };
+    }
+    default:
+      return { ok: true, skipped: true, detail: `探测原语 ${probe.type} 本引擎不支持，已跳过（需更新插件）` };
+  }
+}
+
+/** 逐条执行目录检查，汇入统一 results 管线（src='catalog'）。 */
+function checkCatalog(ctx, catalog) {
+  const platform = process.platform;
+  for (const check of catalog.checks ?? []) {
+    const when = check.when ?? {};
+    if (Array.isArray(when.os) && !when.os.includes(platform)) continue;
+    if (check.section === 'profile' && !ctx.profileDir) continue; // profile 无效时跳过 profile 段
+    let r;
+    try { r = runCatalogCheck(check, ctx); } catch (e) { r = { ok: false, detail: `catalog 检查异常: ${e.message.slice(0, 80)}` }; }
+    if (r.skipped) { report(check.section, check.id, true, r.detail, undefined, 'catalog'); continue; }
+    const severity = check.severity ?? 'error';
+    catalogSeverity.set(check.id, severity);
+    report(check.section, check.id, r.ok, r.detail, r.ok ? undefined : check.fix, 'catalog');
+  }
+}
+
 /* ================= main ================= */
 const profileArg = (() => { const i = process.argv.indexOf('--profile'); return i >= 0 ? process.argv[i + 1] : 'web'; })();
 const sessionArg = (() => { const i = process.argv.indexOf('--session'); return i >= 0 ? process.argv[i + 1] : undefined; })();
 
-try { checkEnv(); } catch (e) { report('env', 'E0', false, `env 检查异常: ${e.message.slice(0, 80)}`); }
-try { checkProfile(profileArg); } catch (e) { report('profile', 'P0', false, `profile 检查异常: ${e.message.slice(0, 100)}`); }
-try { checkSession(sessionArg); } catch (e) { report('session', 'S0', false, `session 检查异常: ${e.message.slice(0, 100)}`); }
-try { scanAllSessions(); } catch (e) { report('session', 'S11', false, `全会话扫描异常: ${e.message.slice(0, 100)}`); }
+async function run() {
+  try { checkEnv(); } catch (e) { report('env', 'E0', false, `env 检查异常: ${e.message.slice(0, 80)}`); }
+  try { checkProfile(profileArg); } catch (e) { report('profile', 'P0', false, `profile 检查异常: ${e.message.slice(0, 100)}`); }
+  try { checkSession(sessionArg); } catch (e) { report('session', 'S0', false, `session 检查异常: ${e.message.slice(0, 100)}`); }
+  try { scanAllSessions(); } catch (e) { report('session', 'S11', false, `全会话扫描异常: ${e.message.slice(0, 100)}`); }
 
-const bad = results.filter((r) => !r.ok);
-if (jsonOut) {
-  console.log(JSON.stringify({ ok: bad.length === 0, checks: results }, null, 2));
-} else {
-  let lastSection = '';
-  for (const r of results) {
-    if (r.section !== lastSection) { console.log(`\n== ${r.section.toUpperCase()} ==`); lastSection = r.section; }
-    const mark = r.ok ? '✓' : '✗';
-    console.log(` ${mark} [${r.id}] ${r.detail}`);
-    if (!r.ok && r.fix) console.log(`     ↳ 修复: ${r.fix}`);
+  // 远程检查目录（层 A）：内置检查之后追加执行；--no-catalog 只走内置副本
+  let catalogMeta = { source: 'none', checks: 0 };
+  try {
+    const catalog = await loadCatalog({ noRemote: process.argv.includes('--no-catalog'), fetchImpl: typeof fetch === 'function' ? fetch : undefined });
+    catalogMeta = { source: catalog.source, checks: catalog.checks.length };
+    const profileDir = (() => { try { return resolveProfile(profileArg); } catch { return null; } })();
+    if (catalog.checks.length && profileDir) checkCatalog({ home: HOME, profile: profileArg, profileDir }, catalog);
+    else if (catalog.checks.length) report('catalog', 'C0', true, `profile 无效（${profileArg}），目录检查跳过（${catalog.source}）`, undefined, 'catalog');
+  } catch (e) {
+    catalogMeta = { source: 'error', checks: 0, error: e.message.slice(0, 80) };
   }
-  console.log(`\n${bad.length === 0 ? '✓ 全部通过' : `✗ ${bad.length} 个问题`}（profile=${profileArg}）`);
+
+  // 退出码只计内置失败 + catalog 中 severity=error 的失败；warn 失败提示但不改退出码
+  const bad = results.filter((r) => !r.ok && catalogSeverity.get(r.id) !== 'warn');
+  if (jsonOut) {
+    console.log(JSON.stringify({ ok: bad.length === 0, checks: results, catalog: catalogMeta }, null, 2));
+  } else {
+    const sectionOrder = { env: 0, profile: 1, session: 2, catalog: 3 };
+    const ordered = [...results].sort((a, b) => (sectionOrder[a.section] ?? 9) - (sectionOrder[b.section] ?? 9));
+    let lastSection = '';
+    for (const r of ordered) {
+      if (r.section !== lastSection) { console.log(`\n== ${r.section.toUpperCase()} ==`); lastSection = r.section; }
+      const sev = catalogSeverity.get(r.id);
+      const mark = !r.ok && sev === 'warn' ? '⚠' : (r.ok ? '✓' : '✗');
+      console.log(` ${mark} [${r.id}] ${r.detail}${r.src === 'catalog' ? '  [目录]' : ''}`);
+      if (!r.ok && r.fix) console.log(`     ↳ 修复: ${r.fix}`);
+    }
+    console.log(`\n${bad.length === 0 ? '✓ 全部通过' : `✗ ${bad.length} 个问题`}（profile=${profileArg}，目录=${catalogMeta.source}，${catalogMeta.checks} 条）`);
+  }
+  process.exit(bad.length === 0 ? 0 : 1);
 }
-process.exit(bad.length === 0 ? 0 : 1);
+
+// 直接执行（CLI：根目录薄封装或 plugin 本体均可）；被 import（测试/宿主）时不自动运行
+if (process.argv[1] && basename(process.argv[1]) === 'dsh-doctor.mjs') run();
+
+export { loadCatalog, bundledCatalog, validCatalog, expandPath, globCount, checkCatalog };
