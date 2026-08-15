@@ -67,6 +67,31 @@ node dsh-doctor.mjs --no-catalog         # 不拉远程目录（只用内置副�
 - [zoahdev/dsh-plugin-doctor](https://github.com/zoahdev/dsh-plugin-doctor) —— 发布前插件 bundle 健康检查（manifest/patch/entry/files/build/pack+全新 profile 安装）+ 宿主遮蔽 `profile-shadow` 哨兵（作者/CI 侧）。与本工具的用户侧 profile/session/env 诊断互补；它的 `profile-shadow` 与我们的 P5 从两个方向标记同一个宿主遮蔽前置条件。
 - [boyin111-1/dsh-doctor](https://github.com/boyin111-1/dsh-doctor) —— 同生态位离线诊断兄弟实现，用同一批坏 fixture 交叉验证。
 
+## Symptom → check quick-start (dsh-diagnose alignment)
+
+If you're coming from a symptom (rather than from the machine), these are the checks to run first. Coverage is honest: ✅ = direct offline coverage, ⚠️ = partial (we see the log/profile effects, not the runtime internals), ❌ = gap (runtime-only, no offline probe today).
+
+| Symptom family | dsh-doctor checks | What they catch |
+|---|---|---|
+| session log corruption / can't resume | S1, S2, S6, S7, S8, S9, S10 | orphan tool calls, unclosed turns, seq gaps, end-seed replay, unknown event types, zstd single-frame, sourceEventSeqs drift |
+| oversized / cold-start stall | S11 | estimated materialization heap, corrupt-session quarantine |
+| boot failure (UI won't open) | P1–P10, E10 | dangling bundles, id collisions, patch syntax, host shadowing, adapter conflicts, client-service injects, port 3080 |
+| tool registry gaps (tools missing) | P1, P2, P8, P10, P9 | unresolved/conflicting/duplicated tool registrations, client-only service injects |
+| compaction / history unavailable | S10, S6, S8 | sourceEventSeqs not remapped after compaction |
+| agent-loop lifecycle (session stuck "running") | S2, S1, S6 | unclosed turns, orphan tool calls, broken seq |
+| llm retry storms | S6, S11, S2 | retry traffic effects on log integrity/size |
+| token metering off | S11, S1, S2 | metering derives from the event stream |
+| workflow script failures | P7, S6, S8, S1 | patch syntax (boot), workflow event integrity |
+| approval policy pending | S2, S1 | open turns / orphan calls from pending or rejected approvals |
+| credentials resolution | E2, E5, P4 | `.env` shape, storage JSON, `file:` links |
+| web internals | E10, P10, E5 | port, client half, workspace storage |
+| subagent depth | S11, S8 | session size, subagent event types |
+| sandbox denials | E4 | node-pty binary (infra only) — ❌ runtime policy not offline-checkable |
+| approval internals | S2 | ⚠️ runtime policy; only the turn-level effect |
+| credentials internals | E2, E5 | ⚠️ file-level only |
+
+The `dsh-doctor/v1` envelope (`--json --envelope`) is the machine-readable form of any of these runs, so a symptom tool can consume the verdict directly.
+
 ## 自更新检查（v0.2.1，层 B）
 
 工具也会盯着自己的 npm 版本：每次运行对比已装版本与 `dist-tags.latest`（与目录同样的 6h TTL 缓存 + 离线回退）。有新版时打印提示、JSON 里报 `update: { current, latest, available }`——**未经你要求绝不改动你的安装**。

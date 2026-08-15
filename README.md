@@ -74,6 +74,31 @@ With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2
 
 
 
+## Symptom → check quick-start (dsh-diagnose alignment)
+
+If you're coming from a symptom (rather than from the machine), these are the checks to run first. Coverage is honest: ✅ = direct offline coverage, ⚠️ = partial (we see the log/profile effects, not the runtime internals), ❌ = gap (runtime-only, no offline probe today).
+
+| Symptom family | dsh-doctor checks | What they catch |
+|---|---|---|
+| session log corruption / can't resume | S1, S2, S6, S7, S8, S9, S10 | orphan tool calls, unclosed turns, seq gaps, end-seed replay, unknown event types, zstd single-frame, sourceEventSeqs drift |
+| oversized / cold-start stall | S11 | estimated materialization heap, corrupt-session quarantine |
+| boot failure (UI won't open) | P1–P10, E10 | dangling bundles, id collisions, patch syntax, host shadowing, adapter conflicts, client-service injects, port 3080 |
+| tool registry gaps (tools missing) | P1, P2, P8, P10, P9 | unresolved/conflicting/duplicated tool registrations, client-only service injects |
+| compaction / history unavailable | S10, S6, S8 | sourceEventSeqs not remapped after compaction |
+| agent-loop lifecycle (session stuck "running") | S2, S1, S6 | unclosed turns, orphan tool calls, broken seq |
+| llm retry storms | S6, S11, S2 | retry traffic effects on log integrity/size |
+| token metering off | S11, S1, S2 | metering derives from the event stream |
+| workflow script failures | P7, S6, S8, S1 | patch syntax (boot), workflow event integrity |
+| approval policy pending | S2, S1 | open turns / orphan calls from pending or rejected approvals |
+| credentials resolution | E2, E5, P4 | `.env` shape, storage JSON, `file:` links |
+| web internals | E10, P10, E5 | port, client half, workspace storage |
+| subagent depth | S11, S8 | session size, subagent event types |
+| sandbox denials | E4 | node-pty binary (infra only) — ❌ runtime policy not offline-checkable |
+| approval internals | S2 | ⚠️ runtime policy; only the turn-level effect |
+| credentials internals | E2, E5 | ⚠️ file-level only |
+
+The `dsh-doctor/v1` envelope (`--json --envelope`) is the machine-readable form of any of these runs, so a symptom tool can consume the verdict directly.
+
 ## Self-update check (v0.2.1, Layer B)
 
 The tool also watches its own npm version: each run compares the installed version against `dist-tags.latest` (same 6h TTL cache + offline fallback as the catalog). When a newer release exists it prints a notice and reports `update: { current, latest, available }` in JSON — it never touches your install without being asked.
