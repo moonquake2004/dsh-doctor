@@ -1,6 +1,6 @@
 # Offline Diagnostics for Plugin-Based Agent Harnesses: Design, Check Lifecycle, and Field Experience with DeepSeek Harness
 
-**Author:** moonquake2004
+**Author:** Xiaoji Zhou
 
 **Version:** 1.0 (working draft, 2026-08-15)
 
