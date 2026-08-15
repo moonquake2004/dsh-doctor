@@ -44,7 +44,7 @@
  * 退出码：0 = 全部通过；1 = 发现可修复问题（内置 + catalog severity=error）；warn 级失败不改退出码。
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import net from 'node:net';
 import { basename, delimiter as PATH_DELIM, dirname, join } from 'node:path';
@@ -795,6 +795,16 @@ export function runCatalogCheck(check, ctx) {
       if (count < min) return { ok: false, detail: check.detailFail ?? `${probe.pattern} 匹配 ${count} 个（< ${min}）` };
       if (count > max) return { ok: false, detail: check.detailFail ?? `${probe.pattern} 匹配 ${count} 个（> ${max}）` };
       return { ok: true, detail: check.detailOk ?? `${probe.pattern} 匹配 ${count} 个（${min}..${max}）` };
+    }
+    case 'file-writable': {
+      const fp = p(probe.path);
+      if (!existsSync(fp)) return probe.required === false
+        ? { ok: true, detail: check.detailOk ?? `${fp} 不存在（跳过）` }
+        : { ok: false, detail: check.detailFail ?? `${fp} 缺失` };
+      let writable = false;
+      try { const fd = openSync(fp, 'a'); closeSync(fd); writable = true; } catch { /* 只读/属主问题 */ }
+      return writable ? { ok: true, detail: check.detailOk ?? `${fp} 可写` }
+                      : { ok: false, detail: check.detailFail ?? `${fp} 不可写（sudo 属主或只读权限，#1719）` };
     }
     default:
       return { ok: true, skipped: true, detail: `探测原语 ${probe.type} 本引擎不支持，已跳过（需更新插件）` };

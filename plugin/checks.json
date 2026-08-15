@@ -8,8 +8,17 @@
       "severity": "error",
       "title": "dsh 可执行文件在 PATH 中",
       "discussion": "#1270",
-      "when": { "os": ["darwin", "linux", "win32"] },
-      "probe": { "type": "command-exists", "cmd": "dsh" },
+      "when": {
+        "os": [
+          "darwin",
+          "linux",
+          "win32"
+        ]
+      },
+      "probe": {
+        "type": "command-exists",
+        "cmd": "dsh"
+      },
       "detailOk": "dsh 在 PATH 中可用",
       "detailFail": "dsh 不在 PATH（插件/CLI 安装链路不可用，#1270 同族）",
       "fix": "安装 dsh 并将 node_modules/.bin 加入 PATH"
@@ -20,7 +29,13 @@
       "severity": "warn",
       "title": "workspace-root profile 的 .npmrc 安装开关",
       "discussion": "#20",
-      "when": { "os": ["darwin", "linux", "win32"] },
+      "when": {
+        "os": [
+          "darwin",
+          "linux",
+          "win32"
+        ]
+      },
       "probe": {
         "type": "text-contains",
         "path": "{profile}/.npmrc",
@@ -37,7 +52,13 @@
       "severity": "error",
       "title": "patch insert name 含空格（Windows 参数 lint）",
       "discussion": "#1420",
-      "when": { "os": ["darwin", "linux", "win32"] },
+      "when": {
+        "os": [
+          "darwin",
+          "linux",
+          "win32"
+        ]
+      },
       "probe": {
         "type": "text-not-contains",
         "path": "{profile}/cordis.patch.yml",
@@ -55,11 +76,43 @@
       "severity": "error",
       "title": "config 目录 JSON 文件合法性",
       "discussion": "#1357",
-      "when": { "os": ["darwin", "linux", "win32"] },
-      "probe": { "type": "json-valid", "path": "{home}/config/workspace.json", "required": false },
+      "when": {
+        "os": [
+          "darwin",
+          "linux",
+          "win32"
+        ]
+      },
+      "probe": {
+        "type": "json-valid",
+        "path": "{home}/config/workspace.json",
+        "required": false
+      },
       "detailOk": "config/workspace.json 为合法 JSON",
       "detailFail": "config/workspace.json 不是合法 JSON（#1357 并发写乱码类，工作区列表会消失）",
       "fix": "排查多实例并发写；修复或删除损坏文件"
+    },
+    {
+      "id": "E11-settings-writable",
+      "section": "env",
+      "severity": "error",
+      "title": "settings.yaml 可写性（sudo 属主问题）",
+      "discussion": "#1719",
+      "when": {
+        "os": [
+          "darwin",
+          "linux",
+          "win32"
+        ]
+      },
+      "probe": {
+        "type": "file-writable",
+        "path": "{home}/settings.yaml",
+        "required": false
+      },
+      "detailOk": "settings.yaml 可写",
+      "detailFail": "settings.yaml 不可写（sudo 安装遗留的属主/权限问题），dsh 无法持久化设置",
+      "fix": "把属主改回当前用户：sudo chown <当前用户> ~/.dsh/settings.yaml（或删掉让 dsh 重建）"
     }
   ]
 }

@@ -4,7 +4,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -275,4 +275,33 @@ test('checkForUpdate: 远程失败 → 回退 last-known-good 缓存', async () 
 
 test('profileDirOfModule: 仓库 checkout 返回 null', () => {
   assert.equal(profileDirOfModule(), null);
+});
+
+/* ---------- file-writable 原语 + E11 ---------- */
+
+test('file-writable: 可写 → ok；只读 → fail；缺失+required:false → ok', () => {
+  const home = tempHome();
+  const c = ctx(home);
+  mkdirSync(c.profileDir, { recursive: true });
+  const f = join(c.profileDir, 'settings.yaml');
+  writeFileSync(f, 'key: value\n');
+  assert.equal(runCatalogCheck({ probe: { type: 'file-writable', path: '{profile}/settings.yaml' } }, c).ok, true);
+  chmodSync(f, 0o444);
+  assert.equal(runCatalogCheck({ probe: { type: 'file-writable', path: '{profile}/settings.yaml' } }, c).ok, false);
+  chmodSync(f, 0o644);
+  assert.equal(runCatalogCheck({ probe: { type: 'file-writable', path: '{profile}/missing.yaml', required: false } }, c).ok, true);
+  rmSync(home, { recursive: true, force: true });
+});
+test('E11 种子规则：settings.yaml 不可写 → fail', () => {
+  const home = tempHome();
+  const c = ctx(home);
+  mkdirSync(c.home, { recursive: true });
+  writeFileSync(join(c.home, 'settings.yaml'), 'x\n');
+  chmodSync(join(c.home, 'settings.yaml'), 0o444);
+  const cat = bundledCatalog();
+  const e11 = cat.checks.find((x) => x.id === 'E11-settings-writable');
+  assert.ok(e11, 'E11 存在');
+  const r = runCatalogCheck(e11, c);
+  assert.equal(r.ok, false, '只读 settings.yaml 应 fail');
+  rmSync(home, { recursive: true, force: true });
 });
