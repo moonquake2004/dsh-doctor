@@ -42,6 +42,7 @@ node dsh-doctor.mjs --no-catalog         # 不拉远程目录（只用内置副�
 | P4 | `file:` 依赖完整 | [#1197](https://github.com/deepseek-ai/deepseek-harness/discussions/1197) |
 | P5 | 顶层无 `@deepseek-ai/*` 重复（双模块实例） | [#1486](https://github.com/deepseek-ai/deepseek-harness/discussions/1486), [#1697](https://github.com/deepseek-ai/deepseek-harness/discussions/1697) |
 | P7 | `cordis.patch.yml` 结构 lint（`~ insert:` null 字面量、tab 缩进、缺冒号、顶层映射+序列混排 → UI 打不开） | [#1724](https://github.com/deepseek-ai/deepseek-harness/discussions/1724) |
+| P12 | profile 内 bundle 版本 vs 运行 CLI（分歧 warn；web「诊断」面板 / `/dsh-doctor/run` API 跑的是 bundle） | [#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719) v1.1 `installed_bundle` |
 
 ### session
 | ID | 检查 | 对应讨论 |

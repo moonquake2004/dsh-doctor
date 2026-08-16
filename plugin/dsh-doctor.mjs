@@ -14,6 +14,7 @@
  *     P9  ctx.settings 未声明 inject: ['settings']（#1904⑤：先于 settings 就绪激活 → namespace not registered）
  *     P10 inject 引用客户端专属服务（#1947：@deepseek-ai/dsh-client-* 服务端永不提供 → Fiber 永久 PENDING → web boot 失败）
  *     P11 已装 bundle 的 main 入口产物缺失（#1965：市场装未构建源码树 → ERR_MODULE_NOT_FOUND → boot 崩）
+ *     P12 profile 内 bundle 版本 vs 运行 CLI 版本（#1719 v1.1 `installed_bundle` 候选：web 面板/API 跑的是 profile 里装的 bundle，可与独立 CLI 版本不一致）
  *   [session]
  *     S1  孤儿 tool_call（#1363：assistant tool_calls 无对应 tool 结果 → INVALID_REQUEST）
  *     S2  未闭合 turn（#466/#1265：turn/start 无 turn/end → 会话永久"运行中"）
@@ -530,6 +531,32 @@ function checkProfile(name) {
   }
   if (entryIssues.length) report('profile', 'P11', false, `已装 bundle 的 main 入口缺失（#1965：市场装源码不跑构建 → ERR_MODULE_NOT_FOUND → dsh web boot 崩溃）: ${entryIssues.join('; ')}`, '在插件目录跑构建（pnpm install && pnpm run build 产出 main 指向的文件），或改用打包好的 npm 包安装；monorepo 插件需装子包（dsh-market #18 同族）');
   else report('profile', 'P11', true, '已装 bundle 的 main 入口产物均在', undefined);
+
+  // P12：profile 内 bundle 版本 vs 运行 CLI 版本（#1719 v1.1 `installed_bundle` 候选）
+  // web 设置「诊断」面板与 /dsh-doctor/run API 跑的是 profile 里装的 bundle；独立 CLI（checkout/npx）是另一个副本——
+  // Layer-B 自更新只比 npm latest vs 运行模块，profile 内 bundle 落后/超前都不报警（dsh-win32/bundle 同坑，sjh9714 先发现的）。
+  // 语义（#1719 提名）：ok = 版本一致；warn = 分歧。profile 未装本插件 = 无对比对象，放行。
+  try {
+    const selfName = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).name ?? '@moonquake2004/dsh-doctor';
+    // 安装形态两种都找：npm scoped 名（@moonquake2004/dsh-doctor）与 file: 依赖的裸名（dsh-doctor）
+    let bundlePkg = null;
+    for (const cand of [selfName, 'dsh-doctor']) {
+      const p = join(dir, 'node_modules', cand, 'package.json');
+      if (existsSync(p)) { bundlePkg = p; break; }
+    }
+    if (!bundlePkg) {
+      report('profile', 'P12-bundle-version', true, 'profile 未安装 dsh-doctor bundle，跳过版本对比（CLI 独立运行）', undefined);
+    } else {
+      const bundleVersion = JSON.parse(readFileSync(bundlePkg, 'utf8')).version;
+      const cliVersion = localVersion();
+      const same = bundleVersion === cliVersion;
+      report('profile', 'P12-bundle-version', same,
+        same ? `profile 内 bundle 版本 ${bundleVersion} 与运行 CLI ${cliVersion} 一致` : `profile 内 bundle 版本 ${bundleVersion} ≠ 运行 CLI ${cliVersion}（web 面板/API 跑的是 bundle，两边行为可能不一致）`,
+        same ? undefined : `同步安装版本：dsh plugin --profile ${name} update ${selfName}（或让 CLI 与 bundle 走同一安装方式）`);
+    }
+  } catch (e) {
+    report('profile', 'P12-bundle-version', false, `bundle 版本对比异常: ${e.message.slice(0, 60)}`, undefined);
+  }
 }
 
 /* ================= session ================= */
@@ -762,9 +789,10 @@ function scanAllSessions() {
 const REMOTE_CATALOG_URL = 'https://raw.githubusercontent.com/moonquake2004/dsh-doctor/main/plugin/checks.json';
 const CATALOG_TTL_MS = 6 * 60 * 60 * 1000; // 6h：新检查最长 6h 内自动生效
 const catalogSeverity = new Map(); // catalog 检查 id → severity（'error' | 'warn'）
-// v1 词汇表 r5 对齐（#1719）：E1-pnpm 缺失=warn（corepack 可恢复）、E3-node 越界=warn（EBADENGINE 语义）——均不翻退出码
+// v1 词汇表 r5 对齐（#1719）：E1-pnpm 缺失=warn（corepack 可恢复）、E3-node 越界=warn（EBADENGINE 语义）、P12 bundle 版本分歧=warn（v1.1 `installed_bundle` 候选）——均不翻退出码
 catalogSeverity.set('E1-pnpm', 'warn');
 catalogSeverity.set('E3-node', 'warn');
+catalogSeverity.set('P12-bundle-version', 'warn');
 
 function bundledCatalog() {
   const p = new URL('./checks.json', import.meta.url);

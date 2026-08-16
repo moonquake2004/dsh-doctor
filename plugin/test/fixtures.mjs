@@ -14,7 +14,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -536,4 +536,80 @@ test('P11：main 产物存在 → 通过', () => {
   const { map } = runCli({ home, args: ['--profile', 'web'] });
   assert.notEqual(map.get('P11'), false, 'main 产物存在不应报 P11');
   rmSync(home, { recursive: true, force: true });
+});
+
+/* ---------- P12：profile 内 bundle 版本 vs 运行 CLI（#1719 installed_bundle） ---------- */
+
+test('P12：profile 内 bundle 版本 ≠ 运行 CLI → warn（envelope status=warn / exit 1）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: { name: 'web' },
+    patch: '',
+    nodeModules: {
+      '@moonquake2004/dsh-doctor/package.json': JSON.stringify({ name: '@moonquake2004/dsh-doctor', version: '0.2.7' }),
+    },
+  });
+  const { d, code } = runEnvelope({ home, args: ['--profile', 'web'] });
+  const p12 = d.checks.find((c) => c.name === 'P12-bundle-version');
+  assert.ok(p12, 'P12 应存在');
+  assert.equal(p12.status, 'warn', '版本分歧应为 warn（v1.1 installed_bundle 语义，不翻成 fail）');
+  assert.equal(code, 1, '只有 warn 应 exit 1（0/1/2 语义）');
+  assert.equal(d.summary.warn >= 1, true);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P12：profile 内 bundle 版本 = 运行 CLI → 通过', () => {
+  const home = tempHome();
+  const localVersion = JSON.parse(readFileSync(join(process.cwd(), 'plugin', 'package.json'), 'utf8')).version;
+  profileFixture(home, 'web', {
+    manifest: { name: 'web' },
+    patch: '',
+    nodeModules: {
+      '@moonquake2004/dsh-doctor/package.json': JSON.stringify({ name: '@moonquake2004/dsh-doctor', version: localVersion }),
+    },
+  });
+  const { d, code } = runEnvelope({ home, args: ['--profile', 'web'] });
+  const p12 = d.checks.find((c) => c.name === 'P12-bundle-version');
+  assert.equal(p12.status, 'pass', '版本一致应通过');
+  assert.equal(code, 0);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P12：profile 未安装 dsh-doctor bundle → 跳过（通过）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', { manifest: { name: 'web' }, patch: '' });
+  const { d } = runEnvelope({ home, args: ['--profile', 'web'] });
+  const p12 = d.checks.find((c) => c.name === 'P12-bundle-version');
+  assert.equal(p12.status, 'pass', '未安装应跳过（放行）');
+  assert.ok(p12.detail.includes('未安装'), 'detail 应说明跳过原因');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P12：裸名 file: 安装（dsh-doctor）→ 版本一致通过 / 分歧 warn', () => {
+  const home = tempHome();
+  const localVersion = JSON.parse(readFileSync(join(process.cwd(), 'plugin', 'package.json'), 'utf8')).version;
+  profileFixture(home, 'web', {
+    manifest: { name: 'web', dependencies: { 'dsh-doctor': 'file:../plugin' } },
+    patch: '',
+    nodeModules: {
+      'dsh-doctor/package.json': JSON.stringify({ name: 'dsh-doctor', version: localVersion }),
+    },
+  });
+  const same = runEnvelope({ home, args: ['--profile', 'web'] });
+  const p12same = same.d.checks.find((c) => c.name === 'P12-bundle-version');
+  assert.equal(p12same.status, 'pass', '裸名安装且版本一致应通过');
+  // 分歧场景
+  const home2 = tempHome();
+  profileFixture(home2, 'web', {
+    manifest: { name: 'web', dependencies: { 'dsh-doctor': 'file:../plugin' } },
+    patch: '',
+    nodeModules: {
+      'dsh-doctor/package.json': JSON.stringify({ name: 'dsh-doctor', version: '0.2.7' }),
+    },
+  });
+  const div = runEnvelope({ home: home2, args: ['--profile', 'web'] });
+  const p12div = div.d.checks.find((c) => c.name === 'P12-bundle-version');
+  assert.equal(p12div.status, 'warn', '裸名安装且版本分歧应 warn');
+  rmSync(home, { recursive: true, force: true });
+  rmSync(home2, { recursive: true, force: true });
 });

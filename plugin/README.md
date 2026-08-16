@@ -47,6 +47,7 @@ With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2
 | P4 | `file:` dependencies intact | [#1197](https://github.com/deepseek-ai/deepseek-harness/discussions/1197) |
 | P5 | no top-level `@deepseek-ai/*` duplication (dual module instances) | [#1486](https://github.com/deepseek-ai/deepseek-harness/discussions/1486), [#1697](https://github.com/deepseek-ai/deepseek-harness/discussions/1697) |
 | P7 | `cordis.patch.yml` structural lint (`~ insert:` null-literal typo, tab indentation, missing colon → UI won't boot) | [#1724](https://github.com/deepseek-ai/deepseek-harness/discussions/1724) |
+| P12 | profile-installed bundle version vs running CLI (warn on divergence; the web "Doctor" panel / `/dsh-doctor/run` API runs the bundle) | [#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719) v1.1 `installed_bundle` |
 
 ### session
 | ID | Checks | Discussion |
