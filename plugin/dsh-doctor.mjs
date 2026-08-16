@@ -99,6 +99,11 @@ function report(section, id, ok, detail, fix, src) {
   results.push({ section, id, ok, detail, fix, src: src ?? 'builtin' });
 }
 
+/** skip 状态（v1 词汇表 r5：#1719）——"不适用"而非"通过"，必须带 reason（detail）。不计入 pass/fail，不翻退出码。 */
+function reportSkip(section, id, detail, src) {
+  results.push({ section, id, ok: true, skip: true, detail, src: src ?? 'builtin' });
+}
+
 /** 解析 --profile 参数：名字（如 web）→ $DSH_HOME/profiles/<name>；含路径分隔符/~/开头 → 直接当 profile 目录（契约 harness 传绝对路径）。 */
 function resolveProfile(name) {
   if (!name) throw new Error('无效 profile 名');
@@ -535,8 +540,9 @@ function checkProfile(name) {
   // P12：profile 内 bundle 版本 vs 运行 CLI 版本（#1719 v1.1 `installed_bundle` 候选）
   // web 设置「诊断」面板与 /dsh-doctor/run API 跑的是 profile 里装的 bundle；独立 CLI（checkout/npx）是另一个副本——
   // Layer-B 自更新只比 npm latest vs 运行模块，profile 内 bundle 落后/超前都不报警（dsh-win32/bundle 同坑，sjh9714 先发现的）。
-  // 语义（#1719 合稿，sjh9714 四态分析）：pass/warn 两态 + detail 注明条件——
-  //   manifest 未声明 = pass（CLI 独立运行）；manifest 声明但 node_modules 缺失 = warn（manifest 撒谎，运行时从不加载）；
+  // 语义（#1719 合稿，sjh9714 四态分析 + skip 修正）：pass/warn/skip 三态 + detail 注明条件——
+  //   manifest 未声明 = skip（无对比对象，pass 会让 CI 误判"已同步"——git_bash 同形）；
+  //   manifest 声明但 node_modules 缺失 = warn（manifest 撒谎，运行时从不加载）；
   //   已装且版本一致 = pass；已装但版本分歧 = warn（detail 含 age-gate 提示，升级可能被 pnpm-workspace.yaml 的
   //   minimumReleaseAgeExclude 年龄门暂缓一天，指令不再静默无效——sjh9714 实测）。
   try {
@@ -549,7 +555,7 @@ function checkProfile(name) {
       if (existsSync(p)) { bundlePkg = p; break; }
     }
     if (!listed && !bundlePkg) {
-      report('profile', 'P12-bundle-version', true, 'profile 未声明也未安装 dsh-doctor bundle，跳过版本对比（CLI 独立运行）', undefined);
+      reportSkip('profile', 'P12-bundle-version', 'profile 未声明也未安装 dsh-doctor bundle——无对比对象（CLI 独立运行），skip 而非 pass（#1719 installed_bundle 合稿，sjh9714：pass 会让 CI 误判"已同步"）');
     } else if (listed && !bundlePkg) {
       report('profile', 'P12-bundle-version', false, `profile 的 package.json 声明了 ${selfName} 依赖，但 node_modules 里没有对应包（manifest 与运行时不一致，web 面板/API 实际加载不到）`, `dsh plugin --profile ${name} install ${selfName}（或先移除该依赖再重装）`);
     } else {
@@ -1151,8 +1157,8 @@ async function run() {
   const bad = results.filter((r) => !r.ok && catalogSeverity.get(r.id) !== 'warn');
   if (jsonOut && process.argv.includes('--envelope')) {
     // v1 契约信封（dsh doctor 规格，zoahdev/doctor 对齐）：status 小写 + 退出码 0/1/2
-    const st = (r) => (!r.ok ? (catalogSeverity.get(r.id) === 'warn' ? 'warn' : 'fail') : 'pass');
-    const summary = { pass: 0, warn: 0, fail: 0, skip: 0 }; // skip 常驻（v1 词汇表 r5：#1719），当前无平台作用域检查所以恒为 0
+    const st = (r) => (r.skip ? 'skip' : (!r.ok ? (catalogSeverity.get(r.id) === 'warn' ? 'warn' : 'fail') : 'pass'));
+    const summary = { pass: 0, warn: 0, fail: 0, skip: 0 }; // skip 常驻（v1 词汇表 r5：#1719），r5 后 P12 会在未装 bundle 时实际触发
     const checks = results.map((r) => { summary[st(r)]++; return { name: r.id, status: st(r), detail: r.detail }; });
     const exitCode = summary.fail > 0 ? 2 : summary.warn > 0 ? 1 : 0;
     console.log(JSON.stringify({

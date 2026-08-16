@@ -365,7 +365,7 @@ test('envelope：干净 profile → exit 0 / status pass / schema v1', () => {
   assert.equal(d.ok, true);
   assert.equal(d.exitCode, 0);
   assert.ok(d.summary.fail === 0);
-  assert.equal(d.summary.skip, 0, 'summary.skip 应常驻（r5 词汇表：#1719）');
+  assert.ok(Number.isInteger(d.summary.skip), 'summary.skip 应常驻（r5 词汇表：#1719）');
   assert.ok(d.checks.every((c) => ['pass', 'warn', 'fail', 'skip'].includes(c.status)));
   rmSync(home, { recursive: true, force: true });
 });
@@ -580,8 +580,9 @@ test('P12：profile 未安装 dsh-doctor bundle → 跳过（通过）', () => {
   profileFixture(home, 'web', { manifest: { name: 'web' }, patch: '' });
   const { d } = runEnvelope({ home, args: ['--profile', 'web'] });
   const p12 = d.checks.find((c) => c.name === 'P12-bundle-version');
-  assert.equal(p12.status, 'pass', '未安装应跳过（放行）');
-  assert.ok(p12.detail.includes('未安装'), 'detail 应说明跳过原因');
+  assert.equal(p12.status, 'skip', '未声明未安装 = skip（无对比对象，非 pass——sjh9714 合稿修正）');
+  assert.ok(p12.detail.length > 20, 'skip 必须带 reason（r5 规则）');
+  assert.equal(d.summary.skip >= 1, true, 'summary.skip 应计入');
   rmSync(home, { recursive: true, force: true });
 });
 
