@@ -69,6 +69,8 @@ With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2
 
 ## Related community tools
 
+> **dsh-doctor/v1 vocabulary r5 compatible** — drafted by [@ciceroyang](https://github.com/ciceroyang) (ciceroyang/dsh-doctor), reviewed by [@sjh9714](https://github.com/sjh9714) (dsh-win32) and [@moonquake2004](https://github.com/moonquake2004) ([#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719)). Our `node`/`pnpm` checks emit the vocabulary names with r5 semantics (pass/warn/fail/skip; `summary.skip` always present).
+
 - [zoahdev/dsh-plugin-doctor](https://github.com/zoahdev/dsh-plugin-doctor) — pre-publish plugin bundle health checks (manifest/patch/entry/files/build/pack+fresh-profile install) plus a `profile-shadow` tripwire for host-shadowing (author/CI side). Complementary to this tool's user-side profile/session/env diagnostics; its `profile-shadow` and our P5 flag the same host-shadowing precondition from two sides.
 - [boyin111-1/dsh-doctor](https://github.com/boyin111-1/dsh-doctor) — sibling offline diagnostic, cross-verified against the same broken fixtures.
 

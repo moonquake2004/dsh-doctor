@@ -64,6 +64,8 @@ node dsh-doctor.mjs --no-catalog         # 不拉远程目录（只用内置副�
 
 ## 相关社区工具
 
+> **dsh-doctor/v1 词汇表 r5 兼容** —— 起草 [@ciceroyang](https://github.com/ciceroyang)（ciceroyang/dsh-doctor），审阅 [@sjh9714](https://github.com/sjh9714)（dsh-win32）与 [@moonquake2004](https://github.com/moonquake2004)（[#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719)）。我们的 `node`/`pnpm` 检查按 r5 语义输出词汇名（pass/warn/fail/skip；`summary.skip` 常驻）。
+
 - [zoahdev/dsh-plugin-doctor](https://github.com/zoahdev/dsh-plugin-doctor) —— 发布前插件 bundle 健康检查（manifest/patch/entry/files/build/pack+全新 profile 安装）+ 宿主遮蔽 `profile-shadow` 哨兵（作者/CI 侧）。与本工具的用户侧 profile/session/env 诊断互补；它的 `profile-shadow` 与我们的 P5 从两个方向标记同一个宿主遮蔽前置条件。
 - [boyin111-1/dsh-doctor](https://github.com/boyin111-1/dsh-doctor) —— 同生态位离线诊断兄弟实现，用同一批坏 fixture 交叉验证。
 

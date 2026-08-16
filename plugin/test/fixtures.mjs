@@ -365,7 +365,8 @@ test('envelope：干净 profile → exit 0 / status pass / schema v1', () => {
   assert.equal(d.ok, true);
   assert.equal(d.exitCode, 0);
   assert.ok(d.summary.fail === 0);
-  assert.ok(d.checks.every((c) => ['pass', 'warn', 'fail'].includes(c.status)));
+  assert.equal(d.summary.skip, 0, 'summary.skip 应常驻（r5 词汇表：#1719）');
+  assert.ok(d.checks.every((c) => ['pass', 'warn', 'fail', 'skip'].includes(c.status)));
   rmSync(home, { recursive: true, force: true });
 });
 

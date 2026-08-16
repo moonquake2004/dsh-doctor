@@ -108,12 +108,19 @@ function resolveProfile(name) {
 }
 
 /* ================= env ================= */
+/** v1 词汇表 r5（#1719）node 语义：pass = 满足 ^22.19.0 || >=24.0.0（root package.json engines），其余 warn——无民间 fail 阈值。 */
+function nodeInSupportedRange(v) {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(String(v));
+  if (!m) return false;
+  const major = Number(m[1]); const minor = Number(m[2]);
+  return (major === 22 && minor >= 19) || major >= 24;
+}
 function checkEnv() {
   if (!wants('env')) return;
   const find = (cmd) => { for (const w of process.platform === 'win32' ? ['where'] : ['which']) { const r = spawnSync(w, [cmd]); if (r.status === 0) { const p = String(r.stdout).split(/\r?\n/)[0].trim(); if (p) return p; } } return null; };
   for (const cmd of ['node', 'pnpm', 'zstd']) {
     const p = find(cmd);
-    report('env', `E1-${cmd}`, !!p, p ? `${cmd}: ${p}` : `${cmd} 不在 PATH（${cmd === 'node' ? '创建会话会失败 #1270' : cmd === 'pnpm' ? 'dsh plugin 不可用' : '会话日志解压不可用'}）`, p ? undefined : `安装 ${cmd} 或加入 PATH`);
+    report('env', `E1-${cmd}`, !!p, p ? `${cmd}: ${p}` : `${cmd} 不在 PATH（${cmd === 'node' ? '创建会话会失败 #1270' : cmd === 'pnpm' ? 'dsh plugin 不可用（corepack 可恢复：corepack enable pnpm）' : '会话日志解压不可用'}）`, p ? undefined : (cmd === 'pnpm' ? 'corepack enable pnpm 或安装 pnpm 后加入 PATH' : `安装 ${cmd} 或加入 PATH`));
   }
   const envFile = join(HOME, '.env');
   if (existsSync(envFile)) {
@@ -121,7 +128,13 @@ function checkEnv() {
     report('env', 'E2-env', !isDir, isDir ? `${envFile} 是目录，dsh 启动会报 failed to load .env: EISDIR（#71）` : `${envFile} 正常`, isDir ? '删除或改名该目录' : undefined);
   }
   const nv = spawnSync('node', ['-e', 'console.log(process.version)']);
-  if (nv.status === 0) report('env', 'E3-node', true, `node ${String(nv.stdout).trim()}`, undefined);
+  if (nv.status === 0) {
+    const version = String(nv.stdout).trim();
+    const supported = nodeInSupportedRange(version);
+    report('env', 'E3-node', supported,
+      supported ? `node ${version}（满足 ^22.19.0 || >=24.0.0，root package.json engines）` : `node ${version} 不在支持范围（^22.19.0 || >=24.0.0）——会话日志读取等能力受限`,
+      supported ? undefined : '升级 node 到 ^22.19.0 或 >=24.0.0（root package.json engines，见 #2259）');
+  }
 
   // E4：node-pty 原生模块完整性（#1219：pty.node 缺失 → dsh web 启动失败）
   const ptyDirs = [];
@@ -749,6 +762,9 @@ function scanAllSessions() {
 const REMOTE_CATALOG_URL = 'https://raw.githubusercontent.com/moonquake2004/dsh-doctor/main/plugin/checks.json';
 const CATALOG_TTL_MS = 6 * 60 * 60 * 1000; // 6h：新检查最长 6h 内自动生效
 const catalogSeverity = new Map(); // catalog 检查 id → severity（'error' | 'warn'）
+// v1 词汇表 r5 对齐（#1719）：E1-pnpm 缺失=warn（corepack 可恢复）、E3-node 越界=warn（EBADENGINE 语义）——均不翻退出码
+catalogSeverity.set('E1-pnpm', 'warn');
+catalogSeverity.set('E3-node', 'warn');
 
 function bundledCatalog() {
   const p = new URL('./checks.json', import.meta.url);
@@ -1102,7 +1118,7 @@ async function run() {
   if (jsonOut && process.argv.includes('--envelope')) {
     // v1 契约信封（dsh doctor 规格，zoahdev/doctor 对齐）：status 小写 + 退出码 0/1/2
     const st = (r) => (!r.ok ? (catalogSeverity.get(r.id) === 'warn' ? 'warn' : 'fail') : 'pass');
-    const summary = { pass: 0, warn: 0, fail: 0 };
+    const summary = { pass: 0, warn: 0, fail: 0, skip: 0 }; // skip 常驻（v1 词汇表 r5：#1719），当前无平台作用域检查所以恒为 0
     const checks = results.map((r) => { summary[st(r)]++; return { name: r.id, status: st(r), detail: r.detail }; });
     const exitCode = summary.fail > 0 ? 2 : summary.warn > 0 ? 1 : 0;
     console.log(JSON.stringify({
@@ -1142,4 +1158,4 @@ async function run() {
 // 直接执行（CLI：根目录薄封装、plugin 本体、npm bin 均可）；被 import（测试/宿主）时不自动运行
 if (process.argv[1] && /^dsh-doctor(\.mjs)?$/.test(basename(process.argv[1]))) run();
 
-export { loadCatalog, bundledCatalog, validCatalog, expandPath, globCount, checkCatalog };
+export { loadCatalog, bundledCatalog, validCatalog, expandPath, globCount, checkCatalog, nodeInSupportedRange };

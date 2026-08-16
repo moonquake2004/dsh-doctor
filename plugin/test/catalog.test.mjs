@@ -18,6 +18,7 @@ import {
   localVersion,
   checkForUpdate,
   profileDirOfModule,
+  nodeInSupportedRange,
 } from '../dsh-doctor.mjs';
 
 function tempHome() {
@@ -304,4 +305,26 @@ test('E11 种子规则：settings.yaml 不可写 → fail', () => {
   const r = runCatalogCheck(e11, c);
   assert.equal(r.ok, false, '只读 settings.yaml 应 fail');
   rmSync(home, { recursive: true, force: true });
+});
+
+/* ---------- v1 词汇表 r5（#1719）：node 两态语义 ---------- */
+
+test('nodeInSupportedRange: ^22.19.0 || >=24.0.0（root package.json engines）', () => {
+  // pass 区间
+  assert.equal(nodeInSupportedRange('v22.19.0'), true);
+  assert.equal(nodeInSupportedRange('v22.22.1'), true);
+  assert.equal(nodeInSupportedRange('v22.99.0'), true);
+  assert.equal(nodeInSupportedRange('v24.0.0'), true);
+  assert.equal(nodeInSupportedRange('v24.1.2'), true);
+  assert.equal(nodeInSupportedRange('v25.0.0'), true);
+  // warn 区间（无 fail 阈值——EBADENGINE 语义，无民间数字）
+  assert.equal(nodeInSupportedRange('v22.18.9'), false);
+  assert.equal(nodeInSupportedRange('v23.0.0'), false);
+  assert.equal(nodeInSupportedRange('v20.11.0'), false);
+  assert.equal(nodeInSupportedRange('v18.20.0'), false);
+  assert.equal(nodeInSupportedRange('v16.0.0'), false);
+  // 畸形输入
+  assert.equal(nodeInSupportedRange('v22'), false);
+  assert.equal(nodeInSupportedRange(''), false);
+  assert.equal(nodeInSupportedRange(null), false);
 });
