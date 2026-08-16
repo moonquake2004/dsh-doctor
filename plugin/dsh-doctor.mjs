@@ -535,23 +535,29 @@ function checkProfile(name) {
   // P12：profile 内 bundle 版本 vs 运行 CLI 版本（#1719 v1.1 `installed_bundle` 候选）
   // web 设置「诊断」面板与 /dsh-doctor/run API 跑的是 profile 里装的 bundle；独立 CLI（checkout/npx）是另一个副本——
   // Layer-B 自更新只比 npm latest vs 运行模块，profile 内 bundle 落后/超前都不报警（dsh-win32/bundle 同坑，sjh9714 先发现的）。
-  // 语义（#1719 提名）：ok = 版本一致；warn = 分歧。profile 未装本插件 = 无对比对象，放行。
+  // 语义（#1719 合稿，sjh9714 四态分析）：pass/warn 两态 + detail 注明条件——
+  //   manifest 未声明 = pass（CLI 独立运行）；manifest 声明但 node_modules 缺失 = warn（manifest 撒谎，运行时从不加载）；
+  //   已装且版本一致 = pass；已装但版本分歧 = warn（detail 含 age-gate 提示，升级可能被 pnpm-workspace.yaml 的
+  //   minimumReleaseAgeExclude 年龄门暂缓一天，指令不再静默无效——sjh9714 实测）。
   try {
     const selfName = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).name ?? '@moonquake2004/dsh-doctor';
+    const listed = Object.keys(deps).some((k) => k === selfName || k === 'dsh-doctor');
     // 安装形态两种都找：npm scoped 名（@moonquake2004/dsh-doctor）与 file: 依赖的裸名（dsh-doctor）
     let bundlePkg = null;
     for (const cand of [selfName, 'dsh-doctor']) {
       const p = join(dir, 'node_modules', cand, 'package.json');
       if (existsSync(p)) { bundlePkg = p; break; }
     }
-    if (!bundlePkg) {
-      report('profile', 'P12-bundle-version', true, 'profile 未安装 dsh-doctor bundle，跳过版本对比（CLI 独立运行）', undefined);
+    if (!listed && !bundlePkg) {
+      report('profile', 'P12-bundle-version', true, 'profile 未声明也未安装 dsh-doctor bundle，跳过版本对比（CLI 独立运行）', undefined);
+    } else if (listed && !bundlePkg) {
+      report('profile', 'P12-bundle-version', false, `profile 的 package.json 声明了 ${selfName} 依赖，但 node_modules 里没有对应包（manifest 与运行时不一致，web 面板/API 实际加载不到）`, `dsh plugin --profile ${name} install ${selfName}（或先移除该依赖再重装）`);
     } else {
       const bundleVersion = JSON.parse(readFileSync(bundlePkg, 'utf8')).version;
       const cliVersion = localVersion();
       const same = bundleVersion === cliVersion;
       report('profile', 'P12-bundle-version', same,
-        same ? `profile 内 bundle 版本 ${bundleVersion} 与运行 CLI ${cliVersion} 一致` : `profile 内 bundle 版本 ${bundleVersion} ≠ 运行 CLI ${cliVersion}（web 面板/API 跑的是 bundle，两边行为可能不一致）`,
+        same ? `profile 内 bundle 版本 ${bundleVersion} 与运行 CLI ${cliVersion} 一致` : `profile 内 bundle 版本 ${bundleVersion} ≠ 运行 CLI ${cliVersion}（web 面板/API 跑的是 bundle，两边行为可能不一致；若刚发布过新版本，升级可能被 pnpm-workspace.yaml 的 minimumReleaseAgeExclude 年龄门暂缓，可次日重试）`,
         same ? undefined : `同步安装版本：dsh plugin --profile ${name} update ${selfName}（或让 CLI 与 bundle 走同一安装方式）`);
     }
   } catch (e) {

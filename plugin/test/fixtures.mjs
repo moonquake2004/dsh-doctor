@@ -613,3 +613,17 @@ test('P12：裸名 file: 安装（dsh-doctor）→ 版本一致通过 / 分歧 w
   rmSync(home, { recursive: true, force: true });
   rmSync(home2, { recursive: true, force: true });
 });
+
+test('P12：manifest 声明但 node_modules 缺失（manifest 撒谎）→ warn', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: { name: 'web', dependencies: { 'dsh-doctor': 'file:../plugin' } },
+    patch: '',
+    // 注意：不提供 nodeModules——声明了依赖但实际没装
+  });
+  const { d } = runEnvelope({ home, args: ['--profile', 'web'] });
+  const p12 = d.checks.find((c) => c.name === 'P12-bundle-version');
+  assert.equal(p12.status, 'warn', 'manifest 声明但 node_modules 缺失应 warn（运行时从不加载）');
+  assert.ok(p12.detail.includes('声明'), 'detail 应点名 manifest 与运行时不一致');
+  rmSync(home, { recursive: true, force: true });
+});
