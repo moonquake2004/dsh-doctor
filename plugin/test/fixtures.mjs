@@ -14,7 +14,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, symlinkSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -707,13 +707,34 @@ function binFixture(home, bundleName, { binEntry, binFile } = {}) {
   });
 }
 
-test('P14：bin 指向文件无 shebang 且不可执行 → warn（#1846 ENOEXEC 同型）', () => {
+test('P14：bin 指向文件无 shebang → warn（#1846 ENOEXEC 同型）', () => {
   const home = tempHome();
   binFixture(home, 'fake-bin-nosheb', { binFile: 'console.log("hi");\n' }); // 无 shebang
   const { map, raw } = runCli({ home, args: ['--profile', 'web'] });
   assert.equal(map.get('P14'), false, 'bin 无 shebang 应报 P14');
   const p14 = raw.checks.find((c) => c.id === 'P14');
   assert.ok(p14 && p14.detail.includes('ENOEXEC'), 'detail 应点名 ENOEXEC 风险');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P14：bin 有 exec bit（100755）但无 shebang → 仍 warn（#1846 1052326311 实证：exec bit 不识别文本解释器，os.execve 仍 ENOEXEC）', () => {
+  const home = tempHome();
+  // 精确复刻 1052326311 的 bad fixture：可执行位在、无 shebang → 之前"shebang OR exec-bit"会误放行，现应报 warn
+  profileFixture(home, 'web', {
+    manifest: { name: 'web', dsh: { profile: { bundles: ['fake-bin-execbit'] } } },
+    patch: '',
+    nodeModules: {
+      'fake-bin-execbit/package.json': JSON.stringify({ name: 'fake-bin-execbit', version: '1.0.0', main: 'lib/index.js', bin: { 'fake-bin-execbit': 'bin/cli.js' }, dsh: { bundle: { patch: './patch.yml' } } }),
+      'fake-bin-execbit/patch.yml': '- insert:\n    - id: x1\n      name: x\n',
+      'fake-bin-execbit/lib/index.js': '// server\n',
+      'fake-bin-execbit/bin/cli.js': 'console.log("hi");\n', // 无 shebang
+    },
+  });
+  chmodSync(join(home, 'profiles', 'web', 'node_modules', 'fake-bin-execbit', 'bin', 'cli.js'), 0o755); // 100755 可执行位
+  const { map, raw } = runCli({ home, args: ['--profile', 'web'] });
+  assert.equal(map.get('P14'), false, '有 exec bit 但无 shebang 仍应报 P14（文本解释器识别靠 shebang）');
+  const p14 = raw.checks.find((c) => c.id === 'P14');
+  assert.ok(p14 && p14.detail.includes('shebang'), 'detail 应点名缺 shebang');
   rmSync(home, { recursive: true, force: true });
 });
 

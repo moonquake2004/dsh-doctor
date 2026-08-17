@@ -624,8 +624,11 @@ function checkProfile(name) {
 
   // P14：declared bin 可执行性（#1846 1052326311 贡献检查点②：dsh-instruction-audit v0.1.0 打包成功但 bin 缺 shebang
   // → 直接执行 ENOEXEC；安装/注册/schema 全过但 pnpm dlx 跑不起来）。与 P11（main 产物缺失）互补：
-  // P11 查运行时入口，P14 查 CLI 入口——bin 目标文件必须在包里且带 shebang（或可执行位），否则发布后无法运行。
-  // 离线静态版：不真正执行（那是 dsh-testkit 的事），查"存在 + shebang/可执行"两个必要条件。
+  // P11 查运行时入口，P14 查 CLI 入口。
+  // 判定（2026-08-17 1052326311 实证修正，见 #1846 comment 18056208）：文本 bin 必须带 shebang——
+  //   POSIX 上 executable bit 只授予执行权限，不标识文本文件的解释器；仅 exec bit 无 shebang，os.execve
+  //   仍返回 ENOEXEC（errno 8）。故"shebang OR exec-bit"会误放行坏包（good/bad fixture 均 100755，只差 shebang）。
+  //   离线静态改查"存在 + shebang"两个必要条件（bin 均为 JS 文本，shebang 是解释器声明的唯一可靠来源）。
   const binIssues = [];
   for (const [b, d] of bundleDirs) {
     let pkg;
@@ -643,9 +646,9 @@ function checkProfile(name) {
       let head;
       try { head = readFileSync(fp, 'utf8').slice(0, 2); } catch { head = ''; }
       const shebang = head === '#!';
-      const execBit = (() => { try { return (statSync(fp).mode & 0o111) !== 0; } catch { return false; } })();
-      if (!shebang && !execBit) {
-        binIssues.push(`${b}: bin ${binName}（${rel}）无 shebang 且无可执行位——直接执行会 ENOEXEC（#1846 同型）`);
+      // execBit 仅作兜底提示（文本文件解释器识别靠 shebang），不作为通过条件
+      if (!shebang) {
+        binIssues.push(`${b}: bin ${binName}（${rel}）无 shebang——文本 bin 无解释器声明，直接执行 ENOEXEC（#1846 同型，exec bit 不识别解释器）`);
       }
     }
   }

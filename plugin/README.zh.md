@@ -44,7 +44,7 @@ node dsh-doctor.mjs --no-catalog         # 不拉远程目录（只用内置副�
 | P7 | `cordis.patch.yml` 结构 lint（`~ insert:` null 字面量、tab 缩进、缺冒号、顶层映射+序列混排 → UI 打不开） | [#1724](https://github.com/deepseek-ai/deepseek-harness/discussions/1724) |
 | P12 | profile 内 bundle 版本 vs 运行 CLI（发词汇名 `installed_bundle`，#1719 v1.1：未声明=skip / manifest 撒谎或分歧=warn / 一致=pass；web「诊断」面板 / `/dsh-doctor/run` API 跑的是 bundle） | [#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719) |
 | P13 | client 半 `provide` 服务名抢注核心客户端服务（`chatFileMentions` 等 `@deepseek-ai/dsh-client-*`，warn）或跨 bundle 同名（浏览器端 service already registered → UI 白屏、服务端日志无感知） | [#2752](https://github.com/deepseek-ai/deepseek-harness/discussions/2752) |
-| P14 | 声明 `bin` 可执行性（目标文件在位 + shebang/可执行位；缺 shebang → 直接执行 ENOEXEC，#1846） | [#1846](https://github.com/deepseek-ai/deepseek-harness/discussions/1846) |
+| P14 | 声明 `bin` 可执行性（目标文件在位 + 文本 bin 必须带 shebang；仅可执行位不识别解释器 → 直接执行 ENOEXEC，#1846） | [#1846](https://github.com/deepseek-ai/deepseek-harness/discussions/1846) |
 
 ### session
 | ID | 检查 | 对应讨论 |

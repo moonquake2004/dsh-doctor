@@ -49,7 +49,7 @@ With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2
 | P7 | `cordis.patch.yml` structural lint (`~ insert:` null-literal typo, tab indentation, missing colon → UI won't boot) | [#1724](https://github.com/deepseek-ai/deepseek-harness/discussions/1724) |
 | P12 | profile-installed bundle version vs running CLI (emits vocabulary name `installed_bundle`, #1719 v1.1: skip when unlisted / warn on manifest-lies or divergence / pass when equal; the web "Doctor" panel / `/dsh-doctor/run` API run the bundle) | [#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719) |
 | P13 | client-half `provide` service name clashes with core client services (`chatFileMentions` etc. from `@deepseek-ai/dsh-client-*`, warn) or cross-bundle same-name grabs (browser-side "service already registered" → UI white screen, server logs see nothing) | [#2752](https://github.com/deepseek-ai/deepseek-harness/discussions/2752) |
-| P14 | declared `bin` executability (target file present + shebang/exec-bit; missing shebang → ENOEXEC on direct run, #1846) | [#1846](https://github.com/deepseek-ai/deepseek-harness/discussions/1846) |
+| P14 | declared `bin` executability (target file present + shebang required for text `bin`; exec-bit alone does not identify the interpreter → ENOEXEC on direct run, #1846) | [#1846](https://github.com/deepseek-ai/deepseek-harness/discussions/1846) |
 
 ### session
 | ID | Checks | Discussion |
