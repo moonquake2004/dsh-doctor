@@ -329,13 +329,19 @@ test('nodeInSupportedRange: ^22.19.0 || >=24.0.0（root package.json engines）'
   assert.equal(nodeInSupportedRange(null), false);
 });
 
-/* ---------- 发布门禁：patch insert name 必须 = npm 包名（#16 testkit 设计伙伴发现） ---------- */
+/* ---------- 发布门禁：插件身份一致性——所有"以包身份注册"的点必须 = npm 包名 ---------- */
+/* #16：裸 patch name 或裸 __ModuleLoader__ 注册 id × scoped 安装 → loader 无法注册 → dsh web boot 崩（两个半边都是同根因） */
 
-test('cordis.patch.yml 的 insert name = package.json 包名（npm 安装路径可解析）', () => {
+test('插件身份一致性：cordis.patch.yml insert name + client.js __ModuleLoader__ id 都必须 = npm 包名', () => {
   const pkg = JSON.parse(readFileSync(join(process.cwd(), 'plugin', 'package.json'), 'utf8'));
+  // 1) 宿主侧：cordis.patch.yml 的 insert name
   const patch = readFileSync(join(process.cwd(), 'plugin', 'cordis.patch.yml'), 'utf8');
-  // 提取 insert 的 name: 值
-  const m = patch.match(/^\s*name:\s*['"]([^'"]+)['"]/m);
-  assert.ok(m, 'patch 应含 insert name');
-  assert.equal(m[1], pkg.name, `patch insert name(${m[1]}) 应等于 npm 包名(${pkg.name})——否则 npm 安装路径 loader 无法解析（#16）`);
+  const pm = patch.match(/^\s*name:\s*['"]([^'"]+)['"]/m);
+  assert.ok(pm, 'patch 应含 insert name');
+  assert.equal(pm[1], pkg.name, `patch insert name(${pm[1]}) ≠ npm 包名(${pkg.name})——npm 安装路径 host loader 无法解析（#16）`);
+  // 2) 客户端侧：client.js 的 __ModuleLoader__.load 注册 id
+  const client = readFileSync(join(process.cwd(), 'plugin', 'client', 'client.js'), 'utf8');
+  const cm = client.match(/__ModuleLoader__\.load\(\s*\{\s*id:\s*['"]([^'"]+)['"]/s);
+  assert.ok(cm, 'client.js 应含 __ModuleLoader__.load({ id: ... })');
+  assert.equal(cm[1], pkg.name, `client __ModuleLoader__ 注册 id(${cm[1]}) ≠ npm 包名(${pkg.name})——scoped 安装时 client-modules 注册不上 → web boot 崩溃`);
 });
