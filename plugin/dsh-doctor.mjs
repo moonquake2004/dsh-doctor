@@ -15,6 +15,7 @@
  *     P10 inject 引用客户端专属服务（#1947：@deepseek-ai/dsh-client-* 服务端永不提供 → Fiber 永久 PENDING → web boot 失败）
  *     P11 已装 bundle 的 main 入口产物缺失（#1965：市场装未构建源码树 → ERR_MODULE_NOT_FOUND → boot 崩）
  *     P13 client 端 provide 服务名抢注核心客户端服务 / 跨 bundle 同名（#2752：浏览器端 service already registered → UI 白屏，服务端日志无感知）
+ *     P14 declared bin 可执行性（#1846：打包成功但 bin 缺 shebang/产物 → 直接执行 ENOEXEC；与 P11 互补）
  *     P12 `installed_bundle`（#1719 v1.1 词汇：profile 内 bundle 版本 vs 运行 CLI 版本——web 面板/API 跑的是 profile 里装的 bundle，可与独立 CLI 版本不一致）
  *   [session]
  *     S1  孤儿 tool_call（#1363：assistant tool_calls 无对应 tool 结果 → INVALID_REQUEST）
@@ -621,6 +622,39 @@ function checkProfile(name) {
     report('profile', 'P13', true, 'client 端 provide 服务名无冲突（未撞核心客户端服务、无跨 bundle 同名抢注）', undefined);
   }
 
+  // P14：declared bin 可执行性（#1846 1052326311 贡献检查点②：dsh-instruction-audit v0.1.0 打包成功但 bin 缺 shebang
+  // → 直接执行 ENOEXEC；安装/注册/schema 全过但 pnpm dlx 跑不起来）。与 P11（main 产物缺失）互补：
+  // P11 查运行时入口，P14 查 CLI 入口——bin 目标文件必须在包里且带 shebang（或可执行位），否则发布后无法运行。
+  // 离线静态版：不真正执行（那是 dsh-testkit 的事），查"存在 + shebang/可执行"两个必要条件。
+  const binIssues = [];
+  for (const [b, d] of bundleDirs) {
+    let pkg;
+    try { pkg = JSON.parse(readFileSync(join(d, 'package.json'), 'utf8')); } catch { continue; }
+    const bin = pkg.bin;
+    if (!bin) continue;
+    const bins = typeof bin === 'string' ? { [b.split('/').pop()]: bin } : bin;
+    for (const [binName, rel] of Object.entries(bins)) {
+      if (typeof rel !== 'string') continue;
+      const fp = join(d, rel);
+      if (!existsSync(fp)) {
+        binIssues.push(`${b}: bin 声明 ${binName} → ${rel} 但产物缺失（发布后 pnpm dlx/直接执行会失败）`);
+        continue;
+      }
+      let head;
+      try { head = readFileSync(fp, 'utf8').slice(0, 2); } catch { head = ''; }
+      const shebang = head === '#!';
+      const execBit = (() => { try { return (statSync(fp).mode & 0o111) !== 0; } catch { return false; } })();
+      if (!shebang && !execBit) {
+        binIssues.push(`${b}: bin ${binName}（${rel}）无 shebang 且无可执行位——直接执行会 ENOEXEC（#1846 同型）`);
+      }
+    }
+  }
+  if (binIssues.length) {
+    report('profile', 'P14', false, `declared bin 不可执行（#1846：安装/注册全过但 bin 跑不起来）: ${binIssues.join('; ')}`, '给 bin 入口补 `#!/usr/bin/env node`（或 chmod +x）；发布前用打包产物实测 `pnpm dlx <pkg>` / 直接执行一次（dsh-testkit 可代为跑真实宿主）');
+  } else {
+    report('profile', 'P14', true, 'declared bin 均在（存在 + shebang/可执行位）', undefined);
+  }
+
   // P12 `installed_bundle`（#1719 v1.1 词汇条目）：profile 内 bundle 版本 vs 运行 CLI 版本
   // web 设置「诊断」面板与 /dsh-doctor/run API 跑的是 profile 里装的 bundle；独立 CLI（checkout/npx）是另一个副本——
   // Layer-B 自更新只比 npm latest vs 运行模块，profile 内 bundle 落后/超前都不报警（dsh-win32/bundle 同坑，sjh9714 先发现的）。
@@ -887,11 +921,12 @@ function scanAllSessions() {
 const REMOTE_CATALOG_URL = 'https://raw.githubusercontent.com/moonquake2004/dsh-doctor/main/plugin/checks.json';
 const CATALOG_TTL_MS = 6 * 60 * 60 * 1000; // 6h：新检查最长 6h 内自动生效
 const catalogSeverity = new Map(); // catalog 检查 id → severity（'error' | 'warn'）
-// v1 词汇表 r5 对齐（#1719）：E1-pnpm 缺失=warn（corepack 可恢复）、E3-node 越界=warn（EBADENGINE 语义）、installed_bundle（P12）分歧=warn（v1.1 词汇条目）、P13 client 服务名冲突=warn（#2752：按帖子建议降级为局部警告而非白屏）——均不翻退出码
+// v1 词汇表 r5 对齐（#1719）：E1-pnpm 缺失=warn（corepack 可恢复）、E3-node 越界=warn（EBADENGINE 语义）、installed_bundle（P12）分歧=warn（v1.1 词汇条目）、P13 client 服务名冲突=warn（#2752：按帖子建议降级为局部警告而非白屏）、P14 bin 不可执行=warn（#1846：发布卫生问题，不影响已有 boot 但对新用户 pnpm dlx 失败）——均不翻退出码
 catalogSeverity.set('E1-pnpm', 'warn');
 catalogSeverity.set('E3-node', 'warn');
 catalogSeverity.set('installed_bundle', 'warn');
 catalogSeverity.set('P13', 'warn');
+catalogSeverity.set('P14', 'warn');
 
 function bundledCatalog() {
   const p = new URL('./checks.json', import.meta.url);

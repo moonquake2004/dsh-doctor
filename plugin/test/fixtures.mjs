@@ -691,3 +691,46 @@ test('P13：client 端 provide 服务名无冲突（服务端 registerAdapter �
   assert.notEqual(map.get('P13'), false, '自定义服务名未撞核心名单/无同名抢注不应报 P13');
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- P14：declared bin 可执行性（#1846：打包成功但 bin 缺 shebang → ENOEXEC） ---------- */
+
+function binFixture(home, bundleName, { binEntry, binFile } = {}) {
+  profileFixture(home, 'web', {
+    manifest: { name: 'web', dsh: { profile: { bundles: [bundleName] } } },
+    patch: '',
+    nodeModules: {
+      [`${bundleName}/package.json`]: JSON.stringify({ name: bundleName, version: '1.0.0', main: 'lib/index.js', bin: binEntry ?? { [bundleName]: 'bin/cli.js' }, dsh: { bundle: { patch: './patch.yml' } } }),
+      [`${bundleName}/patch.yml`]: '- insert:\n    - id: x1\n      name: x\n',
+      [`${bundleName}/lib/index.js`]: '// server\n',
+      [`${bundleName}/bin/cli.js`]: binFile ?? '#!/usr/bin/env node\nconsole.log("hi");\n',
+    },
+  });
+}
+
+test('P14：bin 指向文件无 shebang 且不可执行 → warn（#1846 ENOEXEC 同型）', () => {
+  const home = tempHome();
+  binFixture(home, 'fake-bin-nosheb', { binFile: 'console.log("hi");\n' }); // 无 shebang
+  const { map, raw } = runCli({ home, args: ['--profile', 'web'] });
+  assert.equal(map.get('P14'), false, 'bin 无 shebang 应报 P14');
+  const p14 = raw.checks.find((c) => c.id === 'P14');
+  assert.ok(p14 && p14.detail.includes('ENOEXEC'), 'detail 应点名 ENOEXEC 风险');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P14：bin 目标文件产物缺失 → warn', () => {
+  const home = tempHome();
+  binFixture(home, 'fake-bin-missing', { binEntry: { 'fake-bin-missing': 'bin/not-there.js' } });
+  const { map, raw } = runCli({ home, args: ['--profile', 'web'] });
+  assert.equal(map.get('P14'), false, 'bin 产物缺失应报 P14');
+  const p14 = raw.checks.find((c) => c.id === 'P14');
+  assert.ok(p14 && p14.detail.includes('缺失'), 'detail 应点名产物缺失');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P14：bin 有 shebang + 产物在位 → 通过', () => {
+  const home = tempHome();
+  binFixture(home, 'fake-bin-good'); // 默认 bin/cli.js 有 shebang
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(map.get('P14'), false, 'bin 有 shebang 且产物在位不应报 P14');
+  rmSync(home, { recursive: true, force: true });
+});

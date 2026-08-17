@@ -8,7 +8,7 @@ Zero npm dependencies. One file. Runs anywhere `node` exists (`zstd` needed only
 
 ## Why
 
-dsh's plugin tree is "fragile by install": a dangling reference, a broken `file:` link, a duplicate entry id, or a corrupted session log can brick the profile at boot or stall the whole web server — and `--dump-config` never mounts the loader, so it passes on broken setups. This class of failure was consolidated in [dsh discussion #1496](https://github.com/deepseek-ai/deepseek-harness/discussions/1496) (Advisory: plugin-install path needs guardrails). `dsh-doctor` is the offline check that advisory calls for — 27 built-in checks (env/profile/session) mapped to 18 community reports, each verified with synthetic negative fixtures, plus a self-updating remote catalog of 5 declarative pattern checks.
+dsh's plugin tree is "fragile by install": a dangling reference, a broken `file:` link, a duplicate entry id, or a corrupted session log can brick the profile at boot or stall the whole web server — and `--dump-config` never mounts the loader, so it passes on broken setups. This class of failure was consolidated in [dsh discussion #1496](https://github.com/deepseek-ai/deepseek-harness/discussions/1496) (Advisory: plugin-install path needs guardrails). `dsh-doctor` is the offline check that advisory calls for — 28 built-in checks (env/profile/session) mapped to 18 community reports, each verified with synthetic negative fixtures, plus a self-updating remote catalog of 5 declarative pattern checks.
 
 ## Usage
 
@@ -26,7 +26,7 @@ Exit codes (default mode): `0` = all pass · `1` = problems found (built-in chec
 
 With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2` = any FAIL. The envelope follows the shared `dsh-doctor/v1` schema (`{ schema, generatedAt, profile, exitCode, summary, ok, checks:[{name,status,detail}] }`) so implementations are interchangeable for CI/marketplace use. Installed via npm, the CLI is also available as the `dsh-doctor` bin.
 
-## Checks (27 built-in + 5 catalog = 32)
+## Checks (28 built-in + 5 catalog = 33)
 
 ### env
 | ID | Checks | Discussion |
@@ -49,6 +49,7 @@ With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2
 | P7 | `cordis.patch.yml` structural lint (`~ insert:` null-literal typo, tab indentation, missing colon → UI won't boot) | [#1724](https://github.com/deepseek-ai/deepseek-harness/discussions/1724) |
 | P12 | profile-installed bundle version vs running CLI (emits vocabulary name `installed_bundle`, #1719 v1.1: skip when unlisted / warn on manifest-lies or divergence / pass when equal; the web "Doctor" panel / `/dsh-doctor/run` API run the bundle) | [#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719) |
 | P13 | client-half `provide` service name clashes with core client services (`chatFileMentions` etc. from `@deepseek-ai/dsh-client-*`, warn) or cross-bundle same-name grabs (browser-side "service already registered" → UI white screen, server logs see nothing) | [#2752](https://github.com/deepseek-ai/deepseek-harness/discussions/2752) |
+| P14 | declared `bin` executability (target file present + shebang/exec-bit; missing shebang → ENOEXEC on direct run, #1846) | [#1846](https://github.com/deepseek-ai/deepseek-harness/discussions/1846) |
 
 ### session
 | ID | Checks | Discussion |
@@ -142,7 +143,7 @@ Safety invariants: closed probe vocabulary (LLM output is data, never code), pro
 
 ## Also installable as a dsh plugin
 
-The tool ships as a proper dsh bundle (`plugin/`), so you can run the same checks (27 built-in + 5 catalog rules) from inside the web UI:
+The tool ships as a proper dsh bundle (`plugin/`), so you can run the same checks (28 built-in + 5 catalog rules) from inside the web UI:
 
 ```bash
 # install into a profile (works from a checkout or a published path)
