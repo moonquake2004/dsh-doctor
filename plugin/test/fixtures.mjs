@@ -628,3 +628,66 @@ test('P12：manifest 声明但 node_modules 缺失（manifest 撒谎）→ warn'
   assert.ok(p12.detail.includes('声明'), 'detail 应点名 manifest 与运行时不一致');
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- P13：client 端服务名冲突（#2752：浏览器端 provide 撞核心服务 → UI 白屏） ---------- */
+
+function clientBundleFixture(home, name, bundleName, { clientJs, clientEntry } = {}) {
+  profileFixture(home, name, {
+    manifest: { name, dsh: { profile: { bundles: [bundleName] } } },
+    patch: '',
+    nodeModules: {
+      [`${bundleName}/package.json`]: JSON.stringify({
+        name: bundleName, version: '1.0.0', main: 'lib/index.js',
+        dsh: { client: clientEntry ?? 'client/client.js' },
+      }),
+      [`${bundleName}/lib/index.js`]: '// server side, no provide\n',
+      [`${bundleName}/client/client.js`]: clientJs ?? 'window.__ModuleLoader__.load({ id: "x", factory: () => {} });\n',
+    },
+  });
+}
+
+test('P13：client 端 provide 撞核心客户端服务（chatFileMentions，#2752 场景）→ warn 而非 fail（降级局部警告）', () => {
+  const home = tempHome();
+  clientBundleFixture(home, 'web', 'fake-client-collide', {
+    clientJs: 'window.__ModuleLoader__.load({ id: "x", factory: (require) => { ctx.provide("chatFileMentions", { forClosing() {} }); } });\n',
+  });
+  const { map, raw } = runCli({ home, args: ['--profile', 'web'] });
+  assert.equal(map.get('P13'), false, '撞核心客户端服务应报 P13');
+  // 帖子建议：冲突应降级为局部警告而非白屏 → warning 语义，退出码 1（不翻 2）
+  const p13 = raw.checks.find((c) => c.id === 'P13');
+  assert.ok(p13 && p13.detail.includes('chatFileMentions'), 'detail 应点名冲突服务名');
+  assert.ok(p13 && p13.detail.includes('核心'), 'detail 应点名是核心服务');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P13：两个 bundle 的 client 抢注同一服务名（非核心）→ warn', () => {
+  const home = tempHome();
+  const m = { name: 'web', dsh: { profile: { bundles: ['fake-x', 'fake-y'] } } };
+  profileFixture(home, 'web', {
+    manifest: m, patch: '',
+    nodeModules: {
+      'fake-x/package.json': JSON.stringify({ name: 'fake-x', version: '1.0.0', main: 'lib/index.js', dsh: { client: 'client/client.js' } }),
+      'fake-x/lib/index.js': '// server\n',
+      'fake-x/client/client.js': 'ctx.provide("my-svc", v);\n',
+      'fake-y/package.json': JSON.stringify({ name: 'fake-y', version: '1.0.0', main: 'lib/index.js', dsh: { client: 'client/client.js' } }),
+      'fake-y/lib/index.js': '// server\n',
+      'fake-y/client/client.js': 'ctx.provide("my-svc", v);\n',
+    },
+  });
+  const { map, raw } = runCli({ home, args: ['--profile', 'web'] });
+  assert.equal(map.get('P13'), false, '跨 bundle 同名抢注应报 P13');
+  const p13 = raw.checks.find((c) => c.id === 'P13');
+  assert.ok(p13 && p13.detail.includes('my-svc'), 'detail 应点名冲突服务名');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P13：client 端 provide 服务名无冲突（服务端 registerAdapter 不算）→ 通过', () => {
+  const home = tempHome();
+  // client 无冲突提供；服务端有 registerAdapter 是 P8 的领域，不该动 P13
+  clientBundleFixture(home, 'web', 'fake-clean', {
+    clientJs: 'window.__ModuleLoader__.load({ id: "x", factory: (require) => { ctx.provide("my-own-svc", v); } });\n',
+  });
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(map.get('P13'), false, '自定义服务名未撞核心名单/无同名抢注不应报 P13');
+  rmSync(home, { recursive: true, force: true });
+});

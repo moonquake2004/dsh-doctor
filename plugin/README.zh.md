@@ -21,7 +21,7 @@ node dsh-doctor.mjs --no-catalog         # 不拉远程目录（只用内置副�
 
 退出码：`0` = 全部通过 · `1` = 发现问题（内置检查 + 目录中 `severity: error` 的项）· warn 级目录失败不改退出码。
 
-## 检查项（26 内置 + 5 目录）
+## 检查项（27 内置 + 5 目录）
 
 ### env
 | ID | 检查 | 对应讨论 |
@@ -43,6 +43,7 @@ node dsh-doctor.mjs --no-catalog         # 不拉远程目录（只用内置副�
 | P5 | 顶层无 `@deepseek-ai/*` 重复（双模块实例） | [#1486](https://github.com/deepseek-ai/deepseek-harness/discussions/1486), [#1697](https://github.com/deepseek-ai/deepseek-harness/discussions/1697) |
 | P7 | `cordis.patch.yml` 结构 lint（`~ insert:` null 字面量、tab 缩进、缺冒号、顶层映射+序列混排 → UI 打不开） | [#1724](https://github.com/deepseek-ai/deepseek-harness/discussions/1724) |
 | P12 | profile 内 bundle 版本 vs 运行 CLI（发词汇名 `installed_bundle`，#1719 v1.1：未声明=skip / manifest 撒谎或分歧=warn / 一致=pass；web「诊断」面板 / `/dsh-doctor/run` API 跑的是 bundle） | [#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719) |
+| P13 | client 半 `provide` 服务名抢注核心客户端服务（`chatFileMentions` 等 `@deepseek-ai/dsh-client-*`，warn）或跨 bundle 同名（浏览器端 service already registered → UI 白屏、服务端日志无感知） | [#2752](https://github.com/deepseek-ai/deepseek-harness/discussions/2752) |
 
 ### session
 | ID | 检查 | 对应讨论 |
@@ -134,7 +135,7 @@ The `dsh-doctor/v1` envelope (`--json --envelope`) is the machine-readable form 
 
 ## 也可作为 dsh 插件安装
 
-工具以标准 dsh bundle 形态发布（`plugin/`），可以在 web UI 里跑同样的检查（26 内置 + 5 目录规则）：
+工具以标准 dsh bundle 形态发布（`plugin/`），可以在 web UI 里跑同样的检查（27 内置 + 5 目录规则）：
 
 ```bash
 # 装进 profile（checkout 或已发布路径均可）

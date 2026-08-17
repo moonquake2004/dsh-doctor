@@ -14,6 +14,7 @@
  *     P9  ctx.settings 未声明 inject: ['settings']（#1904⑤：先于 settings 就绪激活 → namespace not registered）
  *     P10 inject 引用客户端专属服务（#1947：@deepseek-ai/dsh-client-* 服务端永不提供 → Fiber 永久 PENDING → web boot 失败）
  *     P11 已装 bundle 的 main 入口产物缺失（#1965：市场装未构建源码树 → ERR_MODULE_NOT_FOUND → boot 崩）
+ *     P13 client 端 provide 服务名抢注核心客户端服务 / 跨 bundle 同名（#2752：浏览器端 service already registered → UI 白屏，服务端日志无感知）
  *     P12 `installed_bundle`（#1719 v1.1 词汇：profile 内 bundle 版本 vs 运行 CLI 版本——web 面板/API 跑的是 profile 里装的 bundle，可与独立 CLI 版本不一致）
  *   [session]
  *     S1  孤儿 tool_call（#1363：assistant tool_calls 无对应 tool 结果 → INVALID_REQUEST）
@@ -537,6 +538,89 @@ function checkProfile(name) {
   if (entryIssues.length) report('profile', 'P11', false, `已装 bundle 的 main 入口缺失（#1965：市场装源码不跑构建 → ERR_MODULE_NOT_FOUND → dsh web boot 崩溃）: ${entryIssues.join('; ')}`, '在插件目录跑构建（pnpm install && pnpm run build 产出 main 指向的文件），或改用打包好的 npm 包安装；monorepo 插件需装子包（dsh-market #18 同族）');
   else report('profile', 'P11', true, '已装 bundle 的 main 入口产物均在', undefined);
 
+  // P13：client 端服务名抢注核心客户端服务（#2752：ctx.provide("chatFileMentions") 撞核心 dsh-client-ui-deliverables
+  // → 浏览器端 service already registered → Web UI 白屏，服务端日志无感知、报错无冲突来源）
+  // 与 P8（adapter provider 服务端冲突）互补：P8 跳过 client/web 产物，P13 专门只扫 client 侧——
+  //   browser 端 provide 的服务名若与核心客户端服务（@deepseek-ai/dsh-client-*）重名，或两个 bundle 抢注同名，
+  //   都会在 client-modules 加载期崩掉整个 UI（fail to load plugins / service has been registered）。
+  // 核心名单来源：宿主 dsh 安装目录 + profile node_modules 里的 @deepseek-ai/dsh-client-* 包 client 产物实时收集，
+  //   叠加内置种子名单兜底（宿主不可达时仍能查 #2752 的 chatFileMentions 等已知核心服务）。
+  const coreClientServices = new Set([
+    // 内置种子（核心客户端服务，随 dsh 版本演进，宿主不可达时兜底）
+    'chatFileMentions', 'connection', 'sessions', 'workspaces', 'modules', 'locale',
+  ]);
+  const collectProvideNames = (fp) => {
+    let src;
+    try { src = readFileSync(fp, 'utf8'); } catch { return []; }
+    const out = [];
+    for (const m of src.matchAll(/\.provide\(\s*['"]([^'"]+)['"]/g)) out.push(m[1]);
+    return out;
+  };
+  // client 产物位置：dsh.client 入口（package.json 的 dsh.client 指向的文件）+ client/ 目录下 js
+  const collectClientJsFiles = (root) => {
+    const out = [];
+    try {
+      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+      const entry = pkg.dsh?.client;
+      if (typeof entry === 'string' && entry.endsWith('.js')) {
+        const ep = join(root, entry);
+        if (existsSync(ep)) out.push(ep);
+      } else if (entry && typeof entry === 'object' && typeof entry.entry === 'string' && entry.entry.endsWith('.js')) {
+        const ep = join(root, entry.entry);
+        if (existsSync(ep)) out.push(ep);
+      }
+    } catch { /* 无 manifest */ }
+    const walk = (dir, depth) => {
+      if (depth > 3) return;
+      let entries;
+      try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+        const fp = join(dir, e.name);
+        if (e.isDirectory()) walk(fp, depth + 1);
+        else if (e.name.endsWith('.js')) out.push(fp);
+      }
+    };
+    const cdir = join(root, 'client');
+    if (existsSync(cdir)) walk(cdir, 0);
+    return [...new Set(out)];
+  };
+  // 核心客户端服务名单实时收集（宿主 anchor + profile node_modules）
+  if (installAnchor) {
+    const coreScope = join(installAnchor, '@deepseek-ai');
+    if (existsSync(coreScope)) {
+      for (const p of readdirSync(coreScope)) {
+        if (!/^dsh-client-/.test(p)) continue;
+        for (const f of collectClientJsFiles(join(coreScope, p))) {
+          for (const n of collectProvideNames(f)) coreClientServices.add(n);
+        }
+      }
+    }
+  }
+  const clientProvideMap = new Map(); // 服务名 → Set(bundle)
+  for (const [b, d] of bundleDirs) {
+    for (const f of collectClientJsFiles(d)) {
+      for (const n of collectProvideNames(f)) {
+        if (!clientProvideMap.has(n)) clientProvideMap.set(n, new Set());
+        clientProvideMap.get(n).add(b);
+      }
+    }
+  }
+  const coreHits = [...clientProvideMap].filter(([n]) => coreClientServices.has(n));
+  const dupHits = [...clientProvideMap].filter(([, v]) => v.size > 1);
+  const p13Issues = [];
+  for (const [n, bs] of coreHits) {
+    p13Issues.push(`服务名 ${n} ∈ 核心客户端服务（${[...bs].join(', ')} 抢注 → 浏览器端 service already registered，UI 白屏 #2752）`);
+  }
+  for (const [n, bs] of dupHits) {
+    if (!coreClientServices.has(n)) p13Issues.push(`服务名 ${n} 被多个插件 client 同时提供（${[...bs].join(', ')} → 同名注册冲突，加载期崩）`);
+  }
+  if (p13Issues.length) {
+    report('profile', 'P13', false, `client 端服务名冲突（#2752：浏览器端 provide 撞核心服务 → UI 白屏且服务端日志无感知）: ${p13Issues.join('; ')}`, '改名自有 client 服务（避开核心 dsh-client-* 已注册名），或让冲突双方协商唯一命名；冲突在应用侧降级为局部警告前仍需避名');
+  } else {
+    report('profile', 'P13', true, 'client 端 provide 服务名无冲突（未撞核心客户端服务、无跨 bundle 同名抢注）', undefined);
+  }
+
   // P12 `installed_bundle`（#1719 v1.1 词汇条目）：profile 内 bundle 版本 vs 运行 CLI 版本
   // web 设置「诊断」面板与 /dsh-doctor/run API 跑的是 profile 里装的 bundle；独立 CLI（checkout/npx）是另一个副本——
   // Layer-B 自更新只比 npm latest vs 运行模块，profile 内 bundle 落后/超前都不报警（dsh-win32/bundle 同坑，sjh9714 先发现的）。
@@ -803,10 +887,11 @@ function scanAllSessions() {
 const REMOTE_CATALOG_URL = 'https://raw.githubusercontent.com/moonquake2004/dsh-doctor/main/plugin/checks.json';
 const CATALOG_TTL_MS = 6 * 60 * 60 * 1000; // 6h：新检查最长 6h 内自动生效
 const catalogSeverity = new Map(); // catalog 检查 id → severity（'error' | 'warn'）
-// v1 词汇表 r5 对齐（#1719）：E1-pnpm 缺失=warn（corepack 可恢复）、E3-node 越界=warn（EBADENGINE 语义）、installed_bundle（P12）分歧=warn（v1.1 词汇条目）——均不翻退出码
+// v1 词汇表 r5 对齐（#1719）：E1-pnpm 缺失=warn（corepack 可恢复）、E3-node 越界=warn（EBADENGINE 语义）、installed_bundle（P12）分歧=warn（v1.1 词汇条目）、P13 client 服务名冲突=warn（#2752：按帖子建议降级为局部警告而非白屏）——均不翻退出码
 catalogSeverity.set('E1-pnpm', 'warn');
 catalogSeverity.set('E3-node', 'warn');
 catalogSeverity.set('installed_bundle', 'warn');
+catalogSeverity.set('P13', 'warn');
 
 function bundledCatalog() {
   const p = new URL('./checks.json', import.meta.url);
