@@ -4,7 +4,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -327,4 +327,15 @@ test('nodeInSupportedRange: ^22.19.0 || >=24.0.0（root package.json engines）'
   assert.equal(nodeInSupportedRange('v22'), false);
   assert.equal(nodeInSupportedRange(''), false);
   assert.equal(nodeInSupportedRange(null), false);
+});
+
+/* ---------- 发布门禁：patch insert name 必须 = npm 包名（#16 testkit 设计伙伴发现） ---------- */
+
+test('cordis.patch.yml 的 insert name = package.json 包名（npm 安装路径可解析）', () => {
+  const pkg = JSON.parse(readFileSync(join(process.cwd(), 'plugin', 'package.json'), 'utf8'));
+  const patch = readFileSync(join(process.cwd(), 'plugin', 'cordis.patch.yml'), 'utf8');
+  // 提取 insert 的 name: 值
+  const m = patch.match(/^\s*name:\s*['"]([^'"]+)['"]/m);
+  assert.ok(m, 'patch 应含 insert name');
+  assert.equal(m[1], pkg.name, `patch insert name(${m[1]}) 应等于 npm 包名(${pkg.name})——否则 npm 安装路径 loader 无法解析（#16）`);
 });
