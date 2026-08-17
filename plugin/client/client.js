@@ -1,4 +1,4 @@
-window.__ModuleLoader__.load({ id: "dsh-doctor", factory: (require) => {
+window.__ModuleLoader__.load({ id: "@moonquake2004/dsh-doctor", factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
 'use strict'
 
