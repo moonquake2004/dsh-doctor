@@ -550,7 +550,7 @@ test('P12：profile 内 bundle 版本 ≠ 运行 CLI → warn（envelope status=
     },
   });
   const { d, code } = runEnvelope({ home, args: ['--profile', 'web'] });
-  const p12 = d.checks.find((c) => c.name === 'P12-bundle-version');
+  const p12 = d.checks.find((c) => c.name === 'installed_bundle');
   assert.ok(p12, 'P12 应存在');
   assert.equal(p12.status, 'warn', '版本分歧应为 warn（v1.1 installed_bundle 语义，不翻成 fail）');
   assert.equal(code, 1, '只有 warn 应 exit 1（0/1/2 语义）');
@@ -569,7 +569,7 @@ test('P12：profile 内 bundle 版本 = 运行 CLI → 通过', () => {
     },
   });
   const { d, code } = runEnvelope({ home, args: ['--profile', 'web'] });
-  const p12 = d.checks.find((c) => c.name === 'P12-bundle-version');
+  const p12 = d.checks.find((c) => c.name === 'installed_bundle');
   assert.equal(p12.status, 'pass', '版本一致应通过');
   assert.equal(code, 0);
   rmSync(home, { recursive: true, force: true });
@@ -579,7 +579,7 @@ test('P12：profile 未安装 dsh-doctor bundle → 跳过（通过）', () => {
   const home = tempHome();
   profileFixture(home, 'web', { manifest: { name: 'web' }, patch: '' });
   const { d } = runEnvelope({ home, args: ['--profile', 'web'] });
-  const p12 = d.checks.find((c) => c.name === 'P12-bundle-version');
+  const p12 = d.checks.find((c) => c.name === 'installed_bundle');
   assert.equal(p12.status, 'skip', '未声明未安装 = skip（无对比对象，非 pass——sjh9714 合稿修正）');
   assert.ok(p12.detail.length > 20, 'skip 必须带 reason（r5 规则）');
   assert.equal(d.summary.skip >= 1, true, 'summary.skip 应计入');
@@ -597,7 +597,7 @@ test('P12：裸名 file: 安装（dsh-doctor）→ 版本一致通过 / 分歧 w
     },
   });
   const same = runEnvelope({ home, args: ['--profile', 'web'] });
-  const p12same = same.d.checks.find((c) => c.name === 'P12-bundle-version');
+  const p12same = same.d.checks.find((c) => c.name === 'installed_bundle');
   assert.equal(p12same.status, 'pass', '裸名安装且版本一致应通过');
   // 分歧场景
   const home2 = tempHome();
@@ -609,7 +609,7 @@ test('P12：裸名 file: 安装（dsh-doctor）→ 版本一致通过 / 分歧 w
     },
   });
   const div = runEnvelope({ home: home2, args: ['--profile', 'web'] });
-  const p12div = div.d.checks.find((c) => c.name === 'P12-bundle-version');
+  const p12div = div.d.checks.find((c) => c.name === 'installed_bundle');
   assert.equal(p12div.status, 'warn', '裸名安装且版本分歧应 warn');
   rmSync(home, { recursive: true, force: true });
   rmSync(home2, { recursive: true, force: true });
@@ -623,7 +623,7 @@ test('P12：manifest 声明但 node_modules 缺失（manifest 撒谎）→ warn'
     // 注意：不提供 nodeModules——声明了依赖但实际没装
   });
   const { d } = runEnvelope({ home, args: ['--profile', 'web'] });
-  const p12 = d.checks.find((c) => c.name === 'P12-bundle-version');
+  const p12 = d.checks.find((c) => c.name === 'installed_bundle');
   assert.equal(p12.status, 'warn', 'manifest 声明但 node_modules 缺失应 warn（运行时从不加载）');
   assert.ok(p12.detail.includes('声明'), 'detail 应点名 manifest 与运行时不一致');
   rmSync(home, { recursive: true, force: true });

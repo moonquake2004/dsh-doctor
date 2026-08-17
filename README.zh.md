@@ -42,7 +42,7 @@ node dsh-doctor.mjs --no-catalog         # 不拉远程目录（只用内置副�
 | P4 | `file:` 依赖完整 | [#1197](https://github.com/deepseek-ai/deepseek-harness/discussions/1197) |
 | P5 | 顶层无 `@deepseek-ai/*` 重复（双模块实例） | [#1486](https://github.com/deepseek-ai/deepseek-harness/discussions/1486), [#1697](https://github.com/deepseek-ai/deepseek-harness/discussions/1697) |
 | P7 | `cordis.patch.yml` 结构 lint（`~ insert:` null 字面量、tab 缩进、缺冒号、顶层映射+序列混排 → UI 打不开） | [#1724](https://github.com/deepseek-ai/deepseek-harness/discussions/1724) |
-| P12 | profile 内 bundle 版本 vs 运行 CLI（分歧 warn；web「诊断」面板 / `/dsh-doctor/run` API 跑的是 bundle） | [#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719) v1.1 `installed_bundle` |
+| P12 | profile 内 bundle 版本 vs 运行 CLI（发词汇名 `installed_bundle`，#1719 v1.1：未声明=skip / manifest 撒谎或分歧=warn / 一致=pass；web「诊断」面板 / `/dsh-doctor/run` API 跑的是 bundle） | [#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719) |
 
 ### session
 | ID | 检查 | 对应讨论 |
@@ -65,7 +65,7 @@ node dsh-doctor.mjs --no-catalog         # 不拉远程目录（只用内置副�
 
 ## 相关社区工具
 
-> **dsh-doctor/v1 词汇表 r5 兼容** —— 起草 [@ciceroyang](https://github.com/ciceroyang)（ciceroyang/dsh-doctor），审阅 [@sjh9714](https://github.com/sjh9714)（dsh-win32）与 [@moonquake2004](https://github.com/moonquake2004)（[#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719)）。我们的 `node`/`pnpm` 检查按 r5 语义输出词汇名（pass/warn/fail/skip；`summary.skip` 常驻）。
+> **dsh-doctor/v1 词汇表 r5 兼容，v1.1 `installed_bundle` 待认领** —— 起草 [@ciceroyang](https://github.com/ciceroyang)（ciceroyang/dsh-doctor），审阅 [@sjh9714](https://github.com/sjh9714)（dsh-win32）与 [@moonquake2004](https://github.com/moonquake2004)（[#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719)）。我们的 `node`/`pnpm` 检查按 r5 语义输出词汇名（pass/warn/fail/skip；`summary.skip` 常驻）；P12 直接发 v1.1 词汇名 `installed_bundle`（四态 skip/warn/pass/warn，r6 表待发）。
 
 - [zoahdev/dsh-plugin-doctor](https://github.com/zoahdev/dsh-plugin-doctor) —— 发布前插件 bundle 健康检查（manifest/patch/entry/files/build/pack+全新 profile 安装）+ 宿主遮蔽 `profile-shadow` 哨兵（作者/CI 侧）。与本工具的用户侧 profile/session/env 诊断互补；它的 `profile-shadow` 与我们的 P5 从两个方向标记同一个宿主遮蔽前置条件。
 - [boyin111-1/dsh-doctor](https://github.com/boyin111-1/dsh-doctor) —— 同生态位离线诊断兄弟实现，用同一批坏 fixture 交叉验证。

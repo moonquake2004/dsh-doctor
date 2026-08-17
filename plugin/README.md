@@ -47,7 +47,7 @@ With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2
 | P4 | `file:` dependencies intact | [#1197](https://github.com/deepseek-ai/deepseek-harness/discussions/1197) |
 | P5 | no top-level `@deepseek-ai/*` duplication (dual module instances) | [#1486](https://github.com/deepseek-ai/deepseek-harness/discussions/1486), [#1697](https://github.com/deepseek-ai/deepseek-harness/discussions/1697) |
 | P7 | `cordis.patch.yml` structural lint (`~ insert:` null-literal typo, tab indentation, missing colon → UI won't boot) | [#1724](https://github.com/deepseek-ai/deepseek-harness/discussions/1724) |
-| P12 | profile-installed bundle version vs running CLI (warn on divergence; the web "Doctor" panel / `/dsh-doctor/run` API runs the bundle) | [#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719) v1.1 `installed_bundle` |
+| P12 | profile-installed bundle version vs running CLI (emits vocabulary name `installed_bundle`, #1719 v1.1: skip when unlisted / warn on manifest-lies or divergence / pass when equal; the web "Doctor" panel / `/dsh-doctor/run` API run the bundle) | [#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719) |
 
 ### session
 | ID | Checks | Discussion |
@@ -70,7 +70,7 @@ With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2
 
 ## Related community tools
 
-> **dsh-doctor/v1 vocabulary r5 compatible** — drafted by [@ciceroyang](https://github.com/ciceroyang) (ciceroyang/dsh-doctor), reviewed by [@sjh9714](https://github.com/sjh9714) (dsh-win32) and [@moonquake2004](https://github.com/moonquake2004) ([#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719)). Our `node`/`pnpm` checks emit the vocabulary names with r5 semantics (pass/warn/fail/skip; `summary.skip` always present).
+> **dsh-doctor/v1 vocabulary r5 compatible, v1.1 `installed_bundle` pending** — drafted by [@ciceroyang](https://github.com/ciceroyang) (ciceroyang/dsh-doctor), reviewed by [@sjh9714](https://github.com/sjh9714) (dsh-win32) and [@moonquake2004](https://github.com/moonquake2004) ([#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719)). Our `node`/`pnpm` checks emit the vocabulary names with r5 semantics (pass/warn/fail/skip; `summary.skip` always present); P12 emits the v1.1 vocabulary name `installed_bundle` (skip/warn/pass/warn four-state, r6 sheet pending).
 
 - [zoahdev/dsh-plugin-doctor](https://github.com/zoahdev/dsh-plugin-doctor) — pre-publish plugin bundle health checks (manifest/patch/entry/files/build/pack+fresh-profile install) plus a `profile-shadow` tripwire for host-shadowing (author/CI side). Complementary to this tool's user-side profile/session/env diagnostics; its `profile-shadow` and our P5 flag the same host-shadowing precondition from two sides.
 - [boyin111-1/dsh-doctor](https://github.com/boyin111-1/dsh-doctor) — sibling offline diagnostic, cross-verified against the same broken fixtures.

@@ -4,7 +4,8 @@ Pinned here so every tool in the ecosystem (and its CI/support consumers) has on
 place to check the shape. Status: living — updates tracked in
 deepseek-ai/deepseek-harness discussions #1719 (doctor spec) and #1846 (RFC).
 Vocabulary layer: **check-name vocabulary r5** (#1719, drafted by @ciceroyang,
-reviewed by @sjh9714 and @moonquake2004).
+reviewed by @sjh9714 and @moonquake2004); **v1.1 supplement** adds
+`installed_bundle` (semantics settled in #1719, r6 sheet pending).
 
 ## Full envelope — `dsh-doctor/v1`
 
@@ -53,11 +54,15 @@ pinned semantics.
 | log_health | zstd container structure + decodeability (multi-frame scan + decode) | ok; fail bad frames / decode failure | #1043 |
 | dedupe | critical packages single-copy | ok; fail multi-copy | #1849 |
 | port | default port availability | ok free; warn occupied | - |
+| installed_bundle | the version of the bundle the profile actually has vs the running CLI | skip when the manifest lists no bundle (mandatory reason: CLI running standalone); warn when listed-but-absent or installed-and-diverged; pass when installed and equal | #1719 (v1.1) |
 
 Mapping note: our E3-node ↔ `node`, E1-pnpm ↔ `pnpm` (warn severity since r5);
 S9's frame/decode class maps to `log_health`; S11's integrity/quarantine/heap
 scan is NOT covered by `log_health` and stays tool-local until its semantics are
-aligned separately.
+aligned separately. **P12 emits the vocabulary name `installed_bundle` directly**
+(r6/v1.1 nomination, #1719 — the other two implementations follow the same
+mapping: dsh-win32's `dsh-win32/bundle` → `installed_bundle`, ciceroyang abstains
+as it does not ship the check).
 
 ## Minimal compatible subset
 
@@ -70,7 +75,7 @@ can be derived from `checks`.
 
 | Tool | Mode | Shape |
 |---|---|---|
-| moonquake2004/dsh-doctor | `--json --envelope` | full envelope (v1, emits `tool`, summary.skip, vocabulary r5 node/pnpm) |
+| moonquake2004/dsh-doctor | `--json --envelope` | full envelope (v1, emits `tool`, summary.skip, vocabulary r5 node/pnpm + v1.1 `installed_bundle`) |
 | zoahdev/dsh-plugin-doctor | v1.6.0 `--profile --json` | full envelope (v1) |
 | worm-ai/dsh-diagnose | `--doctor-json` | subset — needs lowercase status to be v1-compatible |
 | ciceroyang/dsh-doctor | v0.5.0+ | full envelope (r5, skip) |
