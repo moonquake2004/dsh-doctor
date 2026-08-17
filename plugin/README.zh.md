@@ -6,7 +6,7 @@
 
 ## 为什么
 
-dsh 的插件树"装出来就是脆的"：一个悬空引用、一个断掉的 `file:` 链接、一个重复的 entry id、一段损坏的会话日志，都能让 profile 在启动时直接挂掉或拖垮整个 web 服务器——而 `--dump-config` 从不挂载 loader，所以在坏配置上也"一切正常"。这类故障被汇总在 [dsh discussion #1496](https://github.com/deepseek-ai/deepseek-harness/discussions/1496)（Advisory：插件安装路径需要护栏）。`dsh-doctor` 就是这个护栏——**20 项内置检查**映射到 18 个社区报告，每一项都用合成负样例验证过；外加一个**自更新的远程检查目录**（声明式规则，v0.2.0 起）。
+dsh 的插件树"装出来就是脆的"：一个悬空引用、一个断掉的 `file:` 链接、一个重复的 entry id、一段损坏的会话日志，都能让 profile 在启动时直接挂掉或拖垮整个 web 服务器——而 `--dump-config` 从不挂载 loader，所以在坏配置上也"一切正常"。这类故障被汇总在 [dsh discussion #1496](https://github.com/deepseek-ai/deepseek-harness/discussions/1496)（Advisory：插件安装路径需要护栏）。`dsh-doctor` 就是这个护栏——**26 项内置检查**（env 7 / profile 11 / session 8）映射到 18 个社区报告，每一项都用合成负样例验证过；外加一个**自更新的远程检查目录**（声明式规则，v0.2.0 起）。
 
 ## 用法
 
@@ -21,7 +21,7 @@ node dsh-doctor.mjs --no-catalog         # 不拉远程目录（只用内置副�
 
 退出码：`0` = 全部通过 · `1` = 发现问题（内置检查 + 目录中 `severity: error` 的项）· warn 级目录失败不改退出码。
 
-## 检查项（20 内置 + 4 目录）
+## 检查项（26 内置 + 5 目录）
 
 ### env
 | ID | 检查 | 对应讨论 |
@@ -106,7 +106,7 @@ The `dsh-doctor/v1` envelope (`--json --envelope`) is the machine-readable form 
 
 ## 远程检查目录（v0.2.0，层 A）
 
-内置 20 项检查编译在工具里。**目录**是第二层、自更新的：本仓库的 `plugin/checks.json` 放声明式规则（**规则是数据，不是代码**），所有已装实例自动获取新规则——无需重装。
+内置 26 项检查编译在工具里。**目录**是第二层、自更新的：本仓库的 `plugin/checks.json` 放声明式规则（**规则是数据，不是代码**），所有已装实例自动获取新规则——无需重装。
 
 - **工作机制**：每次运行尝试从 GitHub 拉 `plugin/checks.json`（3s 超时）→ 成功后缓存到 `$DSH_HOME/.cache/dsh-doctor/checks.json`（TTL 6h）→ 失败回退 last-known-good 缓存 → 再回退内置副本。新检查因此在上游提交后 ≤6h 内自动到达。
 - **安全性**：规则是**只读探测原语**，由内置引擎执行（`command-exists`、`path-*`、`json-valid`、`text-contains` / `text-not-contains`、`file-size-above`、`glob-count`）。远程内容永远无法执行代码——只能新增模式检查。
@@ -134,7 +134,7 @@ The `dsh-doctor/v1` envelope (`--json --envelope`) is the machine-readable form 
 
 ## 也可作为 dsh 插件安装
 
-工具以标准 dsh bundle 形态发布（`plugin/`），可以在 web UI 里跑同样的检查（20 内置 + 目录规则）：
+工具以标准 dsh bundle 形态发布（`plugin/`），可以在 web UI 里跑同样的检查（26 内置 + 5 目录规则）：
 
 ```bash
 # 装进 profile（checkout 或已发布路径均可）

@@ -8,7 +8,7 @@ Zero npm dependencies. One file. Runs anywhere `node` exists (`zstd` needed only
 
 ## Why
 
-dsh's plugin tree is "fragile by install": a dangling reference, a broken `file:` link, a duplicate entry id, or a corrupted session log can brick the profile at boot or stall the whole web server — and `--dump-config` never mounts the loader, so it passes on broken setups. This class of failure was consolidated in [dsh discussion #1496](https://github.com/deepseek-ai/deepseek-harness/discussions/1496) (Advisory: plugin-install path needs guardrails). `dsh-doctor` is the offline check that advisory calls for — 20 built-in checks mapped to 18 community reports, each verified with synthetic negative fixtures, plus a self-updating remote catalog of declarative pattern checks (v0.2.0).
+dsh's plugin tree is "fragile by install": a dangling reference, a broken `file:` link, a duplicate entry id, or a corrupted session log can brick the profile at boot or stall the whole web server — and `--dump-config` never mounts the loader, so it passes on broken setups. This class of failure was consolidated in [dsh discussion #1496](https://github.com/deepseek-ai/deepseek-harness/discussions/1496) (Advisory: plugin-install path needs guardrails). `dsh-doctor` is the offline check that advisory calls for — 26 built-in checks (env/profile/session) mapped to 18 community reports, each verified with synthetic negative fixtures, plus a self-updating remote catalog of 5 declarative pattern checks.
 
 ## Usage
 
@@ -26,7 +26,7 @@ Exit codes (default mode): `0` = all pass · `1` = problems found (built-in chec
 
 With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2` = any FAIL. The envelope follows the shared `dsh-doctor/v1` schema (`{ schema, generatedAt, profile, exitCode, summary, ok, checks:[{name,status,detail}] }`) so implementations are interchangeable for CI/marketplace use. Installed via npm, the CLI is also available as the `dsh-doctor` bin.
 
-## Checks (20)
+## Checks (26 built-in + 5 catalog = 31)
 
 ### env
 | ID | Checks | Discussion |
@@ -113,7 +113,7 @@ The tool also watches its own npm version: each run compares the installed versi
 
 ## Remote check catalog (v0.2.0)
 
-The built-in 20 checks are compiled into the tool. The **catalog** is a second, self-updating layer: `plugin/checks.json` in this repo holds declarative rules (data, not code), and every installed instance picks up new rules automatically — no reinstall needed.
+The built-in 26 checks are compiled into the tool. The **catalog** is a second, self-updating layer: `plugin/checks.json` in this repo holds declarative rules (data, not code), and every installed instance picks up new rules automatically — no reinstall needed.
 
 - **How it works**: each run tries to fetch `plugin/checks.json` from GitHub (3s timeout) → on success it's cached to `$DSH_HOME/.cache/dsh-doctor/checks.json` (TTL 6h) → on failure it falls back to the last-known-good cache, then to the bundled copy. New checks therefore arrive within ≤6h of being committed upstream.
 - **Safety**: rules are **read-only probes** executed by the built-in engine (`command-exists`, `path-*`, `json-valid`, `text-contains` / `text-not-contains`, `file-size-above`, `glob-count`). The remote payload can never run code — it can only add pattern checks.
@@ -141,7 +141,7 @@ Safety invariants: closed probe vocabulary (LLM output is data, never code), pro
 
 ## Also installable as a dsh plugin
 
-The tool ships as a proper dsh bundle (`plugin/`), so you can run the same checks (20 built-in + catalog rules) from inside the web UI:
+The tool ships as a proper dsh bundle (`plugin/`), so you can run the same checks (26 built-in + 5 catalog rules) from inside the web UI:
 
 ```bash
 # install into a profile (works from a checkout or a published path)
