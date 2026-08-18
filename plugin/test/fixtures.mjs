@@ -81,6 +81,24 @@ test('P1：悬空 bundle 条目 → 失败', () => {
   rmSync(home, { recursive: true, force: true });
 });
 
+test('P1：installAnchor 缺失时跳过宿主侧 bundle（不误报）', () => {
+  const home = tempHome();
+  // 一个在 profile node_modules 的 bundle + 一个不在的 ghost
+  profileFixture(home, 'web', {
+    manifest: { name: 'web', dsh: { profile: { bundles: ['real-bundle', 'ghost-host-bundle'] } } },
+    patch: '',
+    nodeModules: {
+      'real-bundle/package.json': JSON.stringify({ name: 'real-bundle', dsh: { bundle: { patch: './patch.yml' } } }),
+      'real-bundle/patch.yml': '',
+    },
+  });
+  // 清掉 PATH 里的 node_modules/.bin/dsh 锚点 → installAnchor=null
+  const cleanPath = (process.env.PATH || '').split(':').filter(p => !p.endsWith('node_modules/.bin')).join(':');
+  const { map } = runCli({ home, args: ['--profile', 'web'], env: { PATH: cleanPath } });
+  assert.notEqual(map.get('P1'), false, 'installAnchor 缺失时 P1 不应误报 ghost bundle');
+  rmSync(home, { recursive: true, force: true });
+});
+
 test('P2：bundle 与用户 patch insert id 冲突 → 失败', () => {
   const home = tempHome();
   const bundlePatch = '- insert:\n    - id: dup-id\n      name: bundle-x\n';
@@ -93,6 +111,27 @@ test('P2：bundle 与用户 patch insert id 冲突 → 失败', () => {
       // user-x 需可解析（有 main/index.js），否则 P3 也会触发（破坏隔离性）
       'user-x/package.json': JSON.stringify({ name: 'user-x', version: '1.0.0', main: 'index.js' }),
       'user-x/index.js': 'module.exports = 1;\n',
+    },
+  });
+  assertIsolated(home, ['--profile', 'web'], 'P2');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P2：多个 bundle 注册相同 entry id → 失败（#2315 跨 bundle 冲突）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: { name: 'web', dsh: { profile: { bundles: ['fake-bundle-a', 'fake-bundle-b'] } } },
+    patch: '',
+    nodeModules: {
+      'fake-bundle-a/package.json': JSON.stringify({ name: 'fake-bundle-a', dsh: { bundle: { patch: './patch.yml' } } }),
+      'fake-bundle-a/patch.yml': '- insert:\n    - id: shared-entry\n      name: module-a\n',
+      'fake-bundle-b/package.json': JSON.stringify({ name: 'fake-bundle-b', dsh: { bundle: { patch: './patch.yml' } } }),
+      'fake-bundle-b/patch.yml': '- insert:\n    - id: shared-entry\n      name: module-b\n',
+      // shared-entry 需可解析
+      'module-a/package.json': JSON.stringify({ name: 'module-a', version: '1.0.0', main: 'index.js' }),
+      'module-a/index.js': 'module.exports = 1;\n',
+      'module-b/package.json': JSON.stringify({ name: 'module-b', version: '1.0.0', main: 'index.js' }),
+      'module-b/index.js': 'module.exports = 2;\n',
     },
   });
   assertIsolated(home, ['--profile', 'web'], 'P2');
@@ -141,6 +180,22 @@ test('P5：symlink 指向宿主同一份（#1697 link: workaround）→ 不误�
   symlinkSync(join(hostScope, hostPkg), join(dir, 'node_modules', '@deepseek-ai', hostPkg), 'dir');
   const { map } = runCli({ home, args: ['--profile', 'web'] });
   assert.notEqual(map.get('P5'), false, `指向宿主的 symlink（${hostPkg}）不应报 P5`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P5：installAnchor 缺失时 symlink 不误报（#1697 workaround）', () => {
+  const home = tempHome();
+  const dir = join(home, 'profiles', 'web');
+  mkdirSync(join(dir, 'node_modules', '@deepseek-ai'), { recursive: true });
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'web' }));
+  // 创建一个指向临时目录的 symlink（模拟 #1697 link: workaround）
+  const fakeTarget = mkdtempSync(join(tmpdir(), 'p5-host-'));
+  writeFileSync(join(fakeTarget, 'package.json'), JSON.stringify({ name: '@deepseek-ai/cosmokit', version: '1.0.0' }));
+  symlinkSync(fakeTarget, join(dir, 'node_modules', '@deepseek-ai', 'cosmokit'), 'dir');
+  // 清掉 PATH 锚点 → installAnchor=null
+  const cleanPath = (process.env.PATH || '').split(':').filter(p => !p.endsWith('node_modules/.bin')).join(':');
+  const { map } = runCli({ home, args: ['--profile', 'web'], env: { PATH: cleanPath } });
+  assert.notEqual(map.get('P5'), false, 'installAnchor 缺失时 symlink 不应报 P5');
   rmSync(home, { recursive: true, force: true });
 });
 

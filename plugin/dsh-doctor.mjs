@@ -335,6 +335,10 @@ function checkProfile(name) {
   for (const b of bundles) {
     const dir2 = findPkg(b);
     if (!dir2) {
+      // installAnchor 为 null（web GUI/无 dsh 锚点）时，宿主侧 bundle 无法验证——
+      // 跳过而非误报（#917 core bundles dsh-base/dsh-web-app 由宿主直接提供，
+      // 不在 profile node_modules 里，installAnchor 缺失时 findPkg 找不到是正常的）
+      if (!installAnchor) continue;
       report('profile', 'P1', false, `bundle 条目 ${b} 无法在安装目录或 profile node_modules 解析（#917/#1377/#880）`, `dsh plugin --profile ${name} add ${b} 或从 dsh.profile.bundles 移除`);
     } else {
       const pkg = JSON.parse(readFileSync(join(dir2, 'package.json'), 'utf8'));
@@ -343,19 +347,28 @@ function checkProfile(name) {
       }
     }
   }
-  // P2 id 冲突
-  const bundleIds = new Set();
+  // P2 id 冲突（#1404 bundle↔user + #2315 bundle↔bundle）
+  const bundleIdSources = new Map(); // id → Set<bundle name>
   for (const b of bundles) {
     const dir2 = findPkg(b);
     if (!dir2) continue;
     const pkg = JSON.parse(readFileSync(join(dir2, 'package.json'), 'utf8'));
     const rel = pkg.dsh?.bundle?.patch;
     if (!rel) continue;
-    for (const id of readInsertIds(join(dir2, rel))) bundleIds.add(id);
+    for (const id of readInsertIds(join(dir2, rel))) {
+      if (!bundleIdSources.has(id)) bundleIdSources.set(id, new Set());
+      bundleIdSources.get(id).add(b);
+    }
   }
-  const dup = [...bundleIds].filter((id) => userIds.has(id));
-  if (dup.length) {
-    report('profile', 'P2', false, `bundle 与用户 patch 的 id 冲突（启动必崩 duplicate loader entry id，#1404）: ${dup.join(', ')}`, `备份后从 ${patchPath} 删除这些 insert（或运行 check-dsh-profile.mjs 查看详情）`);
+  // 跨 bundle 冲突：多个 bundle 注册同一 entry id（#2315 dsh-tui↔dsh-web-app agent-presets）
+  const crossBundleDup = [...bundleIdSources].filter(([, s]) => s.size > 1).map(([id, s]) => `${id}（${[...s].join(' + ')}）`);
+  // bundle vs 用户 patch 冲突（#1404）
+  const userBundleDup = [...bundleIdSources.keys()].filter((id) => userIds.has(id));
+  const p2Issues = [];
+  if (crossBundleDup.length) p2Issues.push(`多个 bundle 注册相同 entry id（启动必崩 duplicate loader entry id，#2315）: ${crossBundleDup.join('; ')}`);
+  if (userBundleDup.length) p2Issues.push(`bundle 与用户 patch 的 id 冲突（启动必崩 duplicate loader entry id，#1404）: ${userBundleDup.join(', ')}`);
+  if (p2Issues.length) {
+    report('profile', 'P2', false, p2Issues.join(' | '), crossBundleDup.length ? '移除冲突 bundle 中的一个（如不兼容的 TUI/standalone 插件误装入 profile），或让上游协商唯一 entry id' : `备份后从 ${patchPath} 删除这些 insert（或运行 check-dsh-profile.mjs 查看详情）`);
   } else {
     report('profile', 'P2', true, '无 bundle/用户 patch id 冲突', undefined);
   }
@@ -395,7 +408,8 @@ function checkProfile(name) {
       const fp = join(topDir, p);
       let st;
       try { st = lstatSync(fp); } catch { continue; }
-      if (st.isSymbolicLink() && hostScope) {
+      if (st.isSymbolicLink()) {
+        if (!hostScope) continue; // installAnchor 缺失时无法验证 symlink 指向宿主——跳过（#1697 workaround 已知安全形态）
         try {
           const real = realpathSync(fp);
           const hostPkg = join(hostScope, p);
