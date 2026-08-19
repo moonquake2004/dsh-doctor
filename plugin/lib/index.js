@@ -35,7 +35,7 @@ export function apply(ctx, config) {
  */
 function runChecks(profile, sessionPath) {
     return new Promise((resolvePromise) => {
-        const args = ['--json'];
+        const args = ['--json', '--security'];
         if (profile) args.push('--profile', profile);
         if (sessionPath) args.push('--session', sessionPath);
         const child = spawn(process.execPath, [SCRIPT, ...args], {

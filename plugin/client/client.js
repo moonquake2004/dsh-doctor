@@ -23,6 +23,7 @@ const zh = {
   sectionEnv: '环境',
   sectionProfile: 'Profile',
   sectionSession: '会话',
+  sectionSecurity: '🔒 安全',
   fix: '修复',
   quarantineHint: '隔离建议（手动执行，勿自动）',
   error: '诊断失败：{msg}',
@@ -37,6 +38,7 @@ const en = {
   sectionEnv: 'Environment',
   sectionProfile: 'Profile',
   sectionSession: 'Session',
+  sectionSecurity: '🔒 Security',
   fix: 'Fix',
   quarantineHint: 'Quarantine suggestion (run manually, never auto)',
   error: 'Doctor failed: {msg}',
@@ -86,7 +88,7 @@ function DoctorSection(props) {
     finally { setRunning(false) }
   }, [])
   useEffect(() => { injectStyles(); run() }, [run])
-  const sectionName = (s) => ({ env: L.sectionEnv, profile: L.sectionProfile, session: L.sectionSession }[s] || s)
+  const sectionName = (s) => ({ env: L.sectionEnv, profile: L.sectionProfile, session: L.sectionSession, security: L.sectionSecurity }[s] || s)
   return h('div', { className: 'dshd-wrap' },
     h('div', { style: { display: 'flex', gap: '10px', alignItems: 'center' } },
       h('button', { className: 'dshd-btn', onClick: run, disabled: running }, running ? L.running : L.run)),

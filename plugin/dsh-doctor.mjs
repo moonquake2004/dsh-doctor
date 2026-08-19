@@ -61,6 +61,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 const HOME = process.env.DSH_HOME || join(homedir(), '.dsh');
 const results = []; // { section, id, ok, detail, fix? }
 const jsonOut = process.argv.includes('--json');
+const securityOnly = process.argv.includes('--security-only');
 const only = process.argv
   .filter((a) => a.startsWith('--profile') || a.startsWith('--session') || a === '--env')
   .map((a) => a.startsWith('--') ? a.slice(2) : a);
@@ -1262,45 +1263,109 @@ async function run() {
       process.exit(1);
     }
   }
-  try { checkEnv(); } catch (e) { report('env', 'E0', false, `env 检查异常: ${e.message.slice(0, 80)}`); }
-  try { await checkPort3080(); } catch (e) { report('env', 'E10-port-3080', false, `端口检查异常: ${e.message.slice(0, 60)}`); }
-  try { checkProfile(profileArg); } catch (e) { report('profile', 'P0', false, `profile 检查异常: ${e.message.slice(0, 100)}`); }
-  try { checkSession(sessionArg); } catch (e) { report('session', 'S0', false, `session 检查异常: ${e.message.slice(0, 100)}`); }
-  try { scanAllSessions(); } catch (e) { report('session', 'S11', false, `全会话扫描异常: ${e.message.slice(0, 100)}`); }
-
-  // 远程检查目录（层 A）：内置检查之后追加执行；--no-catalog 只走内置副本
-  let catalogMeta = { source: 'none', checks: 0 };
-  try {
-    const catalog = await loadCatalog({ noRemote: process.argv.includes('--no-catalog'), fetchImpl: typeof fetch === 'function' ? fetch : undefined });
-    catalogMeta = { source: catalog.source, checks: catalog.checks.length };
-    const profileDir = (() => { try { return resolveProfile(profileArg); } catch { return null; } })();
-    if (catalog.checks.length && profileDir) checkCatalog({ home: HOME, profile: profileArg, profileDir }, catalog);
-    else if (catalog.checks.length) report('catalog', 'C0', true, `profile 无效（${profileArg}），目录检查跳过（${catalog.source}）`, undefined, 'catalog');
-  } catch (e) {
-    catalogMeta = { source: 'error', checks: 0, error: e.message.slice(0, 80) };
+  // --security-only 跳过非安全检查
+  if (!securityOnly) {
+    try { checkEnv(); } catch (e) { report('env', 'E0', false, `env 检查异常: ${e.message.slice(0, 80)}`); }
+    try { await checkPort3080(); } catch (e) { report('env', 'E10-port-3080', false, `端口检查异常: ${e.message.slice(0, 60)}`); }
+    try { checkProfile(profileArg); } catch (e) { report('profile', 'P0', false, `profile 检查异常: ${e.message.slice(0, 100)}`); }
+    try { checkSession(sessionArg); } catch (e) { report('session', 'S0', false, `session 检查异常: ${e.message.slice(0, 100)}`); }
+    try { scanAllSessions(); } catch (e) { report('session', 'S11', false, `全会话扫描异常: ${e.message.slice(0, 100)}`); }
   }
 
-  // 层 B：版本检查与更新（--no-catalog 同时禁用网络检查；--update 手动更新；DSH_DOCTOR_AUTO_UPDATE=1 自动）
+  // 远程检查目录（层 A）：内置检查之后追加执行；--no-catalog 只走内置副本；--security-only 跳过
+  let catalogMeta = { source: 'none', checks: 0 };
+  if (!securityOnly) {
+    try {
+      const catalog = await loadCatalog({ noRemote: process.argv.includes('--no-catalog'), fetchImpl: typeof fetch === 'function' ? fetch : undefined });
+      catalogMeta = { source: catalog.source, checks: catalog.checks.length };
+      const profileDir = (() => { try { return resolveProfile(profileArg); } catch { return null; } })();
+      if (catalog.checks.length && profileDir) checkCatalog({ home: HOME, profile: profileArg, profileDir }, catalog);
+      else if (catalog.checks.length) report('catalog', 'C0', true, `profile 无效（${profileArg}），目录检查跳过（${catalog.source}）`, undefined, 'catalog');
+    } catch (e) {
+      catalogMeta = { source: 'error', checks: 0, error: e.message.slice(0, 80) };
+    }
+  }
+
+  // 层 B：版本检查与更新（--no-catalog 同时禁用网络检查；--update 手动更新；DSH_DOCTOR_AUTO_UPDATE=1 自动；--security-only 跳过）
   const noRemote = process.argv.includes('--no-catalog');
   let updateInfo = { current: localVersion(), latest: null, available: false };
-  try {
-    updateInfo = await checkForUpdate({ noRemote, fetchImpl: typeof fetch === 'function' ? fetch : undefined });
-  } catch (e) {
-    updateInfo = { current: localVersion(), latest: null, available: false, error: e.message.slice(0, 60) };
+  if (!securityOnly) {
+    try {
+      updateInfo = await checkForUpdate({ noRemote, fetchImpl: typeof fetch === 'function' ? fetch : undefined });
+    } catch (e) {
+      updateInfo = { current: localVersion(), latest: null, available: false, error: e.message.slice(0, 60) };
+    }
+    if (process.argv.includes('--update') || (process.env.DSH_DOCTOR_AUTO_UPDATE === '1' && updateInfo.available)) {
+      updateInfo.applied = runUpdate();
+    }
   }
-  if (process.argv.includes('--update') || (process.env.DSH_DOCTOR_AUTO_UPDATE === '1' && updateInfo.available)) {
-    updateInfo.applied = runUpdate();
+
+  // 安全检查（--security）：导入 dsh-security 运行安全检查，合并到 results
+  const securityEnabled = process.argv.includes('--security');
+  let securityMeta = { enabled: false, summary: {} };
+  if (securityEnabled) {
+    try {
+      // 尝试从 profile node_modules 或全局安装导入 dsh-security
+      let secMod;
+      const profileDir = (() => { try { return resolveProfile(profileArg); } catch { return null; } })();
+      const secCandidates = [
+        profileDir ? join(profileDir, 'node_modules', '@moonquake2004', 'dsh-security', 'src', 'index.mjs') : null,
+        join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'node_modules', '@moonquake2004', 'dsh-security', 'src', 'index.mjs'),
+        '/Users/waterfly/dsh工作区/dsh-security/src/index.mjs',
+      ].filter(Boolean);
+      for (const candidate of secCandidates) {
+        if (existsSync(candidate)) { secMod = await import(candidate); break; }
+      }
+      if (secMod) {
+        const registry = await secMod.createDefaultRegistry();
+        // 获取最新会话文件（供 SR*/SS* 检查使用）
+        const findLatestSession = () => {
+          if (sessionArg) return sessionArg;
+          try {
+            const sDir = join(HOME, 'sessions');
+            const latest = readdirSync(sDir).filter(f => f.endsWith('.jsonl')).sort().pop();
+            return latest ? join(sDir, latest) : null;
+          } catch { return null; }
+        };
+
+        const { results: secResults, exitCode: secExit, summary: secSummary } = await registry.runAll(
+          (check) => {
+            // 静态检查用 profile 目录
+            if (check.phase === 'pre-install' || check.phase === 'lifecycle') {
+              return profileDir || profileArg;
+            }
+            // SR*/SS* 检查用会话文件
+            if (check.id && (check.id.startsWith('SR') || check.id.startsWith('SS'))) {
+              return findLatestSession() || null;
+            }
+            // 默认用 profile 目录
+            return profileDir || profileArg;
+          }
+        );
+        for (const r of secResults) {
+          results.push({ section: 'security', id: r.id, ok: r.ok, detail: r.detail, fix: r.fix, severity: r.severity, skip: false });
+        }
+        securityMeta = { enabled: true, summary: secSummary, exitCode: secExit };
+      } else {
+        securityMeta = { enabled: true, error: 'dsh-security not found', summary: {} };
+      }
+    } catch (e) {
+      securityMeta = { enabled: true, error: e.message.slice(0, 80), summary: {} };
+    }
   }
 
   // 退出码只计内置失败 + catalog 中 severity=error 的失败；warn 失败提示但不改退出码
+  // 安全检查退出码：CRITICAL→2, HIGH→1（取 max）
   const bad = results.filter((r) => !r.ok && catalogSeverity.get(r.id) !== 'warn');
+  const secExit = securityMeta.exitCode ?? 0;
   if (jsonOut && process.argv.includes('--envelope')) {
     // v1 契约信封（dsh doctor 规格，zoahdev/doctor 对齐）：status 小写 + 退出码 0/1/2
     const st = (r) => (r.skip ? 'skip' : (!r.ok ? (catalogSeverity.get(r.id) === 'warn' ? 'warn' : 'fail') : 'pass'));
     const summary = { pass: 0, warn: 0, fail: 0, skip: 0 }; // skip 常驻（v1 词汇表 r5：#1719），r5 后 P12 会在未装 bundle 时实际触发
-    const checks = results.map((r) => { summary[st(r)]++; return { name: r.id, status: st(r), detail: r.detail }; });
-    const exitCode = summary.fail > 0 ? 2 : summary.warn > 0 ? 1 : 0;
-    console.log(JSON.stringify({
+    const checks = results.map((r) => { summary[st(r)]++; return { name: r.id, status: st(r), detail: r.detail, ...(r.severity ? { severity: r.severity } : {}), ...(r.section === 'security' ? { section: 'security' } : {}) }; });
+    const baseExit = summary.fail > 0 ? 2 : summary.warn > 0 ? 1 : 0;
+    const exitCode = Math.max(baseExit, secExit);
+    const out = {
       schema: 'dsh-doctor/v1',
       tool: 'dsh-doctor',
       generatedAt: new Date().toISOString(),
@@ -1309,10 +1374,14 @@ async function run() {
       summary,
       ok: exitCode === 0,
       checks,
-    }, null, 2));
+    };
+    if (securityMeta.enabled) {
+      out.security = { enabled: true, summary: securityMeta.summary, ...(securityMeta.error ? { error: securityMeta.error } : {}) };
+    }
+    console.log(JSON.stringify(out, null, 2));
     process.exit(exitCode);
   } else if (jsonOut) {
-    console.log(JSON.stringify({ ok: bad.length === 0, checks: results, catalog: catalogMeta, update: updateInfo }, null, 2));
+    console.log(JSON.stringify({ ok: bad.length === 0 && secExit === 0, checks: results, catalog: catalogMeta, update: updateInfo, ...(securityMeta.enabled ? { security: securityMeta } : {}) }, null, 2));
   } else {
     const sectionOrder = { env: 0, profile: 1, session: 2, catalog: 3 };
     const ordered = [...results].sort((a, b) => (sectionOrder[a.section] ?? 9) - (sectionOrder[b.section] ?? 9));
