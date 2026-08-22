@@ -1301,49 +1301,71 @@ async function run() {
   }
 
   // 安全检查（--security）：导入 dsh-security 运行安全检查，合并到 results
-  const securityEnabled = process.argv.includes('--security');
+  // --security-only 隐含启用安全检查（复审修复：此前单独使用 = 静默空跑）
+  const securityEnabled = process.argv.includes('--security') || securityOnly;
   let securityMeta = { enabled: false, summary: {} };
   if (securityEnabled) {
     try {
-      // 尝试从 profile node_modules 或全局安装导入 dsh-security
+      // 尝试从 profile node_modules 或全局安装导入 dsh-security；
+      // 开发调试可用 DSH_SECURITY_SRC 指向工作区源码（复审修复：移除硬编码个人路径）
       let secMod;
       const profileDir = (() => { try { return resolveProfile(profileArg); } catch { return null; } })();
       const secCandidates = [
+        process.env.DSH_SECURITY_SRC,
         profileDir ? join(profileDir, 'node_modules', '@moonquake2004', 'dsh-security', 'src', 'index.mjs') : null,
         join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'node_modules', '@moonquake2004', 'dsh-security', 'src', 'index.mjs'),
-        '/Users/waterfly/dsh工作区/dsh-security/src/index.mjs',
       ].filter(Boolean);
       for (const candidate of secCandidates) {
         if (existsSync(candidate)) { secMod = await import(candidate); break; }
       }
       if (secMod) {
         const registry = await secMod.createDefaultRegistry();
+        // 注入 ~/.dsh/security.json 配置（旧版 dsh-security 无此能力时静默跳过）
+        try {
+          if (secMod.loadConfig && typeof registry.setConfig === 'function') {
+            registry.setConfig(secMod.loadConfig(HOME));
+          }
+        } catch { /* 配置损坏不影响检查 */ }
         // 获取最新会话文件（供 SR*/SS* 检查使用）
+        // 复审修复：对齐 S11 的两层布局 sessions/<user>/<session>/session.jsonl[.zstd]，
+        // 按 mtime 取最新；旧实现只扫顶层 *.jsonl，真实部署下永远返回 null → 运行时层全跳过
         const findLatestSession = () => {
           if (sessionArg) return sessionArg;
           try {
-            const sDir = join(HOME, 'sessions');
-            const latest = readdirSync(sDir).filter(f => f.endsWith('.jsonl')).sort().pop();
-            return latest ? join(sDir, latest) : null;
+            const root = join(HOME, 'sessions');
+            const candidates = [];
+            for (const u of readdirSync(root)) {
+              const sd = join(root, u);
+              let subs = [];
+              try { subs = readdirSync(sd); } catch { continue; }
+              for (const s of subs) {
+                const zstdPath = join(sd, s, 'session.jsonl.zstd');
+                const plainPath = join(sd, s, 'session.jsonl');
+                const f = existsSync(zstdPath) ? zstdPath : (existsSync(plainPath) ? plainPath : null);
+                if (!f) continue;
+                try { candidates.push({ f, m: statSync(f).mtimeMs }); } catch { /* race */ }
+              }
+              // 兼容直接放在用户目录下的散文件
+              const loose = join(sd, 'session.jsonl');
+              if (existsSync(loose)) { try { candidates.push({ f: loose, m: statSync(loose).mtimeMs }); } catch { /* race */ } }
+            }
+            candidates.sort((a, b) => b.m - a.m);
+            return candidates.length ? candidates[0].f : null;
           } catch { return null; }
         };
 
         const { results: secResults, exitCode: secExit, summary: secSummary } = await registry.runAll(
           (check) => {
-            // 静态检查用 profile 目录
-            if (check.phase === 'pre-install' || check.phase === 'lifecycle') {
-              return profileDir || profileArg;
-            }
-            // SR*/SS* 检查用会话文件
+            // SR*/SS* 运行时会话检查用会话文件
             if (check.id && (check.id.startsWith('SR') || check.id.startsWith('SS'))) {
-              return findLatestSession() || null;
+              return findLatestSession();
             }
-            // 默认用 profile 目录
+            // 其余（SP*/SL*/EXT-*）用 profile 目录
             return profileDir || profileArg;
           }
         );
         for (const r of secResults) {
-          results.push({ section: 'security', id: r.id, ok: r.ok, detail: r.detail, fix: r.fix, severity: r.severity, skip: false });
+          results.push({ section: 'security', id: r.id, ok: r.ok, detail: r.detail, fix: r.fix, severity: r.severity, skip: !!r.skipped });
         }
         securityMeta = { enabled: true, summary: secSummary, exitCode: secExit };
       } else {
@@ -1355,15 +1377,25 @@ async function run() {
   }
 
   // 退出码只计内置失败 + catalog 中 severity=error 的失败；warn 失败提示但不改退出码
-  // 安全检查退出码：CRITICAL→2, HIGH→1（取 max）
-  const bad = results.filter((r) => !r.ok && catalogSeverity.get(r.id) !== 'warn');
+  // 安全检查走独立通道：secExit 由 dsh-security 按 severity 计算（CRITICAL→2, HIGH→1, 其余 0），
+  // 不参与 bad[] 与信封 baseExit——复审修复：此前任何安全失败（哪怕 LOW 级关注点）都会把退出码抬到 1/2，
+  // 违反 dsh-security 契约「MEDIUM 及以下不影响退出码」与本函数上方注释的声明。
+  const bad = results.filter((r) => r.section !== 'security' && !r.ok && catalogSeverity.get(r.id) !== 'warn');
   const secExit = securityMeta.exitCode ?? 0;
   if (jsonOut && process.argv.includes('--envelope')) {
     // v1 契约信封（dsh doctor 规格，zoahdev/doctor 对齐）：status 小写 + 退出码 0/1/2
-    const st = (r) => (r.skip ? 'skip' : (!r.ok ? (catalogSeverity.get(r.id) === 'warn' ? 'warn' : 'fail') : 'pass'));
+    const st = (r) => (r.skip ? 'skip' : (!r.ok ? (((r.section === 'security') ? r.severity !== 'critical' : catalogSeverity.get(r.id) === 'warn') ? 'warn' : 'fail') : 'pass'));
     const summary = { pass: 0, warn: 0, fail: 0, skip: 0 }; // skip 常驻（v1 词汇表 r5：#1719），r5 后 P12 会在未装 bundle 时实际触发
     const checks = results.map((r) => { summary[st(r)]++; return { name: r.id, status: st(r), detail: r.detail, ...(r.severity ? { severity: r.severity } : {}), ...(r.section === 'security' ? { section: 'security' } : {}) }; });
-    const baseExit = summary.fail > 0 ? 2 : summary.warn > 0 ? 1 : 0;
+    // baseExit 只统计非安全项；安全项对退出码的贡献由 secExit 独立承载
+    let baseFail = 0; let baseWarn = 0;
+    for (const r of results) {
+      if (r.section === 'security') continue;
+      const s = st(r);
+      if (s === 'fail') baseFail++;
+      else if (s === 'warn') baseWarn++;
+    }
+    const baseExit = baseFail > 0 ? 2 : baseWarn > 0 ? 1 : 0;
     const exitCode = Math.max(baseExit, secExit);
     const out = {
       schema: 'dsh-doctor/v1',
@@ -1387,10 +1419,13 @@ async function run() {
     const ordered = [...results].sort((a, b) => (sectionOrder[a.section] ?? 9) - (sectionOrder[b.section] ?? 9));
     let lastSection = '';
     for (const r of ordered) {
-      if (r.section !== lastSection) { console.log(`\n== ${r.section.toUpperCase()} ==`); lastSection = r.section; }
+      if (r.section !== lastSection) { console.log(`\n== ${r.section === 'security' ? '🔒 安全' : r.section.toUpperCase()} ==`); lastSection = r.section; }
       const sev = catalogSeverity.get(r.id);
-      const mark = !r.ok && sev === 'warn' ? '⚠' : (r.ok ? '✓' : '✗');
-      console.log(` ${mark} [${r.id}] ${r.detail}${r.src === 'catalog' ? '  [目录]' : ''}`);
+      // 安全检查：skip 显示 ⊖；critical/high 失败 ✗；medium 及以下失败 ⚠（不影响退出码）
+      const mark = r.skip ? '⊖'
+        : (!r.ok ? (((r.section === 'security' && r.severity !== 'critical' && r.severity !== 'high') || sev === 'warn') ? '⚠' : '✗')
+        : '✓');
+      console.log(` ${mark} [${r.id}]${r.severity ? `（${r.severity}${r.skip ? '/skip' : ''}）` : ''} ${r.detail}${r.src === 'catalog' ? '  [目录]' : ''}`);
       if (!r.ok && r.fix) console.log(`     ↳ 修复: ${r.fix}`);
     }
     if (updateInfo.available && !updateInfo.applied) {
@@ -1398,9 +1433,10 @@ async function run() {
     } else if (updateInfo.applied) {
       console.log(`\n✓ ${updateInfo.applied}`);
     }
-    console.log(`\n${bad.length === 0 ? '✓ 全部通过' : `✗ ${bad.length} 个问题`}（profile=${profileArg}，目录=${catalogMeta.source}，${catalogMeta.checks} 条）`);
+    console.log(`\n${(bad.length === 0 && secExit === 0) ? '✓ 全部通过' : `✗ ${bad.length} 个内置问题${secExit > 0 ? ` + 安全 ${secExit === 2 ? 'CRITICAL' : 'HIGH'} 级失败` : ''}`}（profile=${profileArg}，目录=${catalogMeta.source}，${catalogMeta.checks} 条）`);
   }
-  process.exit(bad.length === 0 ? 0 : 1);
+  // 最终退出码：内置失败 → 1；安全 HIGH → 1、CRITICAL → 2（取 max）
+  process.exit(Math.max(bad.length > 0 ? 1 : 0, secExit));
 }
 
 // 直接执行（CLI：根目录薄封装、plugin 本体、npm bin 均可）；被 import（测试/宿主）时不自动运行

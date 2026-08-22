@@ -1,6 +1,6 @@
 {
   "name": "@moonquake2004/dsh-doctor",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Offline diagnostic for DeepSeek Harness — 28 built-in + 5 catalog checks across env/profile/session (Layer A checks-as-data), self-update (Layer B), and a semi-automatic LLM observer (Layer C, --observe); Doctor panel in web UI settings.",
   "main": "lib/index.js",
   "files": [
