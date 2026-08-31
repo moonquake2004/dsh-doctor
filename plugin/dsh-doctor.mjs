@@ -707,6 +707,36 @@ function checkProfile(name) {
   } catch (e) {
     report('profile', 'installed_bundle', false, `bundle 版本对比异常: ${e.message.slice(0, 60)}`, undefined);
   }
+
+  // P15：关键文件 BOM 检测（#5176：package.json 被意外加 BOM 头导致 JSON 解析失败）
+  // UTF-8 BOM = EF BB BF = '\uFEFF'，pnpm/node 解析 JSON 时不认识 BOM → 报错
+  const bomTargets = [
+    join(dir, 'package.json'),
+    join(dir, 'cordis.patch.yml'),
+    join(dir, 'settings.yaml'),
+  ];
+  // 加上 config/*.json
+  const configDir = join(dir, 'config');
+  if (existsSync(configDir)) {
+    try {
+      for (const f of readdirSync(configDir)) {
+        if (f.endsWith('.json')) bomTargets.push(join(configDir, f));
+      }
+    } catch { /* skip */ }
+  }
+  const bomFiles = [];
+  for (const f of bomTargets) {
+    if (!existsSync(f)) continue;
+    try {
+      const head = readFileSync(f, 'utf8').slice(0, 1);
+      if (head === '\uFEFF') bomFiles.push(f.replace(dir + '/', ''));
+    } catch { /* skip */ }
+  }
+  if (bomFiles.length > 0) {
+    report('profile', 'P15', false, `检测到 BOM 头（#5176：JSON/YAML 解析将失败）: ${bomFiles.join(', ')}`, '用文本编辑器打开文件，删除首字符（BOM/U+FEFF）后保存；或运行: sed -i "" "1s/^\xEF\xBB\xBF//" <file>');
+  } else {
+    report('profile', 'P15', true, '关键文件无 BOM 头', undefined);
+  }
 }
 
 /* ================= session ================= */
@@ -945,6 +975,7 @@ catalogSeverity.set('E3-node', 'warn');
 catalogSeverity.set('installed_bundle', 'warn');
 catalogSeverity.set('P13', 'warn');
 catalogSeverity.set('P14', 'warn');
+catalogSeverity.set('P15', 'error');
 
 function bundledCatalog() {
   const p = new URL('./checks.json', import.meta.url);
