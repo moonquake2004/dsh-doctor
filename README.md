@@ -38,7 +38,7 @@ With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2
 | E3 | node version / `--expose-internals` reachability | [#113](https://github.com/deepseek-ai/deepseek-harness/discussions/113), [#1313](https://github.com/deepseek-ai/deepseek-harness/discussions/1313) |
 | E4 | node-pty native binary present (`prebuilds/<platform>-<arch>/pty.node`) | [#1219](https://github.com/deepseek-ai/deepseek-harness/discussions/1219) |
 | E5 | storage JSON files valid (strict UTF-8 + parse) | [#1357](https://github.com/deepseek-ai/deepseek-harness/discussions/1357) |
-| E6 | anchor tripwire: our S6/S7/S10 contracts still in installed `dsh-session` | [anti-rot idea](https://github.com/deepseek-ai/deepseek-harness/discussions/1534) |
+| E6 | anchor tripwire: the S6/S7/S10 contracts still exist wherever the current release keeps them (npx / global / profile layouts; `dsh-session` or the `dsh-session-format-*` migration chain) | [anti-rot idea](https://github.com/deepseek-ai/deepseek-harness/discussions/1534) |
 | E10 | web port 3080 availability before launch (dsh web itself = OK; other process = FAIL; `DSH_DOCTOR_PORT` override) | [#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719) |
 
 ### profile
@@ -60,7 +60,7 @@ With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2
 | S2 | unclosed turns (session stuck "running") | [#466](https://github.com/deepseek-ai/deepseek-harness/discussions/466), [#1265](https://github.com/deepseek-ai/deepseek-harness/discussions/1265) |
 | S6 | `seq == index` contiguity (official semantics, chunk rows expanded like `expandRow`) | [#1333](https://github.com/deepseek-ai/deepseek-harness/discussions/1333), [#1452](https://github.com/deepseek-ai/deepseek-harness/discussions/1452), [#1469](https://github.com/deepseek-ai/deepseek-harness/discussions/1469) |
 | S7 | post-`end-seed` replay (replayed committed tail) | [#1497](https://github.com/deepseek-ai/deepseek-harness/discussions/1497) |
-| S8 | unknown event types without `ignorable` (wholesale refusal) | [#1538](https://github.com/deepseek-ai/deepseek-harness/discussions/1538) |
+| S8 | unknown event types without `ignorable` (wholesale refusal) — readable set = current table ∪ legacy types recognized by the installed `dsh-session-format-*` migrators | [#1538](https://github.com/deepseek-ai/deepseek-harness/discussions/1538) |
 | S9 | zstd container frame count (single-frame logs → `session.list` 500) | [#1043](https://github.com/deepseek-ai/deepseek-harness/discussions/1043) |
 | S10 | `sourceEventSeqs` referencing non-earlier events | [#1469](https://github.com/deepseek-ai/deepseek-harness/discussions/1469) |
 | S11 | whole-session scan: corrupt → quarantine suggestion; oversized / workspace estimated-heap (max(events×600B, bytes×6), default 1GiB, `DSH_DOCTOR_HEAP_MB`) → cold-start stall risk | [#1550](https://github.com/deepseek-ai/deepseek-harness/discussions/1550) |

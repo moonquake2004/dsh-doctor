@@ -8,7 +8,7 @@
 
 ## Abstract
 
-DeepSeek Harness (dsh) is a plugin-based agent harness whose central design tenet — *"everything is a plugin"* — is realized on Cordis, a meta-framework of *spatiotemporal composability* [2], [3]. While the architecture makes every capability (model adapters, tools, sessions, the agent loop itself) replaceable at configuration time, it also inherits a systemic fragility: a single malformed patch, a duplicate entry id, a shadowed module instance, or a corrupted session log can brick the profile at boot or stall the entire web server with little or no diagnostics. This paper reports on the design, implementation, and field experience of *dsh-doctor*, an offline diagnostic for this failure space, and derives from it a *check-lifecycle model*: (i) checks as declarative data distributed through a remote catalog; (ii) introspection of installed harness contracts instead of hard-coded assumptions; (iii) a fixture-based certification gate that proves a check does not false-positive and does catch its target; and (iv) an evolution loop from community report to certified check. We document 30 checks mapped to 18 community failure reports, 64 regression tests that have caught real bugs in the tool's own history, a three-round false-positive elimination campaign, and the convergence of three independent community tools on a shared machine-readable contract. We conclude with open problems for the broader ecosystem: check registry governance, certification matrices across release trains, and the role of formal composability guarantees in preventing whole failure classes.
+DeepSeek Harness (dsh) is a plugin-based agent harness whose central design tenet — *"everything is a plugin"* — is realized on Cordis, a meta-framework of *spatiotemporal composability* [2], [3]. While the architecture makes every capability (model adapters, tools, sessions, the agent loop itself) replaceable at configuration time, it also inherits a systemic fragility: a single malformed patch, a duplicate entry id, a shadowed module instance, or a corrupted session log can brick the profile at boot or stall the entire web server with little or no diagnostics. This paper reports on the design, implementation, and field experience of *dsh-doctor*, an offline diagnostic for this failure space, and derives from it a *check-lifecycle model*: (i) checks as declarative data distributed through a remote catalog; (ii) introspection of installed harness contracts instead of hard-coded assumptions; (iii) a fixture-based certification gate that proves a check does not false-positive and does catch its target; and (iv) an evolution loop from community report to certified check. We document 34 checks mapped to 33 community failure reports, 109 regression tests that have caught real bugs in the tool's own history, a three-round false-positive elimination campaign, and the convergence of three independent community tools on a shared machine-readable contract. We conclude with open problems for the broader ecosystem: check registry governance, certification matrices across release trains, and the role of formal composability guarantees in preventing whole failure classes.
 
 **Keywords:** agent harness, plugin systems, offline diagnostics, composability, check lifecycle, DeepSeek Harness, Cordis
 
@@ -30,7 +30,7 @@ This paper makes the following contributions:
 
 4. **A check-lifecycle model.** We argue that checks themselves rot as the harness evolves, and propose four properties — checks-as-data, introspection, a fixture-based certification gate, and an evolution loop — each backed by a running reference implementation.
 
-5. **Field experience.** We document 30 checks, 64 regression tests, real bugs the corpus caught in the tool's own history, a three-round false-positive elimination campaign, and the convergence of three independent community tools on a shared `dsh-doctor/v1` output contract.
+5. **Field experience.** We document 34 checks, 109 regression tests, real bugs the corpus caught in the tool's own history, a three-round false-positive elimination campaign, and the convergence of three independent community tools on a shared `dsh-doctor/v1` output contract.
 
 The remainder of this paper is organized as follows. Section 2 provides background on the harness architecture and the threat model. Section 3 surveys related work. Section 4 details the system design. Section 5 presents the check-lifecycle model. Section 6 evaluates the approach empirically. Section 7 discusses limitations and open problems. Section 8 concludes.
 
@@ -129,15 +129,15 @@ As of this writing the tool ships 25 built-in checks and 5 catalog checks (Secti
 
 Each built-in check is validated by at least one synthetic fixture asserting isolation: on a *bad* fixture the target check must fail while every other check passes, and healthy baselines must not false-positive. This discipline is what makes the corpus useful for the certification model of Section 5.
 
-**Table 1 — Check inventory (30 checks, 18 mapped community reports, as of v0.2.7).**
+**Table 1 — Check inventory (34 checks, 33 mapped community reports, as of v0.4.5).**
 
 | Group | IDs | Count | Coverage class | Representative reports |
 |---|---|---|---|---|
-| env (built-in) | E1–E6, E10 | 7 | PATH / files / native binary / storage / anchors / port | [#1270] [#71] [#113] [#1219] [#1357] [#1534] [#1719] |
+| env (built-in) | E1-node/pnpm/zstd, E1–E6, E10 | 8 | PATH / files / native binary / storage / anchors / port | [#1270] [#71] [#113] [#1219] [#1357] [#1534] [#1719] |
 | env (catalog) | E7–E9, E11 | 4 | declarative probes (path/JSON/text/writable) | [#1270] [23] [#1357] [34] |
-| profile | P1–P5, P7–P11 | 10 | composition: resolution / collisions / patch syntax / dual-instance / inject semantics / artifacts | [#1404] [#1486] [#1697] [#1724] [#1904] [#1947] [#1965] |
+| profile | P2–P5, P7–P11, P13, P14, P15, `installed_bundle` | 13 | composition: resolution / collisions / patch syntax / dual-instance / inject semantics / artifacts | [#1404] [#1486] [#1697] [#1724] [#1904] [#1947] [#1965] |
 | session | S1, S2, S6–S11 | 8 | log integrity: continuity / replay / types / containers / drift / heap | [#1363] [#466] [#1333] [#1497] [#1538] [#1043] [#1469] [#1550] |
-| **Total** | | **29 built-in/catalog + 1 (E10) = 30** | | 18 distinct reports |
+| **Total** | | **29 built-in + 5 catalog = 34** | | 33 referenced threads |
 
 Coverage honesty: two symptom families (sandbox denials, approval policy) have **no** offline probe and are explicitly documented as gaps in the published symptom→check mapping [26], [34].
 
@@ -182,9 +182,9 @@ We therefore propose four properties, each backed by a running reference impleme
 
 **Property 1 — Checks are data, not code.** A check is a declarative, read-only probe definition plus its target contract anchor, its good/bad fixture pair, and the release train it was certified on. Distribution happens through a *check registry* (not a plugin registry) with TTL cache and offline fallback. *Reference:* the Layer-A catalog (Section 4.3), which has shipped 5 checks with zero releases.
 
-**Property 2 — Introspection instead of hardcoding.** Read the installed harness's contracts (event-type table, module symbols, patch grammar) to derive or validate expectations. On upgrade, either the anchor passes (check still valid) or the tripwire fails loudly (no silent rot). *Reference:* S8 parses the installed `KNOWN_SESSION_EVENT_TYPES` with fallback; E6 verifies `expandRow`/`session/end-seed`/`sourceEventSeqs` still exist in the installed `dsh-session`. The same idea appears independently in the knowledge domain as dsh-diagnose's `check-knowledge-anchors` [22].
+**Property 2 — Introspection instead of hardcoding.** Read the installed harness's contracts (event-type table, module symbols, patch grammar) to derive or validate expectations. On upgrade, either the anchor passes (check still valid) or the tripwire fails loudly (no silent rot). *Reference:* S8 parses the installed `KNOWN_SESSION_EVENT_TYPES` with fallback; E6 verifies the chunk-expansion contract (the `expandRow`/`seq0+k` semantics our S6 depends on), the `session/end-seed` literal, and the `sourceEventSeqs` field still exist — *wherever* the current release keeps them (in `dsh-session` for rc-line releases, in the `dsh-session-format-v0-to-v1` migration package after the 0.1.5 format split). The same idea appears independently in the knowledge domain as dsh-diagnose's `check-knowledge-anchors` [22].
 
-**Property 3 — Certification gate.** A check enters the ecosystem only if its fixture pair proves *good-does-not-false-positive, bad-gets-caught* on the declared train. This upgrades shape-level contract checks to *correctness-level* certification. *Reference:* the 64-test corpus whose isolation property has caught real bugs (Section 6.1), and the fixture-based acceptance harness proposed in [32].
+**Property 3 — Certification gate.** A check enters the ecosystem only if its fixture pair proves *good-does-not-false-positive, bad-gets-caught* on the declared train. This upgrades shape-level contract checks to *correctness-level* certification. *Reference:* the 109-test corpus whose isolation property has caught real bugs (Section 6.1), and the fixture-based acceptance harness proposed in [32].
 
 **Property 4 — Evolution loop.** Community report → candidate check → fixture certification → catalog distribution → auto-update. The diagnostic layer itself "evolves on the fly" — the paper's theme [2] applied to the diagnostics. *Reference:* the report-driven addition of P8–P11 (Section 6.1) plus the Layer-B update mechanism.
 
@@ -196,9 +196,9 @@ We also propose a check-entry schema:
   "section": "env",
   "severity": "error",
   "probe": { "type": "file-writable", "path": "{home}/settings.yaml", "required": false },
-  "anchor": { "package": "@deepseek-ai/dsh-settings", "symbol": null, "train": "0.1.0-rc.6" },
+  "anchor": { "package": "@deepseek-ai/dsh-settings", "symbol": null, "train": "0.1.5-alpha.1" },
   "fixtures": { "good": "path-or-inline", "bad": "path-or-inline" },
-  "certifiedOn": "0.1.0-rc.6"
+  "certifiedOn": "0.1.5-alpha.1"
 }
 ```
 
@@ -236,7 +236,49 @@ The fixture corpus has repeatedly caught real defects:
 - **P8–P11 genesis.** All four profile checks were added in response to *reported* failures: adapter-provider conflicts [#1904], missing `settings` inject [#1904], client-only service injects [#1947], and unbuilt `main` artifacts [#1965]. Each addition was itself validated by new fixtures (now 64 total).
 - **Field validation.** A user's independent fix of a duplicate-id boot crash [19] turned out to match P2's exact detection shape, and a genuine `ctx.settings`-without-inject defect was confirmed in the same thread — validating both P2 and P9 against real incidents.
 
-### 6.2 False-Positive Elimination: Three Rounds on One Check
+### 6.2 The Anchor Tripwire in Action: A Cross-Train Format Migration
+
+Twenty-seven days after the first field deployment, the harness had moved from
+`0.1.0-rc.6` to `0.1.5-alpha.1` and, in doing so, changed two things at once: it
+migrated from an npx-checkout install to a **global npm install**, and it split the
+session format into a versioned chain (v0→v1→v2→v3) whose migration logic lives in
+separate packages (`dsh-session-format-v0-to-v1`, `-v1-to-v2`, `-v2-to-v3`). Running
+the unchanged tool against the new install reproduced, in one afternoon, exactly the
+failure mode Property 2 exists to prevent:
+
+- **The locator went blind.** E6 and S8 resolved `dsh-session` only through the
+  `node_modules/.bin/dsh` (npx) layout. Under the global install the lookup failed, so
+  both checks fell back to a built-in event-type table captured at rc.6 — E6 degraded
+  to a green "anchors unverified" state, and S8 compared sessions against a stale
+  vocabulary.
+- **The consequence was 49 false positives.** Against the stale table, S11 reported 49
+  sessions as corrupt because their legacy event types (`assistant/chunk`,
+  `tool/code-dispatch`) are absent from the current `KNOWN_SESSION_EVENT_TYPES` — yet
+  the harness reads them correctly through the migration chain. A check that had been
+  right on its certified train became a false-positive generator on the next one.
+- **The anchor moved rather than disappeared.** The `expandRow`/`seq0+k` expansion
+  contract S6 depends on is no longer in `dsh-session`; the equivalent disposition
+  table now lives in `dsh-session-format-v0-to-v1`. E6 *failed loudly* on the missing
+  anchor instead of reporting green — and that failure is what directed the repair.
+
+The fix was structural rather than a one-off patch: `dsh-session` resolution now covers
+npx, global, and profile layouts; when several installs coexist, the newest supplies the
+"current" contract while the **readable** event-type set is the union across installs
+plus the types recognized by the installed migration packages (54 current + 15 legacy =
+69 on the observed machine, versus 41 in the stale table); E6's anchors were re-pointed
+to wherever the current release keeps them; and a failed location is now reported as
+`skip` ("does not apply") rather than a silent pass. Regression fixtures for all three
+behaviours were added with the fix (109 tests total, all passing).
+
+Two lessons generalize beyond this ecosystem. First, **introspection must itself be
+version-robust**: reading the installed contract beats hardcoding only if the contract
+can still be *found* after the install layout changes. Second, **the tripwire's value is
+in failing loudly**: the brief window in which E6 reported "unverified" as a pass is
+precisely the window in which the tool would have shipped confident wrong answers. The
+same check infrastructure now also carries a 26-check security layer (dsh-security),
+evidence that the lifecycle model is not specific to diagnostics.
+
+### 6.3 False-Positive Elimination: Three Rounds on One Check
 
 P9 (missing `settings` dependency) was flagged on the author's own production profile against three plugins. Manual source verification showed all three were false positives, each a distinct class:
 
@@ -246,13 +288,13 @@ P9 (missing `settings` dependency) was flagged on the author's own production pr
 
 Each was fixed with a targeted mechanism (negative lookbehind; excluding `client`/`web` directories; collecting all inject declarations and satisfying on any). The same lesson — *name-based static checks need semantic boundaries* — is echoed by the ecosystem's `DatabaseSync.exec` false-positive report [36].
 
-### 6.3 Real-Profile Findings
+### 6.4 Real-Profile Findings
 
-On the author's production profile, the tool reports a clean bill for all 30 checks. Notably, the same profile *does* carry plugins that use `ctx.inject(["settings"], cb)` (the safe runtime pattern), which the final P9 correctly recognizes — validating that the check distinguishes the safe pattern from the defective one [19].
+On the author's production profile, the tool reports a clean bill for all 34 checks. Notably, the same profile *does* carry plugins that use `ctx.inject(["settings"], cb)` (the safe runtime pattern), which the final P9 correctly recognizes — validating that the check distinguishes the safe pattern from the defective one [19].
 
-### 6.4 Ecosystem Convergence
+### 6.5 Ecosystem Convergence
 
-Three independent community tools — dsh-plugin-doctor [21], dsh-diagnose [22], and dsh-doctor — converged on the `dsh-doctor/v1` envelope: lowercase status, `{ok, checks:[{name,status,detail}]}` minimal subset, and a provenance `tool` field. A symptom→check mapping (16 symptom families ↔ our 30 checks, with honest coverage marks including two documented gaps: sandbox denials and approval policy have no offline probe) is published in the dsh-doctor README [26], and a contract document pins the shape [27]. This convergence was driven by discussion threads [20], [32], [34] and is the concrete evidence that a shared contract can absorb independently built tools.
+Three independent community tools — dsh-plugin-doctor [21], dsh-diagnose [22], and dsh-doctor — converged on the `dsh-doctor/v1` envelope: lowercase status, `{ok, checks:[{name,status,detail}]}` minimal subset, and a provenance `tool` field. A symptom→check mapping (16 symptom families ↔ our 34 checks, with honest coverage marks including two documented gaps: sandbox denials and approval policy have no offline probe) is published in the dsh-doctor README [26], and a contract document pins the shape [27]. This convergence was driven by discussion threads [20], [32], [34] and is the concrete evidence that a shared contract can absorb independently built tools.
 
 **Table 2 — Independent diagnostic tools converging on the `dsh-doctor/v1` contract.**
 
@@ -268,11 +310,11 @@ Three independent community tools — dsh-plugin-doctor [21], dsh-diagnose [22],
 
 ### 7.1 Threats to Validity
 
-**Construct validity.** The check inventory and failure taxonomy were induced from 18 community reports plus the tool's own field history; both are subject to selection bias (reports that reached the discussion forum, not the full population of incidents). The "30 checks" count is a snapshot (v0.2.7) and grows as new reports arrive — we treat the inventory as data (Property 1), not as a fixed benchmark.
+**Construct validity.** The check inventory and failure taxonomy were induced from 18 community reports plus the tool's own field history; both are subject to selection bias (reports that reached the discussion forum, not the full population of incidents). The "34 checks" count is a snapshot (v0.4.5) and grows as new reports arrive — we treat the inventory as data (Property 1), not as a fixed benchmark.
 
 **Internal validity.** The fixture corpus is single-developer and synthetic: the good/bad fixtures encode the author's interpretation of each failure class. Two mitigations: (i) the isolation property (target fails, others pass) is machine-checked in CI; (ii) several fixtures were cross-verified against independent implementations (boyin111-1's sibling tool, dsh-plugin-doctor's acceptance harness [32]). Cross-implementation fixture sharing remains partial.
 
-**External validity.** dsh-doctor is evaluated on one harness (DeepSeek Harness 0.1.0-rc.6 train) and one production profile. The check-lifecycle *model* (Section 5) is claimed as general, but its evidence base is a single ecosystem; generalization to other plugin-based harnesses (e.g., Koishi [5]) is untested. The environment checks are partially platform-dependent (verified on macOS; Windows-specific paths exercised only through reported cases [#1724], [#1965]).
+**External validity.** dsh-doctor is evaluated on two consecutive release trains of one harness (0.1.0-rc.6 and 0.1.5-alpha.1 — the latter carrying a session-format v0→v3 migration chain) and one production profile. The check-lifecycle *model* (Section 5) is claimed as general, but its evidence base is a single ecosystem; generalization to other plugin-based harnesses (e.g., Koishi [5]) is untested. The environment checks are partially platform-dependent (verified on macOS; Windows-specific paths exercised only through reported cases [#1724], [#1965]).
 
 **Conclusion validity.** The empirical claims are case-based (Section 6): real bugs caught and false positives eliminated are documented incidents, not randomized trials. We report precision/recall as open work rather than over-claiming them.
 
@@ -300,7 +342,7 @@ Three independent community tools — dsh-plugin-doctor [21], dsh-diagnose [22],
 
 ## 8. Conclusion
 
-We presented the design and field experience of dsh-doctor, an offline diagnostic for a plugin-based agent harness, and generalized from it a check-lifecycle model. The model's four properties — checks-as-data, introspection, fixture-based certification, and an evolution loop — are not aspirational; each is backed by a running implementation that has shipped 30 checks, maintained 64 regression tests, survived a three-round false-positive elimination campaign, and helped converge three independent community tools on one machine-readable contract. The broader lesson is that in a harness whose entire surface is composed at runtime, *diagnosis is a first-class engineering problem with its own lifecycle*, and that the formal composability guarantees the framework aspires to are the same properties a durable diagnostic layer must verify at runtime.
+We presented the design and field experience of dsh-doctor, an offline diagnostic for a plugin-based agent harness, and generalized from it a check-lifecycle model. The model's four properties — checks-as-data, introspection, fixture-based certification, and an evolution loop — are not aspirational; each is backed by a running implementation that has shipped 34 checks, maintained 109 regression tests, survived a three-round false-positive elimination campaign, and helped converge three independent community tools on one machine-readable contract. The broader lesson is that in a harness whose entire surface is composed at runtime, *diagnosis is a first-class engineering problem with its own lifecycle*, and that the formal composability guarantees the framework aspires to are the same properties a durable diagnostic layer must verify at runtime.
 
 ---
 

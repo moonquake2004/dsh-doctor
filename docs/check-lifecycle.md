@@ -51,8 +51,14 @@ Upgrade → either the anchor passes (check still valid) or the tripwire fails
 loudly (no silent rot).
 
 Reference: our S8 (parses the installed `KNOWN_SESSION_EVENT_TYPES` with a
-fallback) and E6 (verifies `expandRow` / `session/end-seed` / `sourceEventSeqs`
-contracts still exist in the installed `dsh-session`).
+fallback) and E6 (verifies the chunk-expansion contract S6 depends on —
+`expandRow`/`seq0+k` — plus `session/end-seed` and `sourceEventSeqs`, *wherever*
+the current release keeps them: `dsh-session` before the 0.1.5 format split, the
+`dsh-session-format-v0-to-v1` migration package after it, and across npx / global /
+profile install layouts). Note the 2026-09 field lesson: an anchor check that cannot
+*locate* the contract degrades to a silent pass, which is how 49 migratable sessions
+were briefly misreported as corrupt — resolution must be version-robust, and a failed
+location should report `skip`, never a green pass.
 
 ### 3. Certification gate
 
@@ -83,9 +89,9 @@ Reference: our Layer-B self-update (npm version check + `--update` +
   "section": "env",
   "severity": "error",
   "probe": { "type": "file-writable", "path": "{home}/settings.yaml", "required": false },
-  "anchor": { "package": "@deepseek-ai/dsh-settings", "symbol": null, "train": "0.1.0-rc.6" },
+  "anchor": { "package": "@deepseek-ai/dsh-settings", "symbol": null, "train": "0.1.5-alpha.1" },
   "fixtures": { "good": "path/or-inline", "bad": "path/or-inline" },
-  "certifiedOn": "0.1.0-rc.6"
+  "certifiedOn": "0.1.5-alpha.1"
 }
 ```
 

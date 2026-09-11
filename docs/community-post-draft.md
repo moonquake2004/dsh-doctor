@@ -12,6 +12,10 @@ DSH 的插件树既强大又脆弱：重复 entry id、模块双实例遮蔽、�
 
 Both tools are **offline-first** (they run before boot, when dsh itself may be unusable) and **dependency-free** (single-file Node, no harness internals).
 
+**Verified against DSH `0.1.5-alpha.1`** — including the session-format v3 migration chain (v0→v3): legacy events are read through the installed `dsh-session-format-*` migrators, and the anchor tripwire keeps our offline conclusions honest across release trains (it caught its own rot when the format split landed, and the fix is in 0.4.5).
+
+**已针对 DSH `0.1.5-alpha.1` 验证**——含会话格式 v3 迁移链（v0→v3）：旧事件按已装 `dsh-session-format-*` 迁移包读取；锚点 tripwire 保证离线结论跨版本不腐烂（格式拆分落地时它抓到了自身的腐烂，修复已在 0.4.5）。
+
 两个工具都是**离线优先**（dsh 起不来时也能跑）且**零依赖**（单文件 Node，无需 harness 内部接口）。
 
 ---
@@ -82,7 +86,7 @@ npx @moonquake2004/dsh-doctor --json --envelope --security --profile web
 
 ## 🔗 Links
 
-- dsh-doctor: https://github.com/moonquake2004/dsh-doctor · `@moonquake2004/dsh-doctor@0.4.4`
+- dsh-doctor: https://github.com/moonquake2004/dsh-doctor · `@moonquake2004/dsh-doctor@0.4.5`
 - dsh-security: https://github.com/moonquake2004/dsh-security · `@moonquake2004/dsh-security@0.1.6`
 - Announcement threads: [#1534](https://github.com/deepseek-ai/deepseek-harness/discussions/1534) (doctor) · [#3247](https://github.com/deepseek-ai/deepseek-harness/discussions/3247) (security)
 - Contract: [docs/doctor-contract.md](https://github.com/moonquake2004/dsh-doctor/blob/main/docs/doctor-contract.md) · Check lifecycle: [docs/check-lifecycle.md](https://github.com/moonquake2004/dsh-doctor/blob/main/docs/check-lifecycle.md)

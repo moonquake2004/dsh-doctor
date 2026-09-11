@@ -132,8 +132,8 @@ through a remote catalog; (ii) introspection of installed harness
 contracts instead of hard-coded assumptions; (iii) a fixture-based
 certification gate that proves a check does not false-positive and does
 catch its target; and (iv) an evolution loop from community report to
-certified check. We document 30 checks mapped to 18 community failure
-reports, 64 regression tests that have caught real bugs in the tool's
+certified check. We document 34 checks mapped to 33 community failure
+reports, 109 regression tests that have caught real bugs in the tool's
 own history, a three-round false-positive elimination campaign, and the
 convergence of three independent community tools on a shared
 machine-readable contract. We conclude with open problems for the
@@ -198,7 +198,7 @@ This paper makes the following contributions:
   an evolution loop --- each backed by a running reference
   implementation.
 \item
-  \textbf{Field experience.} We document 30 checks, 64 regression tests,
+  \textbf{Field experience.} We document 34 checks, 109 regression tests,
   real bugs the corpus caught in the tool's own history, a three-round
   false-positive elimination campaign, and the convergence of three
   independent community tools on a shared \texttt{dsh-doctor/v1} output
@@ -465,21 +465,21 @@ while every other check passes, and healthy baselines must not
 false-positive. This discipline is what makes the corpus useful for the
 certification model of Section 5.
 
-\textbf{Table 1 --- Check inventory (30 checks, 18 mapped community
-reports, as of v0.2.7).}
+\textbf{Table 1 --- Check inventory (34 checks, 33 mapped community
+reports, as of v0.4.5).}
 
 \begin{table}[H]
 \centering
-\caption{Check inventory (30 checks, 18 mapped community reports, v0.2.7).}
+\caption{Check inventory (34 checks, 33 mapped community reports, v0.4.5).}
 \label{tab:checks}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{@{}llllp{6.2cm}@{}}
 \toprule
 Group & IDs & Count & Coverage class & Representative reports\\
 \midrule
-env (built-in) & E1--E6, E10 & 7 & PATH / files / native binary / storage / anchors / port & [\#1270] [\#71] [\#113] [\#1219] [\#1357] [\#1534] [\#1719]\\
+env (built-in) & E1-node/pnpm/zstd, E1--E6, E10 & 8 & PATH / files / native binary / storage / anchors / port & [\#1270] [\#71] [\#113] [\#1219] [\#1357] [\#1534] [\#1719]\\
 env (catalog) & E7--E9, E11 & 4 & declarative probes (path/JSON/text/writable) & [\#1270] [23] [\#1357] [34]\\
-profile & P1--P5, P7--P11 & 10 & composition: resolution / collisions / patch syntax / dual-instance / inject semantics / artifacts & [\#1404] [\#1486] [\#1697] [\#1724] [\#1904] [\#1947] [\#1965]\\
+profile & P2--P5, P7--P11, P13, P14, P15, installed\_bundle & 13 & composition: resolution / collisions / patch syntax / dual-instance / inject semantics / artifacts & [\#1404] [\#1486] [\#1697] [\#1724] [\#1904] [\#1947] [\#1965]\\
 session & S1, S2, S6--S11 & 8 & log integrity: continuity / replay / types / containers / drift / heap & [\#1363] [\#466] [\#1333] [\#1497] [\#1538] [\#1043] [\#1469] [\#1550]\\
 \bottomrule
 \end{tabular}
@@ -596,8 +596,11 @@ grammar) to derive or validate expectations. On upgrade, either the
 anchor passes (check still valid) or the tripwire fails loudly (no
 silent rot). \emph{Reference:} S8 parses the installed
 \texttt{KNOWN\_SESSION\_EVENT\_TYPES} with fallback; E6 verifies
-\texttt{expandRow}/\texttt{session/end-seed}/\texttt{sourceEventSeqs}
-still exist in the installed \texttt{dsh-session}. The same idea appears
+the chunk-expansion contract (the \texttt{expandRow}/\texttt{seq0+k}
+semantics S6 depends on), the \texttt{session/end-seed} literal, and the
+\texttt{sourceEventSeqs} field still exist --- \emph{wherever} the current
+release keeps them (in \texttt{dsh-session} for the rc-line, in the
+\texttt{dsh-session-format-v0-to-v1} migration package after the 0.1.5 split). The same idea appears
 independently in the knowledge domain as dsh-diagnose's
 \texttt{check-knowledge-anchors} {[}22{]}.
 
@@ -605,7 +608,7 @@ independently in the knowledge domain as dsh-diagnose's
 only if its fixture pair proves \emph{good-does-not-false-positive,
 bad-gets-caught} on the declared train. This upgrades shape-level
 contract checks to \emph{correctness-level} certification.
-\emph{Reference:} the 64-test corpus whose isolation property has caught
+\emph{Reference:} the 109-test corpus whose isolation property has caught
 real bugs (Section 6.1), and the fixture-based acceptance harness
 proposed in {[}32{]}.
 
@@ -698,7 +701,63 @@ The fixture corpus has repeatedly caught real defects:
   real incidents.
 \end{itemize}
 
-\subsubsection{6.2 False-Positive Elimination: Three Rounds on One
+\subsubsection{6.2 The Anchor Tripwire in Action: A Cross-Train Format Migration}\label{the-anchor-tripwire-in-action-a-cross-train-format-migration}
+
+Twenty-seven days after the first field deployment, the harness had moved from
+\texttt{0.1.0-rc.6} to \texttt{0.1.5-alpha.1} and, in doing so, changed two
+things at once: it migrated from an npx-checkout install to a \textbf{global npm
+install}, and it split the session format into a versioned chain
+(v0$\rightarrow$v1$\rightarrow$v2$\rightarrow$v3) whose migration logic lives in
+separate packages (\texttt{dsh-session-format-v0-to-v1},
+\texttt{-v1-to-v2}, \texttt{-v2-to-v3}). Running the unchanged tool against the
+new install reproduced, in one afternoon, exactly the failure mode Property 2
+exists to prevent:
+
+\begin{itemize}
+\tightlist
+\item
+  \textbf{The locator went blind.} E6 and S8 resolved \texttt{dsh-session} only
+  through the \texttt{node\_modules/.bin/dsh} (npx) layout. Under the global
+  install the lookup failed, so both checks fell back to a built-in event-type
+  table captured at rc.6 --- E6 degraded to a green ``anchors unverified''
+  state, and S8 compared sessions against a stale vocabulary.
+\item
+  \textbf{The consequence was 49 false positives.} Against the stale table, S11
+  reported 49 sessions as corrupt because their legacy event types
+  (\texttt{assistant/chunk}, \texttt{tool/code-dispatch}) are absent from the
+  current \texttt{KNOWN\_SESSION\_EVENT\_TYPES} --- yet the harness reads them
+  correctly through the migration chain. A check that had been right on its
+  certified train became a false-positive generator on the next one.
+\item
+  \textbf{The anchor moved rather than disappeared.} The
+  \texttt{expandRow}/\texttt{seq0+k} expansion contract S6 depends on is no
+  longer in \texttt{dsh-session}; the equivalent disposition table now lives in
+  \texttt{dsh-session-format-v0-to-v1}. E6 \emph{failed loudly} on the missing
+  anchor instead of reporting green --- and that failure is what directed the
+  repair.
+\end{itemize}
+
+The fix was structural rather than a one-off patch: \texttt{dsh-session}
+resolution now covers npx, global, and profile layouts; when several installs
+coexist, the newest supplies the ``current'' contract while the
+\textbf{readable} event-type set is the union across installs plus the types
+recognized by the installed migration packages (54 current + 15 legacy = 69 on
+the observed machine, versus 41 in the stale table); E6's anchors were
+re-pointed to wherever the current release keeps them; and a failed location is
+now reported as \texttt{skip} (``does not apply'') rather than a silent pass.
+Regression fixtures for all three behaviours were added with the fix (109 tests
+total, all passing).
+
+Two lessons generalize beyond this ecosystem. First, \textbf{introspection must
+itself be version-robust}: reading the installed contract beats hardcoding only
+if the contract can still be \emph{found} after the install layout changes.
+Second, \textbf{the tripwire's value is in failing loudly}: the brief window in
+which E6 reported ``unverified'' as a pass is precisely the window in which the
+tool would have shipped confident wrong answers. The same check infrastructure
+now also carries a 26-check security layer (dsh-security), evidence that the
+lifecycle model is not specific to diagnostics.
+
+\subsubsection{6.3 False-Positive Elimination: Three Rounds on One
 Check}\label{false-positive-elimination-three-rounds-on-one-check}
 
 P9 (missing \texttt{settings} dependency) was flagged on the author's
@@ -731,23 +790,23 @@ declarations and satisfying on any). The same lesson ---
 by the ecosystem's \texttt{DatabaseSync.exec} false-positive report
 {[}36{]}.
 
-\subsubsection{6.3 Real-Profile Findings}\label{real-profile-findings}
+\subsubsection{6.4 Real-Profile Findings}\label{real-profile-findings}
 
 On the author's production profile, the tool reports a clean bill for
-all 30 checks. Notably, the same profile \emph{does} carry plugins that
+all 34 checks. Notably, the same profile \emph{does} carry plugins that
 use \texttt{ctx.inject({[}"settings"{]},\ cb)} (the safe runtime
 pattern), which the final P9 correctly recognizes --- validating that
 the check distinguishes the safe pattern from the defective one
 {[}19{]}.
 
-\subsubsection{6.4 Ecosystem Convergence}\label{ecosystem-convergence}
+\subsubsection{6.5 Ecosystem Convergence}\label{ecosystem-convergence}
 
 Three independent community tools --- dsh-plugin-doctor {[}21{]},
 dsh-diagnose {[}22{]}, and dsh-doctor --- converged on the
 \texttt{dsh-doctor/v1} envelope: lowercase status,
 \texttt{\{ok,\ checks:{[}\{name,status,detail\}{]}\}} minimal subset,
 and a provenance \texttt{tool} field. A symptom→check mapping (16
-symptom families ↔ our 30 checks, with honest coverage marks including
+symptom families ↔ our 34 checks, with honest coverage marks including
 two documented gaps: sandbox denials and approval policy have no offline
 probe) is published in the dsh-doctor README {[}26{]}, and a contract
 document pins the shape {[}27{]}. This convergence was driven by
@@ -798,7 +857,7 @@ tool, dsh-plugin-doctor's acceptance harness {[}32{]}).
 Cross-implementation fixture sharing remains partial.
 
 \textbf{External validity.} dsh-doctor is evaluated on one harness
-(DeepSeek Harness 0.1.0-rc.6 train) and one production profile. The
+(two consecutive release trains: 0.1.0-rc.6 and 0.1.5-alpha.1) and one production profile. The
 check-lifecycle \emph{model} (Section 5) is claimed as general, but its
 evidence base is a single ecosystem; generalization to other
 plugin-based harnesses (e.g., Koishi {[}5{]}) is untested. The
@@ -891,7 +950,7 @@ diagnostic for a plugin-based agent harness, and generalized from it a
 check-lifecycle model. The model's four properties --- checks-as-data,
 introspection, fixture-based certification, and an evolution loop ---
 are not aspirational; each is backed by a running implementation that
-has shipped 30 checks, maintained 64 regression tests, survived a
+has shipped 34 checks, maintained 109 regression tests, survived a
 three-round false-positive elimination campaign, and helped converge
 three independent community tools on one machine-readable contract. The
 broader lesson is that in a harness whose entire surface is composed at

@@ -33,7 +33,7 @@ node dsh-doctor.mjs --no-catalog         # 不拉远程目录（只用内置副�
 | E3 | node 版本 / `--expose-internals` 可及性 | [#113](https://github.com/deepseek-ai/deepseek-harness/discussions/113), [#1313](https://github.com/deepseek-ai/deepseek-harness/discussions/1313) |
 | E4 | node-pty 原生二进制在位（`prebuilds/<platform>-<arch>/pty.node`） | [#1219](https://github.com/deepseek-ai/deepseek-harness/discussions/1219) |
 | E5 | 存储 JSON 文件合法（严格 UTF-8 + 可解析） | [#1357](https://github.com/deepseek-ai/deepseek-harness/discussions/1357) |
-| E6 | 锚点 tripwire：S6/S7/S10 依赖的契约仍在安装的 `dsh-session` 里 | [anti-rot idea](https://github.com/deepseek-ai/deepseek-harness/discussions/1534) |
+| E6 | 锚点 tripwire：S6/S7/S10 依赖的契约仍在**当前版本存放它的位置**（npx / 全局 / profile 三布局；`dsh-session` 或 `dsh-session-format-*` 迁移链） | [anti-rot idea](https://github.com/deepseek-ai/deepseek-harness/discussions/1534) |
 | E10 | 启动前 Web 端口 3080 可用性（dsh web 自身占用=正常；其他进程=FAIL；`DSH_DOCTOR_PORT` 可覆盖） | [#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719) |
 
 ### profile
@@ -55,7 +55,7 @@ node dsh-doctor.mjs --no-catalog         # 不拉远程目录（只用内置副�
 | S2 | 未闭合 turn（会话卡"运行中"） | [#466](https://github.com/deepseek-ai/deepseek-harness/discussions/466), [#1265](https://github.com/deepseek-ai/deepseek-harness/discussions/1265) |
 | S6 | `seq == index` 连续性（官方语义，chunk 行按 `expandRow` 展开） | [#1333](https://github.com/deepseek-ai/deepseek-harness/discussions/1333), [#1452](https://github.com/deepseek-ai/deepseek-harness/discussions/1452), [#1469](https://github.com/deepseek-ai/deepseek-harness/discussions/1469) |
 | S7 | `end-seed` 后重放（重放已提交尾部） | [#1497](https://github.com/deepseek-ai/deepseek-harness/discussions/1497) |
-| S8 | 未知事件类型且无 `ignorable`（整包拒绝） | [#1538](https://github.com/deepseek-ai/deepseek-harness/discussions/1538) |
+| S8 | 未知事件类型且无 `ignorable`（整包拒绝）——可读集 = 当前表 ∪ 已装 `dsh-session-format-*` 迁移包认的旧类型 | [#1538](https://github.com/deepseek-ai/deepseek-harness/discussions/1538) |
 | S9 | zstd 容器帧数（单帧日志 → `session.list` 整体 500） | [#1043](https://github.com/deepseek-ai/deepseek-harness/discussions/1043) |
 | S10 | `sourceEventSeqs` 引用非更早事件 | [#1469](https://github.com/deepseek-ai/deepseek-harness/discussions/1469) |
 | S11 | 全会话扫描：损坏 → 隔离建议；超大 / 工作区估算物化堆（max(事件×600B, 字节×6)，默认 1GiB，`DSH_DOCTOR_HEAP_MB`）→ 冷启动卡顿风险 | [#1550](https://github.com/deepseek-ai/deepseek-harness/discussions/1550) |
