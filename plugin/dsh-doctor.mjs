@@ -15,6 +15,7 @@
  *     P10 inject 引用客户端专属服务（#1947：@deepseek-ai/dsh-client-* 服务端永不提供 → Fiber 永久 PENDING → web boot 失败）
  *     P11 已装 bundle 的 main 入口产物缺失（#1965：市场装未构建源码树 → ERR_MODULE_NOT_FOUND → boot 崩）
  *     P13 client 端 provide 服务名抢注核心客户端服务 / 跨 bundle 同名（#2752：浏览器端 service already registered → UI 白屏，服务端日志无感知）
+ *     P16 命名导入的导出缺失（#5864：warn 级，静态自省已装包导出面）
  *     P14 declared bin 可执行性（#1846：打包成功但 bin 缺 shebang/产物 → 直接执行 ENOEXEC；与 P11 互补）
  *     P12 `installed_bundle`（#1719 v1.1 词汇：profile 内 bundle 版本 vs 运行 CLI 版本——web 面板/API 跑的是 profile 里装的 bundle，可与独立 CLI 版本不一致）
  *   [session]
@@ -25,6 +26,7 @@
  *     S9  zstd 容器结构（#1043：单帧容器 → session.list 整体 500，侧边栏全消失）
  *     S10 sourceEventSeqs 悬空引用（#1469：压缩未重映射溯源 → history unavailable）
  *     S8  未知事件类型且无 ignorable（#1538：harness 读不了 → 整包拒绝；可读集 = 安装的 dsh-session 当前表 ∪ dsh-session-format-* 迁移包旧类型，0.1.5-alpha.1 回退）
+ *     S12 迁移拒载预检（#6045/#6328/#6311：规则自省自已装 dsh-session-format-* 迁移包）
  *     S11 全会话扫描（#1550：损坏会话 → 隔离建议；超大会话/工作区估算物化堆 → 冷启动风险警告；估算堆=解码MB×6+事件×200B，阈值默认 1GB，可设 DSH_DOCTOR_HEAP_MB）
  *   [env]
  *     E1  关键命令不在 PATH（#1270：node/pnpm/zstd）
@@ -54,7 +56,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import net from 'node:net';
-import { basename, delimiter as PATH_DELIM, dirname, join, resolve } from 'node:path';
+import { basename, delimiter as PATH_DELIM, dirname, join, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
@@ -565,6 +567,71 @@ function checkProfile(name) {
   else report('profile', 'P7', true, 'cordis.patch.yml 结构正常（无 tab / 无 ~ insert / 无映射-序列混排）', undefined);
 
   // P8/P9 需要扫描 bundle 构建产物：收集目录下有限深度的 .js 文件（lib/dist/根 + main 入口，跳过 node_modules）
+
+/** 从 fromDir 向上找 node_modules 里的裸包目录（也查 profile 与 CLI 安装）；找不到返回 null。 */
+/** 用户 patch 中标记 `disabled: true` 的 entry id 集合（P16 用：区分"已禁用不会崩"与"启用即崩"）。 */
+function disabledPatchIds() {
+  const set = new Set();
+  const f = join(HOME, 'profiles', 'web', 'cordis.patch.yml');
+  if (!existsSync(f)) return set;
+  let text;
+  try { text = readFileSync(f, 'utf8'); } catch { return set; }
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^\s*-?\s*id:\s*['"]?([^'"\s]+)['"]?\s*$/.exec(lines[i]);
+    if (!m) continue;
+    for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+      if (/^\s*-?\s*id:/.test(lines[j])) break;
+      if (/^\s*disabled:\s*true\s*$/.test(lines[j])) { set.add(m[1]); break; }
+    }
+  }
+  return set;
+}
+
+function resolveInstalledPackage(spec, fromDir) {
+  const seg = spec.split('/');
+  const name = spec.startsWith('@') ? seg.slice(0, 2).join('/') : seg[0];
+  const cands = [];
+  let d = fromDir;
+  for (let i = 0; i < 6; i++) {
+    cands.push(join(d, 'node_modules', name));
+    const up = dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  const profiles = join(HOME, 'profiles');
+  if (existsSync(profiles)) for (const p of readdirSync(profiles)) cands.push(join(profiles, p, 'node_modules', name));
+  for (const lib of SESSION_LIBS) {
+    const nm = lib.slice(0, lib.indexOf(join('@deepseek-ai', 'dsh-session')));
+    cands.push(join(nm, name));
+  }
+  return cands.find((c) => existsSync(join(c, 'package.json'))) || null;
+}
+
+/** 包入口的命名导出集合；**静态不可确定时返回 null**（CJS 入口 / `export *` / 找不到入口）。 */
+function packageNamedExports(pkgDir) {
+  let pkg;
+  try { pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')); } catch { return null; }
+  let rel = null;
+  const pick = (v) => (typeof v === 'string' ? v : (v && typeof v === 'object' ? (pick(v.import) ?? pick(v.default) ?? pick(v.require) ?? null) : null));
+  if (pkg.exports) rel = pick(typeof pkg.exports === 'object' && pkg.exports['.'] !== undefined ? pkg.exports['.'] : pkg.exports);
+  if (!rel) rel = pick(pkg.module) ?? pick(pkg.main) ?? 'index.js';
+  let code;
+  try { code = readFileSync(join(pkgDir, rel), 'utf8'); } catch { return null; }
+  if (/export\s*\*/.test(code)) return null;            // 星号再导出 → 导出面不确定
+  const named = new Set();
+  for (const m of code.matchAll(/export\s*\{([^}]*)\}/g)) {
+    for (const x of m[1].split(',')) {
+      const n = x.trim().replace(/^type[ \t]+/, '').split(/[ \t]+as[ \t]+/).pop().trim();
+      if (n) named.add(n);
+    }
+  }
+  for (const m of code.matchAll(/export\s+(?:async\s+)?(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)/g)) named.add(m[1]);
+  if (/export\s+default/.test(code)) named.add('default');
+  if (named.size === 0) return null;                      // 没有任何 ESM 导出语法 → 视为 CJS，不判
+  return named;
+}
+
   const bundleDirs = new Map(); // bundle 名 → 目录（可解析的）
   for (const b of bundles) {
     const d = findPkg(b);
@@ -852,6 +919,44 @@ function checkProfile(name) {
   } else {
     report('profile', 'P15', true, '关键文件无 BOM 头', undefined);
   }
+
+  /* P16：插件命名导入的导出缺失检测（#5864：一个缺失导出 → 整棵插件树 boot 崩溃循环、
+   * 启动器每 ~11s 重启一次）。静态校验 `import { A } from 'pkg'` 的 A 是否存在于已装 pkg 的命名导出。
+   * **能不确定就不判**（本检查 warn 级，宁可漏报不误报）：解析不到包 / 入口含 `export *` / CJS 入口 /
+   * 条件导出取不到 ESM 入口 / type-only 导入 / 非裸说明符 —— 全部跳过，且只在"确定不存在"时报。 */
+  const exportIssues = [];
+  const disabledIds = disabledPatchIds();
+  for (const [b, d] of bundleDirs) {
+    const seen = new Map(); // "pkg → 缺失符号" → 证据文件
+    for (const f of collectJsFiles(d)) {
+      const code = readJs(f);
+      for (const m of code.matchAll(/(?:^|\n)[ \t]*(?:import|export)[ \t]*\{([^}]*)\}[ \t]*from[ \t]*['"]([^'"]+)['"]/g)) {
+        const names = m[1].split(',').map((x) => x.trim().replace(/^type[ \t]+/, '').split(/[ \t]+as[ \t]+/)[0].trim()).filter((x) => x && x !== 'default' && /^[A-Za-z_$][\w$]*$/.test(x));
+        const spec = m[2];
+        if (!names.length || !/^[@A-Za-z]/.test(spec) || spec.startsWith('node:')) continue; // 只查裸包说明符
+        // 带子路径的说明符（pkg/sub、pkg/a/b）走各自的 exports 入口，静态判定不可靠 → 跳过（防误报）
+        const segs = spec.split('/');
+        if (spec.startsWith('@') ? segs.length > 2 : segs.length > 1) continue;
+        const pkgDir = resolveInstalledPackage(spec, d);
+        if (!pkgDir) continue; // 解析不到 → 不判
+        const exports = packageNamedExports(pkgDir);
+        if (!exports) continue; // 静态不可确定 → 不判
+        const miss = names.filter((n) => !exports.has(n));
+        if (miss.length) seen.set(`${spec} → ${miss.join(', ')}`, relative(d, f));
+      }
+    }
+    if (seen.size) {
+      // patch 的 id 可能是裸名（dsh-noema）而 bundle 名是 scoped（@zseven-w/dsh-noema）→ 去 scope 归一化比对
+      const bare = (n) => (n.startsWith('@') ? n.split('/').slice(1).join('/') : n);
+      const isDisabled = disabledIds.has(b) || disabledIds.has(bare(b));
+      exportIssues.push(`${b}（${[...seen].map(([k, f]) => `${k} [${f}]`).join('; ')}）${isDisabled ? '〔当前已禁用，重新启用会 boot 失败〕' : '〔已启用 → boot 会失败〕'}`);
+    }
+  }
+  if (exportIssues.length) {
+    report('profile', 'P16', false, `插件导入了已装包未提供的导出（#5864：整棵插件树 boot 崩溃循环，启动器会反复重启）: ${exportIssues.join('; ')}`, '把该插件升到与所装 @deepseek-ai/* 版本匹配的版本（或降级/移除）；这类错误在 boot 期是硬失败，单条 entry 会拖垮整棵树');
+  } else {
+    report('profile', 'P16', true, '插件命名导入均在已装包的导出里（静态可判定的部分）', undefined);
+  }
 }
 
 /* ================= session ================= */
@@ -993,6 +1098,116 @@ function checkSession(targetPath) {
   }
 }
 
+/* S12：迁移拒载预检（#6045/#6328/#6311）——升级/打开前列出会被"会话格式迁移链"拒绝的会话。
+ * 规则不硬编码：从已装 dsh-session-format-* 迁移包自省（v0→v1 的 descriptor 版本门 + v2→v3 的 source.kind 白名单）；
+ * 定位不到迁移包 → skip（不猜）。surface 事件集合照抄 v2→v3 的 assertSource 调用点（user/assistant/tool/inbox/title-llm-request）。 */
+const SURFACE_SOURCE_TYPES = new Set(['user/message', 'assistant/message', 'tool/result', 'agent/inbox/spliced', 'session/title-llm-request']);
+
+function findPkgLib(nm, name) {
+  const a = join(nm, '@deepseek-ai', name, 'lib', 'index.js');
+  if (existsSync(a)) return a;
+  const store = join(nm, '.pnpm');
+  if (existsSync(store)) {
+    for (const d of readdirSync(store)) {
+      if (!d.startsWith(`@deepseek-ai+${name}@`)) continue;
+      const b = join(store, d, 'node_modules', '@deepseek-ai', name, 'lib', 'index.js');
+      if (existsSync(b)) return b;
+    }
+  }
+  return null;
+}
+
+function migrationRules() {
+  const out = { descriptorVersion: null, kinds: null, from: null };
+  for (const lib of SESSION_LIBS) {
+    const nm = lib.slice(0, lib.indexOf(join('@deepseek-ai', 'dsh-session')));
+    if (out.descriptorVersion === null) {
+      const v0 = findPkgLib(nm, 'dsh-session-format-v0-to-v1');
+      if (v0) {
+        try {
+          const m = /data\["version"\]\s*!==\s*(\d+)/.exec(readFileSync(v0, 'utf8'));
+          if (m) { out.descriptorVersion = Number(m[1]); out.from = nm; }
+        } catch { /* 忽略 */ }
+      }
+    }
+    if (out.kinds === null) {
+      const v3 = findPkgLib(nm, 'dsh-session-format-v2-to-v3');
+      if (v3) {
+        try {
+          const m = /const SOURCE_KINDS = new Set\(\[(.*?)\]\);/s.exec(readFileSync(v3, 'utf8'));
+          if (m) {
+            const items = [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+            if (items.length) { out.kinds = new Set(items); out.from = nm; }
+          }
+        } catch { /* 忽略 */ }
+      }
+    }
+    if (out.descriptorVersion !== null && out.kinds !== null) break;
+  }
+  return out;
+}
+const MIGRATION_RULES = migrationRules();
+
+/** 单个会话文本 → 会被迁移链拒绝的理由（空数组 = 可读）。 */
+function migrationRefusals(text) {
+  const reasons = [];
+  const { descriptorVersion, kinds } = MIGRATION_RULES;
+  let version = null;
+  for (const ln of text.split('\n')) {
+    if (!ln.trim()) continue;
+    let d; try { d = JSON.parse(ln); } catch { continue; }
+    if (version === null && d.type === 'session' && typeof d.version === 'number') { version = d.version; continue; }
+    if (version === 0 && descriptorVersion !== null && d.type === 'subagent/descriptor' && d.data?.version !== descriptorVersion) {
+      reasons.push(`subagent/descriptor version ${d.data?.version} 会被 v0→v1 拒载（该迁移只接受 version ${descriptorVersion}）`);
+    }
+    if (version === 2 && kinds && SURFACE_SOURCE_TYPES.has(d.type)) {
+      const s = d.data?.source ?? d.data?.message?.source;
+      if (s && typeof s.kind === 'string' && !kinds.has(s.kind)) reasons.push(`source.kind "${s.kind}" 会被 v2→v3 拒载（不在 ${kinds.size} 项白名单内）`);
+    }
+  }
+  return [...new Set(reasons)];
+}
+
+/**
+ * 全会话库迁移拒载预检（#6045：某真实库 321 个日志中 282 个中招；#6328：一个坏产物拖垮搜索索引）。
+ * 在升级/打开前给出"哪些会话将会打不开"，避免列表里看着在、点开就报错。
+ */
+function scanMigrationRefusals() {
+  if (!wants('session')) return;
+  if (MIGRATION_RULES.descriptorVersion === null && !MIGRATION_RULES.kinds) {
+    reportSkip('session', 'S12', '未定位到 dsh-session-format-* 迁移包，拒载规则不可自省——预检跳过（不猜）', undefined);
+    return;
+  }
+  const root = join(HOME, 'sessions');
+  if (!existsSync(root)) { reportSkip('session', 'S12', '无会话目录，迁移拒载预检不适用', undefined); return; }
+  const files = [];
+  for (const u of readdirSync(root)) {
+    const sd = join(root, u);
+    if (!existsSync(sd)) continue;
+    for (const s of readdirSync(sd)) {
+      const f = existsSync(join(sd, s, 'session.jsonl.zstd')) ? join(sd, s, 'session.jsonl.zstd') : join(sd, s, 'session.jsonl');
+      if (existsSync(f)) files.push(f);
+    }
+  }
+  if (files.length === 0) { reportSkip('session', 'S12', '未发现会话日志', undefined); return; }
+  const refused = [];
+  for (const f of files) {
+    let text;
+    try { text = f.endsWith('.zstd') ? execFileSync('zstd', ['-dc', f], { maxBuffer: 512 * 1024 * 1024 }).toString('utf8') : readFileSync(f, 'utf8'); }
+    catch { continue; } // 解压失败由 S11 报，不在 S12 重复
+    const rs = migrationRefusals(text);
+    if (rs.length) refused.push(`${basename(dirname(f))}（${rs[0]}）`);
+  }
+  const rule = `规则自省：descriptor v${MIGRATION_RULES.descriptorVersion ?? '?'} / source.kind ${MIGRATION_RULES.kinds?.size ?? '?'} 项`;
+  if (refused.length) {
+    report('session', 'S12', false,
+      `迁移拒载预检：${refused.length}/${files.length} 个会话会被当前迁移链拒绝（#6045/#6328/#6311——列表里看着在、点开即报 cannot safely transform / unsupported descriptor version）: ${refused.slice(0, 5).join('; ')}${refused.length > 5 ? ` 等 ${refused.length} 个` : ''}`,
+      `① 先备份这些会话目录（勿删）；② 等上游放宽版本门（#6045 已报）；③ 应急：把日志里 subagent/descriptor 的 version 改为 ${MIGRATION_RULES.descriptorVersion ?? 3} 再迁移（改前务必备份）`);
+  } else {
+    report('session', 'S12', true, `迁移拒载预检：${files.length} 个会话均可被当前迁移链读取（${rule}）`, undefined);
+  }
+}
+
 /* S11：全会话扫描 —— 损坏 → 隔离建议；超大 → 冷打开物化风险（#1550：一个坏/超大会话拖垮整个服务器） */
 function scanAllSessions() {
   if (!wants('session')) return;
@@ -1091,6 +1306,7 @@ catalogSeverity.set('installed_bundle', 'warn');
 catalogSeverity.set('P13', 'warn');
 catalogSeverity.set('P14', 'warn');
 catalogSeverity.set('P15', 'error');
+catalogSeverity.set('P16', 'warn');
 
 function bundledCatalog() {
   const p = new URL('./checks.json', import.meta.url);
@@ -1321,6 +1537,26 @@ export function localVersion() {
 }
 
 /** 返回 { current, latest, available }；latest=null 表示无法确认（离线且无缓存）。 */
+
+/** 简易 semver 比较（支持 x.y.z-预发布）：a>b 返回 1，a<b 返回 -1，相等 0。
+ *  用途：本地版本可能领先 npm（未发布的工作版本），只比"不相等"会误报"新版本可用"。 */
+function compareVersions(a, b) {
+  const parse = (v) => {
+    const [core, pre = ''] = String(v).split('-');
+    const nums = core.split('.').map((x) => parseInt(x, 10) || 0);
+    return { nums, pre };
+  };
+  const A = parse(a); const B = parse(b);
+  for (let i = 0; i < 3; i++) {
+    const x = A.nums[i] ?? 0; const y = B.nums[i] ?? 0;
+    if (x !== y) return x > y ? 1 : -1;
+  }
+  if (A.pre === B.pre) return 0;
+  if (!A.pre) return 1;   // 正式版 > 预发布
+  if (!B.pre) return -1;
+  return A.pre > B.pre ? 1 : -1;
+}
+
 export async function checkForUpdate({ noRemote = false, fetchImpl, home = HOME } = {}) {
   const current = localVersion();
   if (noRemote || typeof fetchImpl !== 'function') return { current, latest: null, available: false };
@@ -1328,7 +1564,7 @@ export async function checkForUpdate({ noRemote = false, fetchImpl, home = HOME 
   const readCache = () => { try { const d = JSON.parse(readFileSync(cachePath, 'utf8')); return d && typeof d.latest === 'string' ? d : null; } catch { return null; } };
   try {
     const c = readCache();
-    if (c && Date.now() - statSync(cachePath).mtimeMs < UPDATE_TTL_MS) return { current, latest: c.latest, available: c.latest !== current };
+    if (c && Date.now() - statSync(cachePath).mtimeMs < UPDATE_TTL_MS) return { current, latest: c.latest, available: c.latest !== current && compareVersions(c.latest, current) > 0 };
   } catch { /* 回退 */ }
   try {
     const ac = new AbortController();
@@ -1340,7 +1576,7 @@ export async function checkForUpdate({ noRemote = false, fetchImpl, home = HOME 
       const latest = data?.['dist-tags']?.latest;
       if (typeof latest === 'string') {
         try { mkdirSync(dirname(cachePath), { recursive: true }); writeFileSync(cachePath, JSON.stringify({ latest, checkedAt: new Date().toISOString() })); } catch { /* 缓存失败不影响 */ }
-        return { current, latest, available: latest !== current };
+        return { current, latest, available: latest !== current && compareVersions(latest, current) > 0 };
       }
     }
   } catch { /* 离线/超时 → last-known-good */ }
@@ -1416,6 +1652,7 @@ async function run() {
     try { checkProfile(profileArg); } catch (e) { report('profile', 'P0', false, `profile 检查异常: ${e.message.slice(0, 100)}`); }
     try { checkSession(sessionArg); } catch (e) { report('session', 'S0', false, `session 检查异常: ${e.message.slice(0, 100)}`); }
     try { scanAllSessions(); } catch (e) { report('session', 'S11', false, `全会话扫描异常: ${e.message.slice(0, 100)}`); }
+    try { scanMigrationRefusals(); } catch (e) { report('session', 'S12', false, `迁移拒载预检异常: ${e.message.slice(0, 100)}`); }
   }
 
   // 远程检查目录（层 A）：内置检查之后追加执行；--no-catalog 只走内置副本；--security-only 跳过

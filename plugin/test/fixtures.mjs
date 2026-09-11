@@ -894,3 +894,87 @@ test('E6：定位不到 dsh-session 时用 skip（不适用），不静默 pass'
   assert.equal(e6.status, 'skip', 'E6 无法定位安装时语义是"不适用"→ skip');
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- P16：命名导入的导出缺失（#5864 类） ---------- */
+
+test('P16：插件导入已装包未提供的命名导出 → 失败', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: { name: 'web', dsh: { profile: { bundles: ['fake-p16'] } } },
+    patch: '',
+    nodeModules: {
+      'fake-dep/package.json': JSON.stringify({ name: 'fake-dep', version: '1.0.0', type: 'module', main: 'lib/index.js' }),
+      'fake-dep/lib/index.js': 'export { A };\n',
+      'fake-p16/package.json': JSON.stringify({ name: 'fake-p16', version: '1.0.0', main: 'lib/index.js', dsh: { bundle: { patch: './patch.yml' } } }),
+      'fake-p16/patch.yml': '- insert:\n    - id: p16-x\n      name: p16-x\n',
+      'fake-p16/lib/index.js': "import { Missing } from 'fake-dep';\nexport function apply() {}\n",
+    },
+  });
+  assertIsolated(home, ['--profile', 'web'], 'P16');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P16：导入的命名导出确实存在 → 不误报', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: { name: 'web', dsh: { profile: { bundles: ['fake-p16b'] } } },
+    patch: '',
+    nodeModules: {
+      'fake-dep2/package.json': JSON.stringify({ name: 'fake-dep2', version: '1.0.0', type: 'module', main: 'lib/index.js' }),
+      'fake-dep2/lib/index.js': 'export { A, B };\nexport const C = 1;\n',
+      'fake-p16b/package.json': JSON.stringify({ name: 'fake-p16b', version: '1.0.0', main: 'lib/index.js', dsh: { bundle: { patch: './patch.yml' } } }),
+      'fake-p16b/patch.yml': '- insert:\n    - id: p16-y\n      name: p16-y\n',
+      'fake-p16b/lib/index.js': "import { A, C } from 'fake-dep2';\nexport function apply() {}\n",
+    },
+  });
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(map.get('P16'), false, 'A/C 都在导出里，不应报 P16');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P16：带子路径的说明符与新核心移除的符号 → 跳过（防误报边界）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: { name: 'web', dsh: { profile: { bundles: ['fake-p16c'] } } },
+    patch: '',
+    nodeModules: {
+      'fake-dep3/package.json': JSON.stringify({ name: 'fake-dep3', version: '1.0.0', type: 'module', main: 'lib/index.js' }),
+      'fake-dep3/lib/index.js': 'export { A };\n',
+      'fake-p16c/package.json': JSON.stringify({ name: 'fake-p16c', version: '1.0.0', main: 'lib/index.js', dsh: { bundle: { patch: './patch.yml' } } }),
+      'fake-p16c/patch.yml': '- insert:\n    - id: p16-z\n      name: p16-z\n',
+      // 子路径说明符 + 动态 import + type-only：都不该判
+      'fake-p16c/lib/index.js': "import { NotThere } from 'fake-dep3/sub';\nimport type { T } from 'fake-dep3';\nconst x = await import('fake-dep3');\nexport function apply() {}\n",
+    },
+  });
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(map.get('P16'), false, '子路径/type-only/动态导入必须跳过（否则误报）');
+  rmSync(home, { recursive: true, force: true });
+});
+
+/* ---------- S12：迁移拒载预检（#6045/#6328/#6311） ---------- */
+
+test('S12：v0 日志含 subagent/descriptor version 2 → 失败（会被迁移拒载）', (t) => {
+  if (!hasFormatMigrator()) return t.skip('本机无 dsh-session-format-* 迁移包');
+  const home = tempHome();
+  // 真实会话库是三层：sessions/<工程>/<session-id>/session.jsonl（store 级扫描按此布局）
+  const dir = join(home, 'sessions', 'proj', 'refused');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'session.jsonl'), [
+    { type: 'session', version: 0, id: 's-refused', createdAt: 1 },
+    ...GOOD_SESSION.slice(0, 5),
+    { type: 'subagent/descriptor', seq: 5, time: 2, data: { version: 2, id: 'x' } },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const sessPath = join(dir, 'session.jsonl');
+  const { map } = runCli({ home, args: ['--session', sessPath] });
+  assert.equal(map.get('S12'), false, 'descriptor version 2 应判为会被 v0→v1 拒载');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('S12：无 descriptor 的 v0 日志 → 通过（不误报）', (t) => {
+  if (!hasFormatMigrator()) return t.skip('本机无 dsh-session-format-* 迁移包');
+  const home = tempHome();
+  sessionFixture(home, 'ok', [{ type: 'session', version: 0, id: 's-ok', createdAt: 1 }, ...GOOD_SESSION]);
+  const { map } = runCli({ home, args: ['--session', join(home, 'sessions', 'ok', 'session.jsonl')] });
+  assert.notEqual(map.get('S12'), false, '普通 v0 日志不该被判拒载');
+  rmSync(home, { recursive: true, force: true });
+});

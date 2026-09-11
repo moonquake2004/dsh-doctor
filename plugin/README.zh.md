@@ -47,6 +47,7 @@ node dsh-doctor.mjs --no-catalog         # 不拉远程目录（只用内置副�
 | P12 | profile 内 bundle 版本 vs 运行 CLI（发词汇名 `installed_bundle`，#1719 v1.1：未声明=skip / manifest 撒谎或分歧=warn / 一致=pass；web「诊断」面板 / `/dsh-doctor/run` API 跑的是 bundle） | [#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719) |
 | P13 | client 半 `provide` 服务名抢注核心客户端服务（`chatFileMentions` 等 `@deepseek-ai/dsh-client-*`，warn）或跨 bundle 同名（浏览器端 service already registered → UI 白屏、服务端日志无感知） | [#2752](https://github.com/deepseek-ai/deepseek-harness/discussions/2752) |
 | P14 | 声明 `bin` 可执行性（目标文件在位 + 文本 bin 必须带 shebang；仅可执行位不识别解释器 → 直接执行 ENOEXEC，#1846） | [#1846](https://github.com/deepseek-ai/deepseek-harness/discussions/1846) |
+| P16 | 插件导入了已装包未提供的命名导出（warn；单条坏 entry 即 boot 硬失败） | [#5864](https://github.com/deepseek-ai/deepseek-harness/discussions/5864) |
 
 ### session
 | ID | 检查 | 对应讨论 |
@@ -59,6 +60,7 @@ node dsh-doctor.mjs --no-catalog         # 不拉远程目录（只用内置副�
 | S9 | zstd 容器帧数（单帧日志 → `session.list` 整体 500） | [#1043](https://github.com/deepseek-ai/deepseek-harness/discussions/1043) |
 | S10 | `sourceEventSeqs` 引用非更早事件 | [#1469](https://github.com/deepseek-ai/deepseek-harness/discussions/1469) |
 | S11 | 全会话扫描：损坏 → 隔离建议；超大 / 工作区估算物化堆（max(事件×600B, 字节×6)，默认 1GiB，`DSH_DOCTOR_HEAP_MB`）→ 冷启动卡顿风险 | [#1550](https://github.com/deepseek-ai/deepseek-harness/discussions/1550) |
+| S12 | 迁移拒载预检：会被已装 `dsh-session-format-*` 迁移链拒绝的会话日志（v0 `subagent/descriptor` 版本门；v2→v3 source.kind 白名单）——列表里看着在、点开却打不开 | [#6045](https://github.com/deepseek-ai/deepseek-harness/discussions/6045), [#6328](https://github.com/deepseek-ai/deepseek-harness/discussions/6328), [#6311](https://github.com/deepseek-ai/deepseek-harness/discussions/6311) |
 
 ## 备注
 

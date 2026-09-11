@@ -52,6 +52,7 @@ With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2
 | P12 | profile-installed bundle version vs running CLI (emits vocabulary name `installed_bundle`, #1719 v1.1: skip when unlisted / warn on manifest-lies or divergence / pass when equal; the web "Doctor" panel / `/dsh-doctor/run` API run the bundle) | [#1719](https://github.com/deepseek-ai/deepseek-harness/discussions/1719) |
 | P13 | client-half `provide` service name clashes with core client services (`chatFileMentions` etc. from `@deepseek-ai/dsh-client-*`, warn) or cross-bundle same-name grabs (browser-side "service already registered" → UI white screen, server logs see nothing) | [#2752](https://github.com/deepseek-ai/deepseek-harness/discussions/2752) |
 | P14 | declared `bin` executability (target file present + shebang required for text `bin`; exec-bit alone does not identify the interpreter → ENOEXEC on direct run, #1846) | [#1846](https://github.com/deepseek-ai/deepseek-harness/discussions/1846) |
+| P16 | plugin imports a named export the installed package does not provide (warn; boot fails hard on one bad entry) | [#5864](https://github.com/deepseek-ai/deepseek-harness/discussions/5864) |
 
 ### session
 | ID | Checks | Discussion |
@@ -64,6 +65,7 @@ With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2
 | S9 | zstd container frame count (single-frame logs → `session.list` 500) | [#1043](https://github.com/deepseek-ai/deepseek-harness/discussions/1043) |
 | S10 | `sourceEventSeqs` referencing non-earlier events | [#1469](https://github.com/deepseek-ai/deepseek-harness/discussions/1469) |
 | S11 | whole-session scan: corrupt → quarantine suggestion; oversized / workspace estimated-heap (max(events×600B, bytes×6), default 1GiB, `DSH_DOCTOR_HEAP_MB`) → cold-start stall risk | [#1550](https://github.com/deepseek-ai/deepseek-harness/discussions/1550) |
+| S12 | migration-refusal pre-flight: session logs the installed `dsh-session-format-*` chain will refuse (v0 `subagent/descriptor` version gate; v2→v3 source-kind whitelist) — sessions that look present but cannot be opened | [#6045](https://github.com/deepseek-ai/deepseek-harness/discussions/6045), [#6328](https://github.com/deepseek-ai/deepseek-harness/discussions/6328), [#6311](https://github.com/deepseek-ai/deepseek-harness/discussions/6311) |
 
 ## Notes
 
