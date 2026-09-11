@@ -15,6 +15,7 @@
  *     P10 inject 引用客户端专属服务（#1947：@deepseek-ai/dsh-client-* 服务端永不提供 → Fiber 永久 PENDING → web boot 失败）
  *     P11 已装 bundle 的 main 入口产物缺失（#1965：市场装未构建源码树 → ERR_MODULE_NOT_FOUND → boot 崩）
  *     P13 client 端 provide 服务名抢注核心客户端服务 / 跨 bundle 同名（#2752：浏览器端 service already registered → UI 白屏，服务端日志无感知）
+ *     P17 client 端 require 不在宿主模块表（#5719：warn 级，种子表自省自 web-frontend 产物）
  *     P16 命名导入的导出缺失（#5864：warn 级，静态自省已装包导出面）
  *     P14 declared bin 可执行性（#1846：打包成功但 bin 缺 shebang/产物 → 直接执行 ENOEXEC；与 P11 互补）
  *     P12 `installed_bundle`（#1719 v1.1 词汇：profile 内 bundle 版本 vs 运行 CLI 版本——web 面板/API 跑的是 profile 里装的 bundle，可与独立 CLI 版本不一致）
@@ -957,6 +958,72 @@ function packageNamedExports(pkgDir) {
   } else {
     report('profile', 'P16', true, '插件命名导入均在已装包的导出里（静态可判定的部分）', undefined);
   }
+
+  /* P17：client 端 require 的 specifier 不在宿主模块表（#5719：dsh-client-modules 的 makeRequire 硬 throw
+   * → 浏览器端 Failed to load plugins / 白屏，服务端 HTTP 200 且日志零感知）。
+   * 可服务 ⟺ 平台种子 ∪ 图行（已装包同时有 dsh.client 与 exports["./client"]）∪ 该包声明的 external/inject。
+   * 防误报（#5719 实测得出）：必须先剥注释（JSDoc 里的 require("picomatch") 示例会误报）、只认双引号形态、
+   * 排除模板插值/相对路径/Node 内置、归一 /client 后缀、跳过自引用。warn 级（静态近似，宁可漏报不误报）。 */
+  const p17Issues = [];
+  const composedRows = new Set();
+  {
+    const roots = [];
+    try { roots.push(join(resolveProfile(profileArg), 'node_modules')); } catch { /* 无 profile */ }
+    for (const lib of SESSION_LIBS) roots.push(lib.slice(0, lib.indexOf(join('@deepseek-ai', 'dsh-session'))));
+    for (const nm of roots) {
+      if (!existsSync(nm)) continue;
+      const pkgs = [];
+      for (const d of readdirSync(nm)) {
+        if (d.startsWith('.')) continue;
+        if (d.startsWith('@')) {                       // scoped：@scope/name 两层
+          const scopeDir = join(nm, d);
+          try { for (const n of readdirSync(scopeDir)) pkgs.push(join(scopeDir, n)); } catch { /* 忽略 */ }
+        } else pkgs.push(join(nm, d));
+      }
+      for (const dir of pkgs) {
+        const pj = join(dir, 'package.json');
+        if (!existsSync(pj)) continue;
+        try {
+          const pkg = JSON.parse(readFileSync(pj, 'utf8'));
+          if (pkg.name && pkg.dsh?.client && pkg.exports?.['./client']) { composedRows.add(pkg.name); composedRows.add(`${pkg.name}/client`); }
+        } catch { /* 忽略 */ }
+      }
+    }
+  }
+  const stripClientSuffix = (s) => s.replace(/\/client$/, '');
+  for (const [b, d] of bundleDirs) {
+    const declared = new Set();
+    try {
+      const pkg = JSON.parse(readFileSync(join(d, 'package.json'), 'utf8'));
+      for (const k of ['external', 'inject']) {
+        const v = pkg.dsh?.client?.[k];
+        if (Array.isArray(v)) for (const x of v) if (typeof x === 'string') declared.add(x);
+      }
+    } catch { /* 无 manifest */ }
+    const misses = new Map();
+    for (const f of collectClientJsFiles(d)) {
+      let code = readJs(f);
+      code = code.replace(/\/\*[\s\S]*?\*\//g, '');          // 块注释（JSDoc 示例会误报）
+      code = code.replace(/(^|[^:])\/\/[^\n]*/g, '$1');       // 行注释（避开 https://）
+      for (const m of code.matchAll(/require\(\s*"([^"]+)"\s*\)/g)) { // 打包产物用双引号；单引号多为文档示例
+        const spec = m[1];
+        if (!spec || spec.includes('${') || spec.startsWith('.') || spec.startsWith('/') || spec.startsWith('node:')) continue;
+        if (NODE_BUILTINS.has(spec)) continue;
+        const id = stripClientSuffix(spec);
+        if (CLIENT_SEEDS.has(spec) || CLIENT_SEEDS.has(id)) continue;
+        if (composedRows.has(spec) || composedRows.has(id)) continue;
+        if (declared.has(spec) || declared.has(id)) continue;
+        if (id === b || spec === b) continue; // 自引用 → 打包内联
+        misses.set(spec, relative(d, f));
+      }
+    }
+    if (misses.size) p17Issues.push(`${b}（${[...misses].map(([s, f]) => `require("${s}") [${f}]`).join('; ')}）`);
+  }
+  if (p17Issues.length) {
+    report('profile', 'P17', false, `client 端 require 的模块不在宿主模块表（#5719：makeRequire 硬 throw → 浏览器白屏且服务端无感知）: ${p17Issues.join('; ')}`, `改用宿主提供的模块名；若确由宿主提供，在本包 package.json 的 dsh.client.external/inject 里声明；平台种子当前 ${CLIENT_SEEDS.size} 项、已装图行 ${composedRows.size} 项`);
+  } else {
+    report('profile', 'P17', true, `client 端 require 的 specifier 均可服务（平台种子 ${CLIENT_SEEDS.size} 项 + 已装图行 ${composedRows.size} 项）`, undefined);
+  }
 }
 
 /* ================= session ================= */
@@ -1174,6 +1241,37 @@ function loadFormatCatalog() {
 }
 const FORMAT_CATALOG = loadFormatCatalog();
 
+/* P17：平台种子表 + Node 内置模块（#5719）
+ * 种子 = 浏览器端 require 的"平台种子词"，由宿主 web-frontend 构建产物决定；自省失败回退常量。 */
+const CLIENT_PLATFORM_SEEDS_FALLBACK = new Set([
+  'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-client-store', '@deepseek-ai/dsh-client-ui-slots',
+  '@deepseek-ai/dsh-client-ui-primitives', '@deepseek-ai/dsh-client-ui-dockkit',
+]);
+function clientPlatformSeeds() {
+  for (const lib of SESSION_LIBS) {
+    const nm = lib.slice(0, lib.indexOf(join('@deepseek-ai', 'dsh-session')));
+    const assets = join(nm, '@deepseek-ai', 'dsh-web-frontend', 'dist', 'assets');
+    if (!existsSync(assets)) continue;
+    for (const f of readdirSync(assets)) {
+      if (!/^index-.*\.js$/.test(f) && !/\.js$/.test(f)) continue;
+      try {
+        const s = readFileSync(join(assets, f), 'utf8');
+        const i = s.indexOf('dsh-client-ui-dockkit');
+        if (i < 0) continue;
+        const win = s.slice(Math.max(0, i - 1400), i + 60);
+        const keys = [...win.matchAll(/["']?([A-Za-z@][^"':,{}]*)["']?\s*:\s*[A-Za-z_$][\w$]*/g)]
+          .map((m) => m[1].trim()).filter((k) => /^(react|react-dom|@deepseek-ai\/)/.test(k));
+        if (keys.length >= 8) return new Set(keys);
+      } catch { /* 试下一个资产 */ }
+    }
+  }
+  return CLIENT_PLATFORM_SEEDS_FALLBACK;
+}
+const CLIENT_SEEDS = clientPlatformSeeds();
+const NODE_BUILTINS = new Set(['url','path','fs','util','events','stream','buffer','crypto','os','zlib','assert','worker_threads','perf_hooks','querystring','string_decoder','timers','tty','net','http','https','child_process','process','module','v8','vm','tls','dns','readline','repl','cluster','constants','domain','punycode','sys','timers/promises','fs/promises','stream/web','stream/promises','util/types','dns/promises']);
+
+
 /** 用**真实迁移链**在内存里跑一遍：返回 null = 可恢复，否则返回拒载原因（截断）。
  *  比复刻规则更准（上游每条 fail-closed 规则都覆盖，且自动跟随版本变化）。 */
 function realChainRefusal(text) {
@@ -1361,6 +1459,7 @@ catalogSeverity.set('P13', 'warn');
 catalogSeverity.set('P14', 'warn');
 catalogSeverity.set('P15', 'error');
 catalogSeverity.set('P16', 'warn');
+catalogSeverity.set('P17', 'warn');
 
 function bundledCatalog() {
   const p = new URL('./checks.json', import.meta.url);

@@ -48,6 +48,7 @@ node dsh-doctor.mjs --no-catalog         # 不拉远程目录（只用内置副�
 | P13 | client 半 `provide` 服务名抢注核心客户端服务（`chatFileMentions` 等 `@deepseek-ai/dsh-client-*`，warn）或跨 bundle 同名（浏览器端 service already registered → UI 白屏、服务端日志无感知） | [#2752](https://github.com/deepseek-ai/deepseek-harness/discussions/2752) |
 | P14 | 声明 `bin` 可执行性（目标文件在位 + 文本 bin 必须带 shebang；仅可执行位不识别解释器 → 直接执行 ENOEXEC，#1846） | [#1846](https://github.com/deepseek-ai/deepseek-harness/discussions/1846) |
 | P16 | 插件导入了已装包未提供的命名导出（warn；单条坏 entry 即 boot 硬失败） | [#5864](https://github.com/deepseek-ai/deepseek-harness/discussions/5864) |
+| P17 | client 端 `require()` 的模块宿主模块表无法服务（平台种子 ∪ 已装图行 ∪ 声明的 external）——warn 级；抓浏览器 `Failed to load plugins` 白屏 | [#5719](https://github.com/deepseek-ai/deepseek-harness/discussions/5719) |
 
 ### session
 | ID | 检查 | 对应讨论 |

@@ -978,3 +978,61 @@ test('S12：无 descriptor 的 v0 日志 → 通过（不误报）', (t) => {
   assert.notEqual(map.get('S12'), false, '普通 v0 日志不该被判拒载');
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- P17：client 端 require 不在宿主模块表（#5719 类） ---------- */
+
+test('P17：client 产物 require 未知模块 → 失败（warn 级）', () => {
+  const home = tempHome();
+  clientBundleFixture(home, 'web', 'p17-bad', {
+    clientJs: 'const x = require("totally-unknown-pkg");\nwindow.__ModuleLoader__.load({ id: "p17-bad", factory: () => x });\n',
+  });
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.equal(map.get('P17'), false, '未知 specifier 应判为不在模块表');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P17：平台种子（react / @deepseek-ai/cordis）→ 不误报', () => {
+  const home = tempHome();
+  clientBundleFixture(home, 'web', 'p17-seed', {
+    clientJs: 'const a = require("react");\nconst b = require("react-dom/client");\nconst c = require("@deepseek-ai/cordis");\nwindow.__ModuleLoader__.load({ id: "p17-seed", factory: () => [a, b, c] });\n',
+  });
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(map.get('P17'), false, '平台种子不应被判缺失');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P17：已装图行（dsh.client + exports["./client"]）→ 不误报', () => {
+  const home = tempHome();
+  clientBundleFixture(home, 'web', 'p17-row', {
+    clientJs: 'const d = require("@x/dep/client");\nwindow.__ModuleLoader__.load({ id: "p17-row", factory: () => d });\n',
+  });
+  // 追加一个"已装图行"包：有 dsh.client 且 exports["./client"]
+  const nm = join(home, 'profiles', 'web', 'node_modules');
+  mkdirSync(join(nm, '@x', 'dep'), { recursive: true });
+  writeFileSync(join(nm, '@x', 'dep', 'package.json'), JSON.stringify({
+    name: '@x/dep', version: '1.0.0', dsh: { client: 'client.js' }, exports: { './client': './client.js' },
+  }));
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(map.get('P17'), false, '有 dsh.client + exports["./client"] 的已装包是图行，应可服务');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P17：防误报边界（注释示例/单引号/模板插值/Node 内置/自引用）→ 不误报', () => {
+  const home = tempHome();
+  clientBundleFixture(home, 'web', 'p17-guards', {
+    clientJs: [
+      '// JSDoc-style example that must NOT be flagged:',
+      '/**',
+      ' * Usage: const pm = require("picomatch-example-not-real");',
+      ' */',
+      "const doc = require('single-quoted-doc-example');",
+      'const tpl = require(`${dynamicName}`);',
+      'const u = require("url");',
+      'const self = require("p17-guards");',
+      'window.__ModuleLoader__.load({ id: "p17-guards", factory: () => [doc, tpl, u, self] });',
+    ].join('\n') + '\n',
+  });
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(map.get('P17'), false, '注释/单引号/模板/内置/自引用都必须跳过（否则误报）');
+  rmSync(home, { recursive: true, force: true });
+});

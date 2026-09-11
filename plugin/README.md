@@ -53,6 +53,7 @@ With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2
 | P13 | client-half `provide` service name clashes with core client services (`chatFileMentions` etc. from `@deepseek-ai/dsh-client-*`, warn) or cross-bundle same-name grabs (browser-side "service already registered" → UI white screen, server logs see nothing) | [#2752](https://github.com/deepseek-ai/deepseek-harness/discussions/2752) |
 | P14 | declared `bin` executability (target file present + shebang required for text `bin`; exec-bit alone does not identify the interpreter → ENOEXEC on direct run, #1846) | [#1846](https://github.com/deepseek-ai/deepseek-harness/discussions/1846) |
 | P16 | plugin imports a named export the installed package does not provide (warn; boot fails hard on one bad entry) | [#5864](https://github.com/deepseek-ai/deepseek-harness/discussions/5864) |
+| P17 | client-side `require()` of a specifier the host module table cannot serve (platform seeds ∪ installed graph rows ∪ declared externals) — warn-only; catches the browser `Failed to load plugins` white screen | [#5719](https://github.com/deepseek-ai/deepseek-harness/discussions/5719) |
 
 ### session
 | ID | Checks | Discussion |
