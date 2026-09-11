@@ -704,7 +704,7 @@ The fixture corpus has repeatedly caught real defects:
 \subsubsection{6.2 The Anchor Tripwire in Action: A Cross-Train Format Migration}\label{the-anchor-tripwire-in-action-a-cross-train-format-migration}
 
 Twenty-seven days after the first field deployment, the harness had moved from
-\texttt{0.1.0-rc.6} to \texttt{0.1.5-alpha.1} and, in doing so, changed two
+\texttt{0.1.0-rc.6} to \texttt{0.1.5-rc.1} and, in doing so, changed two
 things at once: it migrated from an npx-checkout install to a \textbf{global npm
 install}, and it split the session format into a versioned chain
 (v0$\rightarrow$v1$\rightarrow$v2$\rightarrow$v3) whose migration logic lives in
@@ -857,7 +857,7 @@ tool, dsh-plugin-doctor's acceptance harness {[}32{]}).
 Cross-implementation fixture sharing remains partial.
 
 \textbf{External validity.} dsh-doctor is evaluated on one harness
-(two consecutive release trains: 0.1.0-rc.6 and 0.1.5-alpha.1) and one production profile. The
+(two consecutive release trains: 0.1.0-rc.6 and 0.1.5-rc.1) and one production profile. The
 check-lifecycle \emph{model} (Section 5) is claimed as general, but its
 evidence base is a single ecosystem; generalization to other
 plugin-based harnesses (e.g., Koishi {[}5{]}) is untested. The

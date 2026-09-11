@@ -1,6 +1,6 @@
 # dsh-doctor
 
-**Verified against DSH `0.1.5-alpha.1`** (session format v3, `dsh-session` located across npx / global / profile layouts; legacy v0 events read through the installed `dsh-session-format-*` migration chain).
+**Verified against DSH `0.1.5-rc.1`** (session format v3, `dsh-session` located across npx / global / profile layouts; legacy v0 events read through the installed `dsh-session-format-*` migration chain).
 
 > [中文版 README](README.zh.md) · English
 

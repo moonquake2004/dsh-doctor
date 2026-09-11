@@ -25,7 +25,7 @@
  *     S7  end-seed 后重放已提交尾部（#1497：种子末尾之后出现更低 seq）
  *     S9  zstd 容器结构（#1043：单帧容器 → session.list 整体 500，侧边栏全消失）
  *     S10 sourceEventSeqs 悬空引用（#1469：压缩未重映射溯源 → history unavailable）
- *     S8  未知事件类型且无 ignorable（#1538：harness 读不了 → 整包拒绝；可读集 = 安装的 dsh-session 当前表 ∪ dsh-session-format-* 迁移包旧类型，0.1.5-alpha.1 回退）
+ *     S8  未知事件类型且无 ignorable（#1538：harness 读不了 → 整包拒绝；可读集 = 安装的 dsh-session 当前表 ∪ dsh-session-format-* 迁移包旧类型，0.1.5-rc.1 回退）
  *     S12 迁移拒载预检（#6045/#6328/#6311：规则自省自已装 dsh-session-format-* 迁移包）
  *     S11 全会话扫描（#1550：损坏会话 → 隔离建议；超大会话/工作区估算物化堆 → 冷启动风险警告；估算堆=解码MB×6+事件×200B，阈值默认 1GB，可设 DSH_DOCTOR_HEAP_MB）
  *   [env]
@@ -69,7 +69,7 @@ const only = process.argv
   .map((a) => a.startsWith('--') ? a.slice(2) : a);
 const wants = (s) => only.length === 0 || only.includes(s) || only.includes(s.charAt(0).toUpperCase() + s.slice(1));
 
-// S8：官方 KNOWN_SESSION_EVENT_TYPES（回退表对齐 0.1.5-alpha.1；优先从安装的 dsh-session 动态解析）
+// S8：官方 KNOWN_SESSION_EVENT_TYPES（回退表对齐 0.1.5-rc.1；优先从安装的 dsh-session 动态解析）
 const KNOWN_SESSION_EVENT_TYPES_FALLBACK = new Set([
   'agent-preset/selected', 'agent/inbox/spliced', 'approval/asked', 'approval/decided',
   'approval/policy', 'assistant/attempt', 'assistant/message', 'command/done',
@@ -1148,6 +1148,50 @@ function migrationRules() {
 }
 const MIGRATION_RULES = migrationRules();
 
+/** 加载已装的会话格式目录（真实迁移链入口）。找不到/加载失败返回 null —— 调用方回退启发式规则或 skip。 */
+function loadFormatCatalog() {
+  for (const lib of SESSION_LIBS) {
+    const nm = lib.slice(0, lib.indexOf(join('@deepseek-ai', 'dsh-session')));
+    const cands = [join(nm, '@deepseek-ai', 'dsh-session-format-catalog', 'lib', 'index.js')];
+    const store = join(nm, '.pnpm');
+    if (existsSync(store)) {
+      for (const d of readdirSync(store)) {
+        if (d.startsWith('@deepseek-ai+dsh-session-format-catalog@')) {
+          cands.push(join(store, d, 'node_modules', '@deepseek-ai', 'dsh-session-format-catalog', 'lib', 'index.js'));
+        }
+      }
+    }
+    for (const c of cands) {
+      if (!existsSync(c)) continue;
+      try {
+        const req = createRequire(c);
+        const m = req(c);
+        if (m?.sessionFormatCatalog?.createRestore) return m.sessionFormatCatalog;
+      } catch { /* 试下一个 */ }
+    }
+  }
+  return null;
+}
+const FORMAT_CATALOG = loadFormatCatalog();
+
+/** 用**真实迁移链**在内存里跑一遍：返回 null = 可恢复，否则返回拒载原因（截断）。
+ *  比复刻规则更准（上游每条 fail-closed 规则都覆盖，且自动跟随版本变化）。 */
+function realChainRefusal(text) {
+  if (!FORMAT_CATALOG) return undefined; // undefined = 链不可用（区别于 null = 可恢复）
+  const lines = text.split('\n').filter((l) => l.trim());
+  if (!lines.length) return null;
+  try {
+    const header = JSON.parse(lines[0]);
+    const r = FORMAT_CATALOG.createRestore(header, { validation: 'current', recovery: 'strict' });
+    for (let i = 1; i < lines.length; i++) r.decodeRow(JSON.parse(lines[i]));
+    r.finish();
+    return null;
+  } catch (e) {
+    return String(e?.message ?? e).replace(/\s+/g, ' ').slice(0, 140);
+  }
+}
+
+
 /** 单个会话文本 → 会被迁移链拒绝的理由（空数组 = 可读）。 */
 function migrationRefusals(text) {
   const reasons = [];
@@ -1191,14 +1235,24 @@ function scanMigrationRefusals() {
   }
   if (files.length === 0) { reportSkip('session', 'S12', '未发现会话日志', undefined); return; }
   const refused = [];
+  let viaChain = 0;
   for (const f of files) {
     let text;
     try { text = f.endsWith('.zstd') ? execFileSync('zstd', ['-dc', f], { maxBuffer: 512 * 1024 * 1024 }).toString('utf8') : readFileSync(f, 'utf8'); }
     catch { continue; } // 解压失败由 S11 报，不在 S12 重复
-    const rs = migrationRefusals(text);
-    if (rs.length) refused.push(`${basename(dirname(f))}（${rs[0]}）`);
+    const chain = realChainRefusal(text);
+    if (chain === undefined) {
+      // 真实链不可用 → 回退启发式规则（覆盖子集，明确标注）
+      const rs = migrationRefusals(text);
+      if (rs.length) refused.push(`${basename(dirname(f))}（${rs[0]}）`);
+    } else if (chain !== null) {
+      viaChain++;
+      refused.push(`${basename(dirname(f))}（${chain}）`);
+    }
   }
-  const rule = `规则自省：descriptor v${MIGRATION_RULES.descriptorVersion ?? '?'} / source.kind ${MIGRATION_RULES.kinds?.size ?? '?'} 项`;
+  const rule = FORMAT_CATALOG
+    ? `判定方式：真实迁移链（format-catalog ${FORMAT_CATALOG.currentVersion ? `v${FORMAT_CATALOG.currentVersion}` : ''}，内存试迁移）`
+    : `判定方式：启发式规则（descriptor v${MIGRATION_RULES.descriptorVersion ?? '?'} / source.kind ${MIGRATION_RULES.kinds?.size ?? '?'} 项；真实链不可用，覆盖子集）`;
   if (refused.length) {
     report('session', 'S12', false,
       `迁移拒载预检：${refused.length}/${files.length} 个会话会被当前迁移链拒绝（#6045/#6328/#6311——列表里看着在、点开即报 cannot safely transform / unsupported descriptor version）: ${refused.slice(0, 5).join('; ')}${refused.length > 5 ? ` 等 ${refused.length} 个` : ''}`,

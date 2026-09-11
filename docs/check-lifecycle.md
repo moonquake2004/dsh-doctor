@@ -89,9 +89,9 @@ Reference: our Layer-B self-update (npm version check + `--update` +
   "section": "env",
   "severity": "error",
   "probe": { "type": "file-writable", "path": "{home}/settings.yaml", "required": false },
-  "anchor": { "package": "@deepseek-ai/dsh-settings", "symbol": null, "train": "0.1.5-alpha.1" },
+  "anchor": { "package": "@deepseek-ai/dsh-settings", "symbol": null, "train": "0.1.5-rc.1" },
   "fixtures": { "good": "path/or-inline", "bad": "path/or-inline" },
-  "certifiedOn": "0.1.5-alpha.1"
+  "certifiedOn": "0.1.5-rc.1"
 }
 ```
 

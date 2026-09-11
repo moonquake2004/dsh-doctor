@@ -1,6 +1,6 @@
 # dsh-doctor
 
-**已针对 DSH `0.1.5-alpha.1` 验证**（会话格式 v3；`dsh-session` 定位覆盖 npx / 全局 / profile 三种布局；v0 旧事件按已装 `dsh-session-format-*` 迁移链读取）。
+**已针对 DSH `0.1.5-rc.1` 验证**（会话格式 v3；`dsh-session` 定位覆盖 npx / 全局 / profile 三种布局；v0 旧事件按已装 `dsh-session-format-*` 迁移链读取）。
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的离线诊断工具——在**启动前**或**安装插件前**跑一次，它会告诉你社区反复报告的哪几类故障会在你机器上咬人。
 
