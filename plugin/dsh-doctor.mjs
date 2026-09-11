@@ -148,7 +148,7 @@ function pickNewestSessionLib(libs) {
 function sessionTableFrom(lib) {
   try {
     const s = readFileSync(lib, 'utf8');
-    const m = /const KNOWN_SESSION_EVENT_TYPES = new Set\(\[(.*?)\]\);/.exec(s);
+    const m = /const KNOWN_SESSION_EVENT_TYPES = new Set\(\[([\s\S]*?)\]\);/.exec(s);
     if (!m) return null;
     const items = [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
     return items.length ? new Set(items) : null;
@@ -1026,25 +1026,77 @@ function packageNamedExports(pkgDir) {
   }
 }
 
+/* ---- 会话日志定位（世代感知，规范见 dsh-security/docs/session-shape-v3.md §1） ----
+ * 命名：^session(?:\.v([1-9][0-9]*))?\.jsonl(\.zstd)?$（与 dsh-session-format 的
+ * CANONICAL_LOG_FILENAME 一致）；v0 = 无 .vN 的旧名，vN = 当前世代（本机为 v3）。
+ * 规则：① 同一会话目录内取**最高世代**；② 跨目录按 **mtime** 取最新；
+ *      ③ 忽略 session.lock（不匹配正则）；④ 目录名任意（含 _no-cwd / 无 session- 前缀）；
+ *      ⑤ 同世代同时存在 .zstd 与裸 .jsonl 时**优先 .zstd**（与旧实现
+ *         `existsSync(zstd) ? zstd : plain` 一致；真实 store 遇到两种编码并存会抛
+ *         encodingMismatch，这里只是让诊断仍能看到日志）。
+ * 旧实现只认 session.jsonl[.zstd]，v3 上线后每次 S 检查都在分析 2 天前的旧世代日志。 */
+const SESSION_LOG_RE = /^session(?:\.v([1-9][0-9]*))?\.jsonl(\.zstd)?$/;
+
+/** 解析一个文件名 → { gen, zstd }；非会话日志（含 session.lock）→ null。 */
+function parseSessionLogName(name) {
+  const m = SESSION_LOG_RE.exec(name);
+  if (!m) return null;
+  return { gen: m[1] === undefined ? 0 : Number(m[1]), zstd: m[2] === '.zstd' };
+}
+
+/** 单个会话目录 → 该目录的权威日志（最高世代；同世代 .zstd 优先）；无 → null。 */
+function pickSessionLogIn(dir) {
+  let names;
+  try { names = readdirSync(dir); } catch { return null; }
+  let best = null;
+  for (const n of names) {
+    const g = parseSessionLogName(n);
+    if (!g) continue;
+    if (!best || g.gen > best.gen || (g.gen === best.gen && g.zstd && !best.zstd)) best = { ...g, f: join(dir, n) };
+  }
+  return best ? { f: best.f, gen: best.gen } : null;
+}
+
+/** 会话库全量定位：三层 sessions/<project>/<session-id>/session*.jsonl*。
+ *  loose=true 时额外接受两层散文件 sessions/<project>/session*.jsonl*——这是
+ *  "取最新会话"（S 检查默认目标 / 安全层 SR/SS）旧有的兼容行为；S11/S12 的全库扫描
+ *  旧实现只走三层，保持 loose=false，避免把散文件误当会话（那会引入误报）。
+ *  返回 [{ f, gen, m }]（m = mtimeMs，按 mtime 降序）。 */
+function listSessionLogs(root, { loose = false } = {}) {
+  const out = [];
+  let users;
+  try { users = readdirSync(root, { withFileTypes: true }); } catch { return out; }
+  const add = (hit) => {
+    try { out.push({ f: hit.f, gen: hit.gen, m: statSync(hit.f).mtimeMs }); } catch { /* race */ }
+  };
+  for (const u of users) {
+    if (!u.isDirectory()) continue; // root 下的散文件不在旧实现语义内，不扩权
+    const sd = join(root, u.name);
+    // 两层散文件（sessions/<user>/session.jsonl[.zstd]）
+    if (loose) { const l = pickSessionLogIn(sd); if (l) add(l); }
+    // 三层：sessions/<user>/<session-id>/session*.jsonl*
+    let subs;
+    try { subs = readdirSync(sd, { withFileTypes: true }); } catch { continue; }
+    for (const s of subs) {
+      if (!s.isDirectory()) continue;
+      const hit = pickSessionLogIn(join(sd, s.name));
+      if (hit) add(hit);
+    }
+  }
+  out.sort((a, b) => b.m - a.m);
+  return out;
+}
+
+/** 最新会话日志路径（世代感知；含两层散文件兼容；无 → null）。 */
+function latestSessionLog(root = join(HOME, 'sessions')) {
+  const logs = listSessionLogs(root, { loose: true });
+  return logs.length ? logs[0].f : null;
+}
+
 /* ================= session ================= */
 function checkSession(targetPath) {
   if (!wants('session')) return;
-  const target = targetPath || (() => {
-    let best = null, bestM = -1;
-    const root = join(HOME, 'sessions');
-    if (!existsSync(root)) return null;
-    for (const u of readdirSync(root)) {
-      const sd = join(root, u);
-      if (!existsSync(sd)) continue;
-      for (const s of readdirSync(sd)) {
-        const f = existsSync(join(sd, s, 'session.jsonl.zstd')) ? join(sd, s, 'session.jsonl.zstd') : join(sd, s, 'session.jsonl');
-        if (!existsSync(f)) continue;
-        const m = statSync(f).mtimeMs;
-        if (m > bestM) { bestM = m; best = f; }
-      }
-    }
-    return best;
-  })();
+  const target = targetPath || latestSessionLog();
   if (!target || !existsSync(target)) { report('session', 'S0', true, '无会话日志，跳过单会话检查（可用 --session <path> 指定）', undefined); return; }
   let text;
   try {
@@ -1322,15 +1374,8 @@ function scanMigrationRefusals() {
   }
   const root = join(HOME, 'sessions');
   if (!existsSync(root)) { reportSkip('session', 'S12', '无会话目录，迁移拒载预检不适用', undefined); return; }
-  const files = [];
-  for (const u of readdirSync(root)) {
-    const sd = join(root, u);
-    if (!existsSync(sd)) continue;
-    for (const s of readdirSync(sd)) {
-      const f = existsSync(join(sd, s, 'session.jsonl.zstd')) ? join(sd, s, 'session.jsonl.zstd') : join(sd, s, 'session.jsonl');
-      if (existsSync(f)) files.push(f);
-    }
-  }
+  // 世代感知：每个会话目录只取权威世代（v3 优先于 v0），与 store 的会话列表对齐
+  const files = listSessionLogs(root).map((x) => x.f);
   if (files.length === 0) { reportSkip('session', 'S12', '未发现会话日志', undefined); return; }
   const refused = [];
   let viaChain = 0;
@@ -1365,15 +1410,8 @@ function scanAllSessions() {
   if (!wants('session')) return;
   const root = join(HOME, 'sessions');
   if (!existsSync(root)) { report('session', 'S11', true, '无会话目录，跳过全会话扫描', undefined); return; }
-  const files = [];
-  for (const u of readdirSync(root)) {
-    const sd = join(root, u);
-    if (!existsSync(sd)) continue;
-    for (const s of readdirSync(sd)) {
-      const f = existsSync(join(sd, s, 'session.jsonl.zstd')) ? join(sd, s, 'session.jsonl.zstd') : join(sd, s, 'session.jsonl');
-      if (existsSync(f)) files.push(f);
-    }
-  }
+  // 世代感知：每个会话目录只取权威世代（v3 优先于 v0），与 store 的会话列表对齐
+  const files = listSessionLogs(root).map((x) => x.f);
   if (files.length === 0) { report('session', 'S11', true, '未发现会话日志', undefined); return; }
   const corrupt = []; const oversized = []; const clean = [];
   let totalDS = 0; let totalEvents = 0;
@@ -1863,31 +1901,11 @@ async function run() {
           }
         } catch { /* 配置损坏不影响检查 */ }
         // 获取最新会话文件（供 SR*/SS* 检查使用）
-        // 复审修复：对齐 S11 的两层布局 sessions/<user>/<session>/session.jsonl[.zstd]，
-        // 按 mtime 取最新；旧实现只扫顶层 *.jsonl，真实部署下永远返回 null → 运行时层全跳过
+        // 世代感知定位（与 S11 同一规则）：三层 sessions/<user>/<session>/session*.jsonl*，
+        // 目录内取最高世代（v0/v3 并存时取 v3），跨目录按 mtime 取最新，忽略 session.lock
         const findLatestSession = () => {
           if (sessionArg) return sessionArg;
-          try {
-            const root = join(HOME, 'sessions');
-            const candidates = [];
-            for (const u of readdirSync(root)) {
-              const sd = join(root, u);
-              let subs = [];
-              try { subs = readdirSync(sd); } catch { continue; }
-              for (const s of subs) {
-                const zstdPath = join(sd, s, 'session.jsonl.zstd');
-                const plainPath = join(sd, s, 'session.jsonl');
-                const f = existsSync(zstdPath) ? zstdPath : (existsSync(plainPath) ? plainPath : null);
-                if (!f) continue;
-                try { candidates.push({ f, m: statSync(f).mtimeMs }); } catch { /* race */ }
-              }
-              // 兼容直接放在用户目录下的散文件
-              const loose = join(sd, 'session.jsonl');
-              if (existsSync(loose)) { try { candidates.push({ f: loose, m: statSync(loose).mtimeMs }); } catch { /* race */ } }
-            }
-            candidates.sort((a, b) => b.m - a.m);
-            return candidates.length ? candidates[0].f : null;
-          } catch { return null; }
+          try { return latestSessionLog(); } catch { return null; }
         };
 
         const { results: secResults, exitCode: secExit, summary: secSummary } = await registry.runAll(

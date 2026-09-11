@@ -14,7 +14,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, symlinkSync, chmodSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, symlinkSync, chmodSync, realpathSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -289,6 +289,179 @@ test('S9：单帧 zstd 容器 → 失败（zstd 可用时）', { skip: !existsSy
   writeFileSync(join(dir, 'session.jsonl.zstd'), r.stdout);
   const { map } = runCli({ home, args: ['--session', join(dir, 'session.jsonl.zstd')] });
   assert.equal(map.get('S9'), false, '单帧 zstd 应该报 S9');
+  rmSync(home, { recursive: true, force: true });
+});
+
+/* ---------- 会话日志定位：世代感知 v0/v3（规范 dsh-security/docs/session-shape-v3.md §1）
+ * 背景：v3 上线后日志名为 session.v3.jsonl.zstd，旧定位器只认 session.jsonl[.zstd]，
+ * 于是每次 S 检查都在分析 2 天前的旧世代日志。以下 fixture 覆盖规则 ①②③④⑤。 */
+
+/** 真实 v3 事件形态（规范 §2/§3，**不得自造**）：
+ *  - tool/call：工具参数在 data.arguments，是 **JSON 字符串**（旧世代才是 data.args 对象）
+ *  - tool/result：callId 在 data.message.source.callId，结果文本在 data.message.content[].content[].text（嵌套两层）
+ *  - turn/step 在 data 里，不在顶层 */
+const V3 = {
+  header: (id) => ({ type: 'session', version: 3, id, createdAt: 1, isSeeded: true, delegationDepth: 0 }),
+  toolCall: (seq, turn, step, callId, name, args) => ({
+    type: 'tool/call', seq, time: 1786756102077,
+    data: { turn, step, callId, name, arguments: JSON.stringify(args) },
+  }),
+  toolResult: (seq, turn, step, callId, text) => ({
+    type: 'tool/result', seq, time: 1786756102116,
+    data: {
+      turn, step,
+      message: {
+        source: { kind: 'tool', callId },
+        content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text }] }],
+      },
+    },
+  }),
+};
+
+/** v3 健康会话（seq 连续：0 → 1） */
+const GOOD_V3_SESSION = [
+  V3.header('v3-good'),
+  V3.toolCall(0, 1, 1, 'call_00_good', 'bash', { command: 'pwd && ls -la', description: '探测工作目录' }),
+  V3.toolResult(1, 1, 1, 'call_00_good', '/Users/waterfly/收藏\n'),
+];
+
+/** v3 带 seq 空洞（S6 目标；0 → 2，缺 1） */
+const V3_SESSION_HOLE = [
+  V3.header('v3-hole'),
+  V3.toolCall(0, 1, 1, 'call_00_hole', 'bash', { command: 'pwd', description: '探测工作目录' }),
+  V3.toolResult(2, 1, 1, 'call_00_hole', '/tmp\n'),
+];
+
+/** v0 带 seq 空洞（S6 目标） */
+const V0_SESSION_HOLE = [T.user(0, 1), T.turnStart(1, 1), T.user(3, 1)];
+
+/** 写一个三层会话目录：sessions/<project>/<session-id>/<filename> */
+function writeSessionDir(home, project, sessionId, filename, lines) {
+  const dir = join(home, 'sessions', project, sessionId);
+  mkdirSync(dir, { recursive: true });
+  const f = join(dir, filename);
+  writeFileSync(f, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  return f;
+}
+
+/** 固定 mtime，让"跨目录取最新"可确定地翻转 */
+function setMtime(f, ms) { utimesSync(f, new Date(ms), new Date(ms)); }
+
+const HAS_ZSTD = existsSync('/opt/homebrew/bin/zstd') || spawnSync('which', ['zstd']).status === 0;
+
+test('定位器 fixture：v3 事件形态与规范一致（字段一漂移即红）', () => {
+  const call = V3.toolCall(0, 1, 1, 'call_00_shape', 'bash', { command: 'pwd' });
+  assert.equal(call.type, 'tool/call');
+  assert.equal(typeof call.data.arguments, 'string', 'data.arguments 必须是 JSON 字符串（规范 §2）');
+  assert.deepEqual(JSON.parse(call.data.arguments), { command: 'pwd' });
+  assert.equal(call.data.turn, 1, 'turn 在 data 里（顶层恒 undefined）');
+  assert.equal(call.data.step, 1);
+  const res = V3.toolResult(1, 1, 1, 'call_00_shape', '/tmp\n');
+  assert.equal(res.data.message.source.callId, 'call_00_shape', 'callId 在 data.message.source.callId（规范 §3）');
+  assert.equal(res.data.message.content[0].content[0].text, '/tmp\n', '结果文本嵌套两层（旧代码只找扁平 output/result/text）');
+  assert.equal(res.data.callId, undefined, 'v3 无 data.callId');
+});
+
+test('定位器：目录里只有 v0 日志 → 找到它（默认目标 = 最新会话）', () => {
+  const home = tempHome();
+  writeSessionDir(home, 'proj', 's-v0', 'session.jsonl', V0_SESSION_HOLE);
+  // `--session` 不带值 = 只跑 session 段并走默认定位；S6 报空洞即证明选中了这份 v0 日志
+  const { map } = runCli({ home, args: ['--session'] });
+  assert.equal(map.get('S6'), false, 'v0-only fixture 必须被默认定位选中');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('定位器：保留两层散文件兼容（sessions/<user>/session.jsonl）', () => {
+  const home = tempHome();
+  sessionFixture(home, 'loose', V0_SESSION_HOLE); // 散文件直接放在用户目录下（旧布局）
+  const { map } = runCli({ home, args: ['--session'] });
+  assert.equal(map.get('S6'), false, '两层散文件布局仍应被"取最新会话"选中');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('定位器：同目录 v0 + v3 并存 → 取 v3（干净 v0 不掩盖 v3 的缺陷）', () => {
+  const home = tempHome();
+  writeSessionDir(home, 'proj', 's-both', 'session.jsonl', GOOD_SESSION);        // v0 干净
+  writeSessionDir(home, 'proj', 's-both', 'session.v3.jsonl', V3_SESSION_HOLE);  // v3 有空洞
+  const { map } = runCli({ home, args: ['--session'] });
+  assert.equal(map.get('S6'), false, '同目录 v0+v3 应取最高世代 v3');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('定位器：同目录 v0 + v3 并存 → 反向对照（缺陷在 v0 时不报）', () => {
+  const home = tempHome();
+  writeSessionDir(home, 'proj', 's-both2', 'session.jsonl', V0_SESSION_HOLE);      // v0 有空洞
+  writeSessionDir(home, 'proj', 's-both2', 'session.v3.jsonl', GOOD_V3_SESSION);   // v3 干净
+  const { map } = runCli({ home, args: ['--session'] });
+  assert.notEqual(map.get('S6'), false, 'v3 健康时不应报 S6（证明没在分析 v0）');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('定位器：跨目录按 mtime 取最新（可翻转）', () => {
+  const home = tempHome();
+  const hole = writeSessionDir(home, 'proj-a', 's-old', 'session.jsonl', V0_SESSION_HOLE);
+  const clean = writeSessionDir(home, 'proj-b', 's-new', 'session.jsonl', GOOD_SESSION);
+  const now = Date.now();
+  setMtime(hole, now - 120000); setMtime(clean, now - 60000);   // clean 更新 → S6 pass
+  let { map } = runCli({ home, args: ['--session'] });
+  assert.notEqual(map.get('S6'), false, '应选 mtime 最新的干净会话');
+  setMtime(clean, now - 120000); setMtime(hole, now - 60000);   // 翻转：hole 更新 → S6 fail
+  ({ map } = runCli({ home, args: ['--session'] }));
+  assert.equal(map.get('S6'), false, '翻转后应选 mtime 更新的空洞会话');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('定位器：最新日志在 _no-cwd 异名目录 → 仍能定位；session.lock 必须忽略', () => {
+  const home = tempHome();
+  const newer = writeSessionDir(home, 'proj', '_no-cwd', 'session.v3.jsonl', V3_SESSION_HOLE);
+  writeFileSync(join(dirname(newer), 'session.lock'), ''); // 旧代码/朴素 glob 可能误取
+  const older = writeSessionDir(home, 'proj', 'session-abc', 'session.jsonl', GOOD_SESSION);
+  const now = Date.now();
+  setMtime(older, now - 60000); setMtime(newer, now - 1000);
+  const { map } = runCli({ home, args: ['--session'] });
+  assert.equal(map.get('S6'), false, '_no-cwd 目录里的新 v3 日志应被选中');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('定位器：同世代 .zstd 与裸 jsonl 并存 → 优先 .zstd（沿用旧行为）', { skip: !HAS_ZSTD }, () => {
+  const home = tempHome();
+  const dir = join(home, 'sessions', 'proj', 's-enc');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'session.jsonl'), GOOD_SESSION.map((l) => JSON.stringify(l)).join('\n') + '\n'); // 干净
+  const z = spawnSync('zstd', ['-c'], { input: V0_SESSION_HOLE.map((l) => JSON.stringify(l)).join('\n') });
+  writeFileSync(join(dir, 'session.jsonl.zstd'), z.stdout); // 同世代、有空洞
+  const { map } = runCli({ home, args: ['--session'] });
+  assert.equal(map.get('S6'), false, '同世代应优先 .zstd（与旧实现 existsSync(zstd) ? zstd : plain 一致）');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('定位器：世代优先于压缩（v3 裸 jsonl 胜过 v0 .zstd）', { skip: !HAS_ZSTD }, () => {
+  const home = tempHome();
+  const dir = join(home, 'sessions', 'proj', 's-gen-vs-enc');
+  mkdirSync(dir, { recursive: true });
+  const z = spawnSync('zstd', ['-c'], { input: V0_SESSION_HOLE.map((l) => JSON.stringify(l)).join('\n') });
+  writeFileSync(join(dir, 'session.jsonl.zstd'), z.stdout);                        // v0（有空洞）
+  writeFileSync(join(dir, 'session.v3.jsonl'), GOOD_V3_SESSION.map((l) => JSON.stringify(l)).join('\n') + '\n'); // v3（干净）
+  const { map } = runCli({ home, args: ['--session'] });
+  assert.notEqual(map.get('S6'), false, 'v3 裸文件应先于 v0 .zstd 被选中（世代 > 压缩）');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('定位器：仅 v3（.zstd）→ 默认目标与 S11/S12 扫描都覆盖新世代', { skip: !HAS_ZSTD }, () => {
+  const home = tempHome();
+  const dir = join(home, 'sessions', 'proj', 's-v3-only');
+  mkdirSync(dir, { recursive: true });
+  const z = spawnSync('zstd', ['-c'], { input: GOOD_V3_SESSION.map((l) => JSON.stringify(l)).join('\n') });
+  writeFileSync(join(dir, 'session.v3.jsonl.zstd'), z.stdout);
+  const { map, raw } = runCli({ home, args: ['--session'] });
+  assert.notEqual(map.get('S6'), false, 'v3-only 会话应被定位（seq 连续 → 不报 S6）');
+  assert.equal(map.get('S0'), undefined, 'v3-only 会话应被定位（S0 只在"无会话日志"时出现）');
+  // S11/S12 的全库扫描必须看到这份 v3 日志（否则 detail 会是"未发现会话日志"）
+  for (const id of ['S11', 'S12']) {
+    const c = raw.checks.find((x) => x.id === id);
+    assert.ok(c, `应报告 ${id}`);
+    assert.ok(!String(c.detail).includes('未发现会话日志'), `${id} 扫描应包含 v3 日志: ${c.detail}`);
+  }
   rmSync(home, { recursive: true, force: true });
 });
 
