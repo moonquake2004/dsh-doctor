@@ -1,6 +1,6 @@
 # Reply draft — deepseek-harness #5813
 
-Status: draft for user approval. Not posted.
+Status: **POSTED** (user-approved) — https://github.com/deepseek-ai/deepseek-harness/discussions/5813#discussioncomment-18401800
 
 ---
 
