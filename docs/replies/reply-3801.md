@@ -1,6 +1,6 @@
 # Reply draft — deepseek-harness #3801
 
-Status: **DRAFT** — not posted; awaiting user approval.
+Status: **POSTED** (user-approved) — https://github.com/deepseek-ai/deepseek-harness/discussions/3801#discussioncomment-18401968.
 
 Target: https://github.com/deepseek-ai/deepseek-harness/discussions/3801
 (dsh-doctor-windows, `xianfanwindy/dsh-doctor-windows`)

@@ -1,6 +1,6 @@
 # Reply draft — deepseek-harness #6085
 
-Status: **DRAFT** — not posted; awaiting user approval.
+Status: **POSTED** (user-approved) — https://github.com/deepseek-ai/deepseek-harness/discussions/6085#discussioncomment-18401967.
 
 Target: https://github.com/deepseek-ai/deepseek-harness/discussions/6085
 (Community Session Doctor, `wsjwu58-cmd/dsh-session-doctor`)
