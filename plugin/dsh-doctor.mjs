@@ -24,7 +24,7 @@
  *     S7  end-seed 后重放已提交尾部（#1497：种子末尾之后出现更低 seq）
  *     S9  zstd 容器结构（#1043：单帧容器 → session.list 整体 500，侧边栏全消失）
  *     S10 sourceEventSeqs 悬空引用（#1469：压缩未重映射溯源 → history unavailable）
- *     S8  未知事件类型且无 ignorable（#1538：插件写的事件 harness 读不了 → 整包拒绝；清单从安装的 dsh-session 解析，内置 0.1.0-rc.6 回退）
+ *     S8  未知事件类型且无 ignorable（#1538：harness 读不了 → 整包拒绝；可读集 = 安装的 dsh-session 当前表 ∪ dsh-session-format-* 迁移包旧类型，0.1.5-alpha.1 回退）
  *     S11 全会话扫描（#1550：损坏会话 → 隔离建议；超大会话/工作区估算物化堆 → 冷启动风险警告；估算堆=解码MB×6+事件×200B，阈值默认 1GB，可设 DSH_DOCTOR_HEAP_MB）
  *   [env]
  *     E1  关键命令不在 PATH（#1270：node/pnpm/zstd）
@@ -32,7 +32,7 @@
  *     E3  node 版本 / --expose-internals 可及性（#113/#1313，headless/HMR 场景）
  *     E4  node-pty 原生模块完整性（#1219：pty.node 缺失 → dsh web 启动失败）
  *     E5  存储 JSON 文件合法性（#1357：并发写 workspace.json 乱码 → 工作区列表消失）
- *     E6  锚点元检查（tripwire：S6 的 expandRow seq0+k、S7 的 session/end-seed、S10 的 sourceEventSeqs 是否仍在安装的 dsh-session 中）
+ *     E6  锚点元检查（tripwire：S6 的 v0 chunk 展开契约、S7 的 session/end-seed、S10 的 sourceEventSeqs 是否仍在安装的 dsh-session/迁移包中；定位覆盖 npx/全局/profile 三布局）
  *     E10 3080 Web 端口可用性（#1719：启动 dsh web 前检查；dsh web 自身占用=正常，其他程序占用=FAIL；DSH_DOCTOR_PORT 可覆盖）
  *     （P6 Windows 空格参数 lint，#1420 —— 待实现）
  *
@@ -67,36 +67,147 @@ const only = process.argv
   .map((a) => a.startsWith('--') ? a.slice(2) : a);
 const wants = (s) => only.length === 0 || only.includes(s) || only.includes(s.charAt(0).toUpperCase() + s.slice(1));
 
-// S8：官方 KNOWN_SESSION_EVENT_TYPES（0.1.0-rc.6 内置回退；优先从安装的 dsh-session 解析）
+// S8：官方 KNOWN_SESSION_EVENT_TYPES（回退表对齐 0.1.5-alpha.1；优先从安装的 dsh-session 动态解析）
 const KNOWN_SESSION_EVENT_TYPES_FALLBACK = new Set([
-  'agent-preset/selected', 'agent/inbox/spliced', 'approval/asked', 'approval/decided', 'approval/policy',
-  'assistant/chunk', 'assistant/message', 'command/done', 'command/run', 'compaction/end', 'compaction/prune',
-  'compaction/start', 'compaction/summary', 'feedback/record', 'goal/change', 'hook/invoked', 'hook/result',
-  'llm/retry', 'llm/retry-started', 'permission/preset', 'plan/mode', 'request/context', 'request/header',
-  'sandbox/mode', 'schedule/change', 'session/end-seed', 'session/title', 'session/title-llm-request',
-  'step/end', 'step/start', 'subagent/descriptor', 'todo/write', 'tool-workflow/agent-end',
-  'tool-workflow/agent-start', 'tool-workflow/run-end', 'tool-workflow/run-start', 'tool/call',
-  'tool/code-dispatch', 'tool/code-dispatch-start', 'tool/result', 'turn/end', 'turn/start', 'user/message',
-  'web/deepseek-search-llm-request'
+  'agent-preset/selected', 'agent/inbox/spliced', 'approval/asked', 'approval/decided',
+  'approval/policy', 'assistant/attempt', 'assistant/message', 'command/done',
+  'command/run', 'compaction/end', 'compaction/prune', 'compaction/start',
+  'compaction/summary', 'feedback/message-delete', 'feedback/message-put', 'feedback/record',
+  'goal/change', 'hook/invoked', 'hook/result', 'llm/retry',
+  'llm/retry-started', 'model/selection', 'permission/preset', 'plan/mode',
+  'request/context', 'request/header', 'sandbox/mode', 'schedule/change',
+  'session-log-deepseek/delivery-accepted', 'session/end-seed', 'session/title', 'session/title-llm-request',
+  'step/end', 'step/start', 'subagent/descriptor', 'subagent/model-selection-policy',
+  'system/message', 'team/member', 'team/message/delivered', 'team/message/queued',
+  'team/task', 'todo/write', 'tool-workflow/agent-end', 'tool-workflow/agent-start',
+  'tool-workflow/run-end', 'tool-workflow/run-start', 'tool/call', 'tool/ptc-dispatch',
+  'tool/ptc-dispatch-start', 'tool/result', 'turn/end', 'turn/start',
+  'user/message', 'web/deepseek-search-llm-request'
 ]);
 // 存储行类型与 header，不属于事件门禁
 const STORAGE_ROW_TYPES = new Set(['text-chunks', 'reasoning-chunks', 'tool-call-chunks', 'session']);
-function knownSessionEventTypes() {
+/** 定位已安装的 dsh-session lib/index.js —— 覆盖三种安装形态（0.1.5 起 dsh 转全局安装，旧的 npx-only 查找会静默回退）：
+ *  ① npx/pnpm：<root>/node_modules/.bin/dsh → <root>/node_modules/@deepseek-ai/dsh-session
+ *  ② 全局 npm：<prefix>/bin/dsh → <prefix>/lib/node_modules/@deepseek-ai/dsh[/node_modules]/@deepseek-ai/dsh-session
+ *  ③ profile：$DSH_HOME/profiles/<name>/node_modules/@deepseek-ai/dsh-session（含 .pnpm store）
+ *  找不到返回 null —— 调用方回退内置假设并**声明**（不静默）。 */
+function findSessionLibs() {
+  const REL = join('@deepseek-ai', 'dsh-session', 'lib', 'index.js');
+  const cands = [];
   for (const p of (process.env.PATH || '').split(PATH_DELIM)) {
-    if (!p.endsWith('node_modules/.bin') || !existsSync(join(p, 'dsh'))) continue;
-    try {
-      const src = readFileSync(join(dirname(p), '@deepseek-ai', 'dsh-session', 'lib', 'index.js'), 'utf8');
-      const m = /const KNOWN_SESSION_EVENT_TYPES = new Set\(\[(.*?)\]\);/.exec(src);
-      if (m) {
-        const items = [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
-        if (items.length) return new Set(items);
+    if (!p || !existsSync(join(p, 'dsh'))) continue;
+    cands.push(join(dirname(p), REL)); // ① npx/pnpm 布局
+    let real = null;
+    try { real = realpathSync(join(p, 'dsh')); } catch { /* 忽略 */ }
+    if (real) {
+      let d = dirname(real);
+      for (let i = 0; i < 5; i++) {
+        cands.push(join(d, 'node_modules', REL)); // ② <pkg>/node_modules/…
+        cands.push(join(d, REL));                 // ② hoisted 到 <dir>/@deepseek-ai/
+        const up = dirname(d);
+        if (up === d) break;
+        d = up;
       }
-    } catch { /* 回退 */ }
-    break;
+    }
+  }
+  const profiles = join(HOME, 'profiles'); // ③
+  if (existsSync(profiles)) {
+    for (const name of readdirSync(profiles)) {
+      const nm = join(profiles, name, 'node_modules');
+      cands.push(join(nm, REL));
+      const store = join(nm, '.pnpm');
+      if (existsSync(store)) {
+        for (const d of readdirSync(store)) {
+          if (d.startsWith('@deepseek-ai+dsh-session@')) cands.push(join(store, d, 'node_modules', REL));
+        }
+      }
+    }
+  }
+  return [...new Set(cands.filter((c) => existsSync(c)))];
+}
+
+/** 机器上可能同时装着多份 dsh（全局 + 多个 npx checkout）——取版本最高的一份做"当前契约"，
+ *  可读类型则取所有安装的并集（任一安装能读的旧类型都不该判"读不了"）。 */
+function pickNewestSessionLib(libs) {
+  let best = null; let bestV = null;
+  for (const lib of libs) {
+    let v = null;
+    try { v = JSON.parse(readFileSync(join(dirname(dirname(lib)), 'package.json'), 'utf8')).version; } catch { /* 忽略 */ }
+    if (!v) { if (!best) best = lib; continue; }
+    const key = v.split(/[.-]/).map((x) => (/^\d+$/.test(x) ? Number(x) : 0));
+    if (!bestV || key.some((n, i) => n !== (bestV[i] ?? 0) && n > (bestV[i] ?? 0) && bestV.slice(0, i).every((m, j) => m === key[j]))) { best = lib; bestV = key; }
+    else if (!best) { best = lib; bestV = key; }
+  }
+  return best;
+}
+
+/** 单份安装的事件类型表（解析失败返回 null）。 */
+function sessionTableFrom(lib) {
+  try {
+    const s = readFileSync(lib, 'utf8');
+    const m = /const KNOWN_SESSION_EVENT_TYPES = new Set\(\[(.*?)\]\);/.exec(s);
+    if (!m) return null;
+    const items = [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+    return items.length ? new Set(items) : null;
+  } catch { return null; }
+}
+
+/** 某份安装同级的会话格式迁移包（v0→v1→v2→v3）所认的旧类型。 */
+function migratorTypesFor(lib) {
+  const out = [];
+  const nm = lib.slice(0, lib.indexOf(join('@deepseek-ai', 'dsh-session')));
+  const libs = [];
+  const scope = join(nm, '@deepseek-ai');
+  if (existsSync(scope)) {
+    for (const d of readdirSync(scope)) if (d.startsWith('dsh-session-format-')) libs.push(join(scope, d, 'lib', 'index.js'));
+  }
+  const store = join(nm, '.pnpm');
+  if (existsSync(store)) {
+    for (const d of readdirSync(store)) {
+      if (!d.startsWith('@deepseek-ai+dsh-session-format-')) continue;
+      const inner = join(store, d, 'node_modules', '@deepseek-ai');
+      if (!existsSync(inner)) continue;
+      for (const p of readdirSync(inner)) if (p.startsWith('dsh-session-format-')) libs.push(join(inner, p, 'lib', 'index.js'));
+    }
+  }
+  for (const f of libs) {
+    try {
+      const s = readFileSync(f, 'utf8');
+      for (const m of s.matchAll(/"([a-z][a-z0-9-]*\/[a-z0-9-]+)"/g)) out.push(m[1]);
+    } catch { /* 忽略单个包 */ }
+  }
+  return out;
+}
+
+const SESSION_LIBS = findSessionLibs();
+/** 定位安装的 dsh-session（新→旧取最高版本；找不到返回 null）。 */
+function findSessionLib() { return pickNewestSessionLib(SESSION_LIBS) || null; }
+
+function knownSessionEventTypes() {
+  const lib = findSessionLib();
+  if (lib) {
+    const t = sessionTableFrom(lib);
+    if (t) return t;
   }
   return KNOWN_SESSION_EVENT_TYPES_FALLBACK;
 }
+
 const KNOWN = knownSessionEventTypes();
+
+/** 可读类型集 = 当前 KNOWN ∪ 已装 dsh-session-format-* 迁移包认的旧类型（0.1.5 起会话格式有 v0→v1→v2→v3 迁移链）。
+ *  只比对当前表会把**可迁移的旧会话**误判为"harness 读不了"（#1538 的语义是"读不了"，迁移得了就不算）。
+ *  旧类型在磁盘日志里真实存在（v0 日志含 assistant/chunk、tool/code-dispatch 等），迁移包负责转换。 */
+function readableSessionEventTypes() {
+  const set = new Set(KNOWN);
+  for (const lib of SESSION_LIBS) {
+    const t = sessionTableFrom(lib);
+    if (t) for (const x of t) set.add(x);
+    for (const x of migratorTypesFor(lib)) set.add(x);
+  }
+  return set;
+}
+
+const READABLE = readableSessionEventTypes();
 
 function report(section, id, ok, detail, fix, src) {
   results.push({ section, id, ok, detail, fix, src: src ?? 'builtin' });
@@ -193,27 +304,31 @@ function checkEnv() {
 
   // E6：锚点元检查（tripwire）——我们 S6/S7/S10 依赖的契约是否仍在安装的 dsh-session 里
   // 上游改名/重构会让我们的离线结论静默腐烂（boyin111-1 的 --verify-anchors 同款思路）
-  let sessionLib = null;
-  for (const p of (process.env.PATH || '').split(PATH_DELIM)) {
-    if (p.endsWith('node_modules/.bin') && existsSync(join(p, 'dsh'))) {
-      const lib = join(dirname(p), '@deepseek-ai', 'dsh-session', 'lib', 'index.js');
-      if (existsSync(lib)) { sessionLib = lib; break; }
-    }
-  }
+  const sessionLib = findSessionLib();
   if (!sessionLib) {
-    report('env', 'E6', true, '⚠ 未定位到 dsh-session，锚点未校验（回退内置假设：expandRow/end-seed/sourceEventSeqs）', '安装 dsh 后重跑可校验');
+    // r5 语义：锚点校验在此上下文"不适用"（找不到安装）——用 skip 而非静默 pass，理由写进 detail
+    reportSkip('env', 'E6', '未定位到 dsh-session（npx/全局/profile 三种布局都没有）——锚点未校验，S6/S7/S10 结论回退内置假设', undefined);
   } else {
     const src = readFileSync(sessionLib, 'utf8');
+    // 0.1.5 起 expandRow 从 dsh-session 移到会话格式迁移包（v0→v1→v2→v3），锚点随之迁移：
+    // S6 读的是磁盘上的 v0/v1 日志，其 chunk 展开契约由迁移链承载。
+    const migratorLib = (() => {
+      const nm = sessionLib.slice(0, sessionLib.indexOf(join('@deepseek-ai', 'dsh-session')));
+      const p = join(nm, '@deepseek-ai', 'dsh-session-format-v0-to-v1', 'lib', 'index.js');
+      return existsSync(p) ? p : null;
+    })();
+    const expandOk = /function expandRow[\s\S]*?row\.seq0/.test(src)
+      || (migratorLib ? /"assistant\/chunk":\s*disposition\(/.test(readFileSync(migratorLib, 'utf8')) : false);
     const anchors = [
-      ['expandRow 的 seq0+k 展开（S6 依赖）', /function expandRow[\s\S]*?row\.seq0/, src],
-      ['session/end-seed 字面量（S7 依赖）', /"session\/end-seed"/, src],
-      ['sourceEventSeqs 字段（S10 依赖）', /sourceEventSeqs/, src],
+      ['v0 chunk 展开契约（S6 依赖；dsh-session 的 expandRow 或迁移包 disposition）', expandOk],
+      ['session/end-seed 字面量（S7 依赖）', /"session\/end-seed"/.test(src)],
+      ['sourceEventSeqs 字段（S10 依赖）', /sourceEventSeqs/.test(src)],
     ];
-    const missing = anchors.filter(([, re]) => !re.test(src));
+    const missing = anchors.filter(([, okFlag]) => !okFlag);
     if (missing.length) {
       report('env', 'E6', false, `锚点缺失（上游可能改了契约，S6/S7/S10 结论需人工复核）: ${missing.map(([n]) => n).join('; ')}（${sessionLib.slice(-60)}）`, '对照上游变更更新 dsh-doctor 的对应检查');
     } else {
-      report('env', 'E6', true, `锚点齐全（${anchors.length}/3: seq0+k / session/end-seed / sourceEventSeqs）`, undefined);
+      report('env', 'E6', true, `锚点齐全（${anchors.length}/3: v0 chunk 展开 / session/end-seed / sourceEventSeqs）`, undefined);
     }
   }
 }
@@ -787,7 +902,7 @@ function checkSession(targetPath) {
     let d; try { d = JSON.parse(line); } catch { continue; }
     const seq = d.seq; if (typeof seq === 'number' && seq > maxSeq) maxSeq = seq;
     // S8：未知事件类型且未标 ignorable（#1538：harness 整包拒绝）
-    if (!STORAGE_ROW_TYPES.has(d.type) && !KNOWN.has(d.type) && d.ignorable !== true) {
+    if (!STORAGE_ROW_TYPES.has(d.type) && !READABLE.has(d.type) && d.ignorable !== true) {
       s8Violations.push(`"${d.type}"`);
     }
     // S6（官方版）：按 decodeStorageRecord 语义展开 chunk 行，构建 seq==index 事件流
@@ -857,7 +972,7 @@ function checkSession(targetPath) {
     const seen = [...new Set(s8Violations)].slice(0, 5).join(', ');
     report('session', 'S8', false, `未知事件类型且无 ignorable 标记（#1538，harness 将整包拒绝）: ${seen}${new Set(s8Violations).size > 5 ? ` 等 ${new Set(s8Violations).size} 种` : ''}`, '该日志由更新版本/外部插件写入，当前 harness 无法读取；升级 harness 或标记 ignorable');
   } else {
-    report('session', 'S8', true, `所有事件类型均在 KNOWN_SESSION_EVENT_TYPES 内（${KNOWN.size} 种）`, undefined);
+    report('session', 'S8', true, `所有事件类型均可读（当前表 ${KNOWN.size} 种 + 迁移包旧类型，共 ${READABLE.size} 种）`, undefined);
   }
 
   // S7：end-seed 之后出现低于种子末尾 seq 的事件（#1497：已提交尾部被重放）
@@ -915,7 +1030,7 @@ function scanAllSessions() {
     for (let li = 0; li < lines.length; li++) {
       const ln = lines[li]; if (!ln.trim()) continue;
       let d; try { d = JSON.parse(ln); } catch { problems.push(`行 ${li + 1} 无法解析`); continue; }
-      if (!STORAGE_ROW_TYPES.has(d.type) && !KNOWN.has(d.type) && d.ignorable !== true) problems.push(`未知类型 ${d.type}`);
+      if (!STORAGE_ROW_TYPES.has(d.type) && !READABLE.has(d.type) && d.ignorable !== true) problems.push(`未知类型 ${d.type}`);
       if (d.type === 'session/end-seed' && typeof d.seq === 'number') { lastSeed = d.seq; seedIdx = posList.length; }
       const t = d.type;
       if (t === 'text-chunks' || t === 'reasoning-chunks' || t === 'tool-call-chunks') {

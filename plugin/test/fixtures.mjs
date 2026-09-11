@@ -14,9 +14,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, symlinkSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, symlinkSync, chmodSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const CLI = join(process.cwd(), 'plugin', 'dsh-doctor.mjs');
@@ -841,5 +841,56 @@ test('P14：bin 有 shebang + 产物在位 → 通过', () => {
   binFixture(home, 'fake-bin-good'); // 默认 bin/cli.js 有 shebang
   const { map } = runCli({ home, args: ['--profile', 'web'] });
   assert.notEqual(map.get('P14'), false, 'bin 有 shebang 且产物在位不应报 P14');
+  rmSync(home, { recursive: true, force: true });
+});
+
+/* ---------- DSH 0.1.5 兼容：全局安装定位 / 迁移包旧类型 / 锚点 skip ---------- */
+
+/** 本机是否装有会话格式迁移包（环境相关，用于决定旧类型断言是否可跑） */
+function hasFormatMigrator() {
+  for (const p of (process.env.PATH || '').split(':')) {
+    if (!p || !existsSync(join(p, 'dsh'))) continue;
+    let real;
+    try { real = realpathSync(join(p, 'dsh')); } catch { continue; }
+    let d = dirname(real);
+    for (let i = 0; i < 5; i++) {
+      if (existsSync(join(d, 'node_modules', '@deepseek-ai', 'dsh-session-format-v0-to-v1', 'lib', 'index.js'))) return true;
+      if (existsSync(join(d, '@deepseek-ai', 'dsh-session-format-v0-to-v1', 'lib', 'index.js'))) return true;
+      const up = dirname(d);
+      if (up === d) break;
+      d = up;
+    }
+  }
+  return false;
+}
+
+test('S8：真未知类型（当前表与迁移包都不认）→ 失败', () => {
+  const home = tempHome();
+  sessionFixture(home, 'bogus', [...GOOD_SESSION.slice(0, 5), { type: 'bogus/type', seq: 5, time: 1, data: {} }]);
+  const { map } = runCli({ home, args: ['--session', join(home, 'sessions', 'bogus', 'session.jsonl')] });
+  assert.equal(map.get('S8'), false, 'bogus/type 应判为不可读（#1538 语义）');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('S8：v0 旧类型 assistant/chunk 有迁移路径时不误报', (t) => {
+  if (!hasFormatMigrator()) return t.skip('本机无 dsh-session-format-* 迁移包');
+  const home = tempHome();
+  sessionFixture(home, 'legacy', [
+    ...GOOD_SESSION.slice(0, 5),
+    { type: 'assistant/chunk', seq: 5, time: 1, data: { turn: 1, step: 1, chunk: {} } },
+    T.seed(6),
+  ]);
+  const { map } = runCli({ home, args: ['--session', join(home, 'sessions', 'legacy', 'session.jsonl')] });
+  assert.notEqual(map.get('S8'), false, 'assistant/chunk 是 v0 旧类型，迁移链可读 → 不应判损坏');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('E6：定位不到 dsh-session 时用 skip（不适用），不静默 pass', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', { manifest: { name: 'web' }, patch: '' });
+  const { d } = runEnvelope({ home, args: ['--env'], env: { PATH: '/nonexistent' } });
+  const e6 = d.checks.find((c) => c.name === 'E6');
+  assert.ok(e6, '应报告 E6');
+  assert.equal(e6.status, 'skip', 'E6 无法定位安装时语义是"不适用"→ skip');
   rmSync(home, { recursive: true, force: true });
 });
