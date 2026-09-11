@@ -5,7 +5,9 @@ place to check the shape. Status: living — updates tracked in
 deepseek-ai/deepseek-harness discussions #1719 (doctor spec) and #1846 (RFC).
 Vocabulary layer: **check-name vocabulary r5** (#1719, drafted by @ciceroyang,
 reviewed by @sjh9714 and @moonquake2004); **v1.1 supplement** adds
-`installed_bundle` (semantics settled in #1719, r6 sheet pending).
+`installed_bundle` (semantics settled in #1719, r6 sheet pending) and the opt-in
+top-level `remediation` array (ADOPTED in #1719: nominated by @ciceroyang, +1 by
+@sjh9714 and @moonquake2004).
 
 ## Full envelope — `dsh-doctor/v1`
 
@@ -34,6 +36,24 @@ reviewed by @sjh9714 and @moonquake2004); **v1.1 supplement** adds
 - `ok` = `exitCode === 0`
 - `tool` (optional but recommended): emitter id for provenance — `name` stays the tool-local check id, no global id registry required
 - `checks[].name` is the check id; `detail` is the human-readable verdict
+
+### v1.1 `remediation` (opt-in)
+
+```json
+{ "remediation": ["[<checks[].name>] <fix text>", "..."] }
+```
+
+- **opt-in**: emitted only when the caller asks for it (dsh-doctor: `--remediation`);
+  absent otherwise, so **r5 consumers stay byte-stable**
+- **top-level, not per-check**: an ordered array of remediation lines, in the same
+  order as the failing checks that carry a fix
+- **line format**: `[<check-name>] <fix>`, so the bracketed key is machine-parseable
+  and the body stays free text. The key is the exact `checks[].name` up to the
+  **first `]`**; `]` is therefore the only character forbidden in a check name
+  (boundary rule settled in #1719 — a charset like `^[a-z_]+$` would silently drop
+  vendor-prefixed names such as `E1-pnpm` or `installed_bundle`)
+- **a fix is not assumed to exist**: failing checks without remediation text
+  contribute no line
 
 ## Check-name vocabulary (r5)
 
@@ -75,7 +95,7 @@ can be derived from `checks`.
 
 | Tool | Mode | Shape |
 |---|---|---|
-| moonquake2004/dsh-doctor | `--json --envelope` | full envelope (v1, emits `tool`, summary.skip, vocabulary r5 node/pnpm + v1.1 `installed_bundle`) |
+| moonquake2004/dsh-doctor | `--json --envelope` | full envelope (v1, emits `tool`, summary.skip, vocabulary r5 node/pnpm + v1.1 `installed_bundle`); v1.1 `remediation` via `--remediation`) |
 | zoahdev/dsh-plugin-doctor | v1.6.0 `--profile --json` | full envelope (v1) |
 | worm-ai/dsh-diagnose | `--doctor-json` | subset — needs lowercase status to be v1-compatible |
 | ciceroyang/dsh-doctor | v0.5.0+ | full envelope (r5, skip) |

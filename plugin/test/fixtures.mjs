@@ -560,6 +560,39 @@ test('P10：无客户端专属服务注入 → 通过', () => {
   rmSync(home, { recursive: true, force: true });
 });
 
+test('envelope：不带 --remediation → 无该字段（r5 消费者字节稳定）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', { manifest: { name: 'web' }, patch: '' });
+  const { d } = runEnvelope({ home, args: ['--profile', 'web'] });
+  assert.equal('remediation' in d, false, '未传 flag 时不得出现 remediation 字段');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('envelope：带 --remediation → [name] fix 有序数组，仅失败且有 fix 项', () => {
+  const home = tempHome();
+  const bundlePatch = '- insert:\n    - id: dup-id\n      name: bundle-x\n';
+  profileFixture(home, 'web', {
+    manifest: { name: 'web', dsh: { profile: { bundles: ['fake-bundle'] } } },
+    patch: '- insert:\n    - id: dup-id\n      name: user-x\n',
+    nodeModules: {
+      'fake-bundle/package.json': JSON.stringify({ name: 'fake-bundle', dsh: { bundle: { patch: './patch.yml' } } }),
+      'fake-bundle/patch.yml': bundlePatch,
+      'user-x/package.json': JSON.stringify({ name: 'user-x', version: '1.0.0', main: 'index.js' }),
+      'user-x/index.js': 'module.exports = 1;\n',
+    },
+  });
+  const { d } = runEnvelope({ home, args: ['--profile', 'web', '--remediation'] });
+  assert.ok(Array.isArray(d.remediation), 'remediation 必须是数组');
+  const failed = new Set(d.checks.filter((c) => c.status === 'fail' || c.status === 'warn').map((c) => c.name));
+  for (const line of d.remediation) {
+    const m = /^\[([^\]]+)\] /.exec(line);
+    assert.ok(m, `格式必须是 [name] fix: ${line}`);
+    assert.ok(failed.has(m[1]), `只应包含失败项: ${m[1]}`);
+  }
+  assert.ok(d.remediation.some((l) => l.startsWith('[P2] ')), 'P2 冲突应出现在 remediation');
+  rmSync(home, { recursive: true, force: true });
+});
+
 test('envelope：含 tool 字段（provenance，契约 v1）', () => {
   const home = tempHome();
   profileFixture(home, 'web', { manifest: { name: 'web' }, patch: '' });

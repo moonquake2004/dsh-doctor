@@ -24,7 +24,7 @@ node dsh-doctor.mjs --json --envelope    # v1 doctor-contract envelope (lowercas
 
 Exit codes (default mode): `0` = all pass · `1` = problems found (built-in checks + catalog `severity: error`) · warn-level catalog failures don't flip the exit code.
 
-With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2` = any FAIL. The envelope follows the shared `dsh-doctor/v1` schema (`{ schema, generatedAt, profile, exitCode, summary, ok, checks:[{name,status,detail}] }`) so implementations are interchangeable for CI/marketplace use. Installed via npm, the CLI is also available as the `dsh-doctor` bin.
+With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2` = any FAIL. The envelope follows the shared `dsh-doctor/v1` schema (`{ schema, generatedAt, profile, exitCode, summary, ok, checks:[{name,status,detail}] }`) so implementations are interchangeable for CI/marketplace use. Installed via npm, the CLI is also available as the `dsh-doctor` bin. `--remediation` (with `--json --envelope`) adds the opt-in v1.1 `remediation` array — ordered `[check-name] fix` lines for failing checks, absent otherwise so r5 consumers stay byte-stable.
 
 ## Checks (28 built-in + 5 catalog = 33)
 

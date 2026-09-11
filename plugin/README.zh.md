@@ -95,7 +95,7 @@ If you're coming from a symptom (rather than from the machine), these are the ch
 | approval internals | S2 | ⚠️ runtime policy; only the turn-level effect |
 | credentials internals | E2, E5 | ⚠️ file-level only |
 
-The `dsh-doctor/v1` envelope (`--json --envelope`) is the machine-readable form of any of these runs, so a symptom tool can consume the verdict directly.
+The `dsh-doctor/v1` envelope (`--json --envelope`) is the machine-readable form of any of these runs, so a symptom tool can consume the verdict directly. `--remediation`（配合 `--json --envelope`）输出 v1.1 可选 `remediation` 数组——失败项的有序 `[检查名] 修复` 行；不带该 flag 时字段不存在，r5 消费者字节稳定。
 
 ## 自更新检查（v0.2.1，层 B）
 

@@ -1428,6 +1428,12 @@ async function run() {
     }
     const baseExit = baseFail > 0 ? 2 : baseWarn > 0 ? 1 : 0;
     const exitCode = Math.max(baseExit, secExit);
+    // v1.1 remediation（#1719 ADOPTED：ciceroyang 提名、两位 reviewer +1）：opt-in --remediation，
+    // 顶层有序数组 ["[<checks[].name>] <fix>", ...]，仅失败且有 fix 的项；键名取到首个 ']'，']' 是唯一禁用字符。
+    // 不带 --remediation 时字段不存在（r5 消费者字节稳定）。
+    const remediation = process.argv.includes('--remediation')
+      ? results.filter((r) => !r.ok && r.fix && !r.id.includes(']')).map((r) => `[${r.id}] ${r.fix}`)
+      : null;
     const out = {
       schema: 'dsh-doctor/v1',
       tool: 'dsh-doctor',
@@ -1437,6 +1443,7 @@ async function run() {
       summary,
       ok: exitCode === 0,
       checks,
+      ...(remediation ? { remediation } : {}),
     };
     if (securityMeta.enabled) {
       out.security = { enabled: true, summary: securityMeta.summary, ...(securityMeta.error ? { error: securityMeta.error } : {}) };
