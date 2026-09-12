@@ -1209,3 +1209,36 @@ test('P17：防误报边界（注释示例/单引号/模板插值/Node 内置/�
   assert.notEqual(map.get('P17'), false, '注释/单引号/模板/内置/自引用都必须跳过（否则误报）');
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- P3：ESM-only 包不得因 require.resolve 失败而误判（#1719 taltara 的坑，2026-09-12 实测命中我们） ---------- */
+
+test('P3：ESM-only 包（exports 只给 import）→ 不误报（存在性判据）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: { name: 'web', dsh: { profile: { bundles: [] } } },
+    patch: '- insert:\n    - id: esm-only-plugin\n      name: esm-only-plugin\n',
+    nodeModules: {
+      // ESM-only：exports 只有 import 条件 → require.resolve 抛 ERR_PACKAGE_PATH_NOT_EXPORTED
+      'esm-only-plugin/package.json': JSON.stringify({
+        name: 'esm-only-plugin', version: '1.0.0', type: 'module',
+        exports: { '.': { import: './index.js' } },
+      }),
+      'esm-only-plugin/index.js': 'export function apply() {}\n',
+    },
+  });
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(map.get('P3'), false, 'ESM-only 包在 loader 里可正常 import，P3 不得判为不可解析');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P3：真正缺失的包仍必须报出（修复不得放宽）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: { name: 'web', dsh: { profile: { bundles: [] } } },
+    patch: '- insert:\n    - id: truly-missing\n      name: truly-missing-pkg\n',
+    nodeModules: {},
+  });
+  const { map } = runCli({ home, args: ['--profile', 'web'] });
+  assert.equal(map.get('P3'), false, '真的不存在时必须报出');
+  rmSync(home, { recursive: true, force: true });
+});

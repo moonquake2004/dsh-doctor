@@ -493,6 +493,20 @@ function checkProfile(name) {
   }
   // P3 insert name 可解析性
   const req = (() => { try { return createRequire(join(dir, '_anchor.js')); } catch { return null; } })();
+  // 判据（#1719 taltara 的正确性陷阱，2026-09-12 实测命中我们）：**不能以 require.resolve 为准** ——
+  // ESM-only 包（exports 只声明 import 条件）会让 require.resolve 抛 ERR_PACKAGE_PATH_NOT_EXPORTED，
+  // 而 loader 能正常 import；用它判定会把健康 profile 报成 FAIL（比没有 doctor 更糟）。
+  // 改为**存在性判据**：node_modules/<name>/package.json 存在即可（scoped 取两段），
+  // 并向上找一层以覆盖 profile 根安装（~/.dsh/profiles/node_modules）。require.resolve 仅作正向加分。
+  const nmRoots = [join(dir, 'node_modules'), join(dirname(dir), 'node_modules')];
+  const pkgPresent = (n) => {
+    if (n.startsWith('cordis:')) return true;                      // 宿主内置
+    if (n.startsWith('.') || n.startsWith('/') || n.startsWith('~')) return true; // 相对/绝对路径
+    const seg = String(n).split('/');
+    const pkgName = n.startsWith('@') ? seg.slice(0, 2).join('/') : seg[0];        // scoped 需两段
+    if (!pkgName) return true;
+    return nmRoots.some((root) => existsSync(join(root, pkgName, 'package.json')));
+  };
   const bad = [];
   for (const n of userNames) {
     if (n.startsWith('@local/') || n.startsWith('@liustack/')) {
@@ -503,9 +517,9 @@ function checkProfile(name) {
         continue;
       }
     }
-    let ok = false;
-    try { if (req) { req.resolve(n); ok = true; } } catch { ok = false; }
-    if (!ok) bad.push(n);
+    let resolved = false;
+    try { if (req) { req.resolve(n); resolved = true; } } catch { resolved = false; }
+    if (!resolved && !pkgPresent(n)) bad.push(n);
   }
   if (bad.length) report('profile', 'P3', false, `用户 patch 中不可解析的 name（#1197/#880）: ${bad.join(', ')}`, `dsh plugin --profile ${name} add <包> 或修复 file: 依赖`);
   else report('profile', 'P3', true, '用户 patch insert 均可解析', undefined);
