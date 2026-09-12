@@ -1,4 +1,4 @@
-Status: **DRAFT — awaiting user approval. NOT posted.**
+Status: **POSTED** (user-approved) — https://github.com/deepseek-ai/deepseek-harness/discussions/1719#discussioncomment-18414218
 
 ---
 

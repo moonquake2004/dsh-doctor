@@ -1,6 +1,6 @@
 # 收录申请 — dsh-doctor（Blue-Whale-Harness catalog intake）
 
-Status: **DRAFT — awaiting user approval. NOT submitted.**
+Status: **SUBMITTED** — https://github.com/leenkcool/Blue-Whale-Harness/issues/170
 提交地址：https://github.com/leenkcool/Blue-Whale-Harness/issues/new?template=catalog-intake.yml
 
 ---
