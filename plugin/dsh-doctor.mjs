@@ -1917,10 +1917,34 @@ async function run() {
         // 获取最新会话文件（供 SR*/SS* 检查使用）
         // 世代感知定位（与 S11 同一规则）：三层 sessions/<user>/<session>/session*.jsonl*，
         // 目录内取最高世代（v0/v3 并存时取 v3），跨目录按 mtime 取最新，忽略 session.lock
+        // 运行时检查（SR*/SS*）扫"最新会话"，而最新会话通常**就是当前正在写入的会话** ——
+        // 那会把操作者自己的操作报成安全发现（2026-09 实测：SR1 报的 critical 全是本次会话里
+        // 自己写的 `curl|bash` 测试串，SR2 的 `doas` 来自自己引用的规则文本）。
+        // 故默认跳过"仍在写入"的会话：取 mtime 早于活跃窗口的最新会话；
+        // 窗口可用 DSH_DOCTOR_LIVE_WINDOW_MS 调整（默认 120s，设 0 关闭该保护）。
+        const LIVE_WINDOW_MS = (() => {
+          const v = Number(process.env.DSH_DOCTOR_LIVE_WINDOW_MS);
+          return Number.isFinite(v) && v >= 0 ? v : 120000;
+        })();
         const findLatestSession = () => {
-          if (sessionArg) return sessionArg;
-          try { return latestSessionLog(); } catch { return null; }
+          if (sessionArg) return sessionArg; // 显式指定则始终尊重
+          try {
+            const root = join(HOME, 'sessions');
+            const all = listSessionLogs(root); // 已按 mtime 降序
+            if (!all.length) return null;
+            if (LIVE_WINDOW_MS === 0) return all[0].f;
+            const cutoff = Date.now() - LIVE_WINDOW_MS;
+            const settled = all.find((x) => (x.m ?? 0) < cutoff);
+            return (settled ?? all[0]).f;
+          } catch { return null; }
         };
+        const sessionIsLive = (() => {
+          if (sessionArg || LIVE_WINDOW_MS === 0) return false;
+          try {
+            const all = listSessionLogs(join(HOME, 'sessions'));
+            return all.length > 0 && (all[0].m ?? 0) >= Date.now() - LIVE_WINDOW_MS;
+          } catch { return false; }
+        })();
 
         const { results: secResults, exitCode: secExit, summary: secSummary } = await registry.runAll(
           (check) => {
