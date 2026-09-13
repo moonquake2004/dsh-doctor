@@ -274,6 +274,14 @@ function checkEnv() {
     for (const d of readdirSync(pnpmStore)) if (d.startsWith('node-pty@')) ptyDirs.push(join(pnpmStore, d, 'node_modules', 'node-pty'));
   }
   const plat = `${process.platform}-${process.arch}`;
+  // 无对象可查时 skip 而非 fail（2026-09 修正）：E4 的判据是"**已安装的** dsh 里 node-pty 是否完整"，
+  // 但此前在**没有任何 node_modules 的合成 HOME**（测试 fixture、全新环境）里也会报"未找到 node-pty" ——
+  // 那不是"缺失"，而是"这里根本没有安装树可查"。据此报 fail 会让 fixture 全红、也会让 CI 在
+  // 干净容器里得到无意义的 exit 2。与项目一贯纪律一致：不适用 ⇒ skip 且带 reason。
+  // "有安装树可查" = PATH 里找到了 dsh 的 node_modules，**或**本 HOME 的 profile 里有 node_modules。
+  // 二者皆无（合成 HOME、干净容器）→ 这里没有"已安装的 dsh"可言，报 fail 是无意义的。
+  const fromPath = ptyDirs.length > 0 && existsSync(ptyDirs[0]);
+  const hasInstall = fromPath || existsSync(profileNM);
   const ptyFound = ptyDirs.filter((d) => existsSync(d));
   let ptyBinary = null;
   for (const d of ptyFound) {
@@ -282,7 +290,8 @@ function checkEnv() {
     }
     if (ptyBinary) break;
   }
-  if (ptyFound.length === 0) report('env', 'E4', false, '未找到 node-pty（dsh web 终端依赖它，#1219）', '重新安装 @deepseek-ai/dsh，确保 node-pty 装全');
+  if (!hasInstall) reportSkip('env', 'E4', '未发现 DSH 安装树（无 profiles/node_modules 可查），跳过 node-pty 完整性检测');
+  else if (ptyFound.length === 0) report('env', 'E4', false, '未找到 node-pty（dsh web 终端依赖它，#1219）', '重新安装 @deepseek-ai/dsh，确保 node-pty 装全');
   else if (ptyBinary) report('env', 'E4', true, `node-pty 原生模块在位（${plat}）`, undefined);
   else report('env', 'E4', false, `node-pty 存在但缺 ${plat} 原生二进制（#1219: dsh web 启动失败）`, '重装 node-pty（npm rebuild node-pty）或从源码构建');
 
