@@ -2021,7 +2021,13 @@ async function run() {
     console.log(JSON.stringify(out, null, 2));
     process.exit(exitCode);
   } else if (jsonOut) {
-    console.log(JSON.stringify({ ok: bad.length === 0 && secExit === 0, checks: results, catalog: catalogMeta, update: updateInfo, ...(securityMeta.enabled ? { security: securityMeta } : {}) }, null, 2));
+    // 每条检查带上 status（pass/warn/fail/skip，与 --envelope 同一词汇表）。
+    // 2026-09：此前 --json 只给 ok 布尔，消费者（含我们自己的测试助手）无法区分
+    // "warn 级失败"（如 CI 上无 pnpm → E1-pnpm warn，不翻退出码）与"error 级失败"，
+    // 于是把 warn 当成误报。状态本就不该由消费者自行推导。
+    const statusOf = (r) => (r.skip ? 'skip' : (!r.ok ? (((r.section === 'security') ? r.severity !== 'critical' : catalogSeverity.get(r.id) === 'warn') ? 'warn' : 'fail') : 'pass'));
+    const checksWithStatus = results.map((r) => ({ ...r, status: statusOf(r) }));
+    console.log(JSON.stringify({ ok: bad.length === 0 && secExit === 0, checks: checksWithStatus, catalog: catalogMeta, update: updateInfo, ...(securityMeta.enabled ? { security: securityMeta } : {}) }, null, 2));
   } else {
     const sectionOrder = { env: 0, profile: 1, session: 2, catalog: 3 };
     const ordered = [...results].sort((a, b) => (sectionOrder[a.section] ?? 9) - (sectionOrder[b.section] ?? 9));

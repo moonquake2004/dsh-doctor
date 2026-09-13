@@ -38,7 +38,7 @@ function runCli({ home, args = [], env = {} }) {
   });
   assert.ok(r.stdout, `CLI 无输出: ${r.stderr?.slice(0, 300)}`);
   const data = JSON.parse(r.stdout);
-  return { map: new Map(data.checks.map((c) => [c.id, c.ok])), raw: data };
+  return { map: new Map(data.checks.map((c) => [c.id, c.ok])), checks: data.checks, raw: data };
 }
 
 function profileFixture(home, name, { manifest, patch, nodeModules = {} }) {
@@ -55,12 +55,22 @@ function profileFixture(home, name, { manifest, patch, nodeModules = {} }) {
   return dir;
 }
 
-/** 断言：指定检查必须失败，其余全部通过（无误报；absent = 通过，因为部分检查只在失败时报告） */
+/**
+ * 断言：指定检查必须失败，其余**不得有 error 级失败**（无误报；absent = 通过）。
+ *
+ * 2026-09 修正：契约是"除目标外没有**阻断性**失败"，而 warn 级失败不翻退出码、也不算误报
+ * （典型：CI runner 上没有 pnpm → E1-pnpm=warn）。此前只看 ok 布尔，把 warn 也当误报，
+ * 于是同一套件在本机全绿、在 CI 三红。改用 status（pass/warn/fail/skip）。
+ */
 function assertIsolated(home, args, mustFail, env = {}) {
-  const { map } = runCli({ home, args, env });
-  for (const [id, ok] of map) {
-    if (id === mustFail) assert.equal(ok, false, `${id} 应该失败（fixture 目标）`);
-    else assert.equal(ok, true, `${id} 不该失败（误报）: fixture=${mustFail}`);
+  const { checks } = runCli({ home, args, env });
+  for (const c of checks) {
+    if (c.id === mustFail) {
+      assert.notEqual(c.status, 'pass', `${c.id} 应该失败（fixture 目标），实为 ${c.status}`);
+      continue;
+    }
+    assert.ok(c.status === 'pass' || c.status === 'warn' || c.status === 'skip',
+      `${c.id} 不该有 error 级失败（误报）: fixture=${mustFail} status=${c.status}`);
   }
 }
 
