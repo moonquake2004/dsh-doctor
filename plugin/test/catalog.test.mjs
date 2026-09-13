@@ -213,9 +213,13 @@ test('种子规则：E7-dsh-in-path 通过（node 在 PATH，dsh 通常也在）
   const cat = bundledCatalog();
   const e7 = cat.checks.find((c) => c.id === 'E7-dsh-in-path');
   assert.ok(e7, 'E7 存在');
-  // dsh 在运行环境里通常在 PATH（插件就是被 dsh 加载的），但不强制 —— 只验证探测可执行
-  const r = runCatalogCheck(e7, ctx(process.env.HOME));
-  assert.equal(typeof r.ok, 'boolean');
+  // 需要"存在 DSH 环境"才会真正判定（无环境时按设计 skip）；这里显式构造，
+  // 不让用例依赖"跑测试的机器上恰好有 ~/.dsh"——CI 上正是因为没有而红过。
+  const home = tempHome();
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  const r = runCatalogCheck(e7, ctx(home));
+  assert.equal(typeof r.ok, 'boolean', '有 DSH 环境时必须给出布尔判定');
+  rmSync(home, { recursive: true, force: true });
 });
 
 test('种子规则：P6-patch-name-space 在含空格 name 的 patch 上 fail', () => {
