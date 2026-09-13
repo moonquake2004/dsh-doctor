@@ -35,8 +35,19 @@ function ctx(home, profile = 'web') {
 test('command-exists 探测', () => {
   const ok = runCatalogCheck({ probe: { type: 'command-exists', cmd: 'node' } }, ctx('/tmp'));
   assert.equal(ok.ok, true);
-  const miss = runCatalogCheck({ probe: { type: 'command-exists', cmd: 'dsh-doctor-no-such-cmd-xyz' } }, ctx('/tmp'));
-  assert.equal(miss.ok, false);
+
+  // 有 DSH 环境（sessions/ 或 settings.yaml 存在）→ 命令缺失 = 真失败
+  const withEnv = tempHome();
+  mkdirSync(join(withEnv, 'sessions'), { recursive: true });
+  const miss = runCatalogCheck({ probe: { type: 'command-exists', cmd: 'dsh-doctor-no-such-cmd-xyz' } }, ctx(withEnv));
+  assert.equal(miss.ok, false, '有 DSH 环境时命令缺失必须判失败');
+  rmSync(withEnv, { recursive: true, force: true });
+
+  // 无 DSH 环境（干净容器/仓库检出）→ skip，而非"用户环境有问题"
+  const bare = tempHome();
+  const skipped = runCatalogCheck({ probe: { type: 'command-exists', cmd: 'dsh-doctor-no-such-cmd-xyz' } }, ctx(bare));
+  assert.equal(skipped.skipped, true, '无 DSH 环境时应 skip（这正是 CI 上 dsh 不在 PATH 的情形）');
+  rmSync(bare, { recursive: true, force: true });
 });
 
 test('path-exists / path-is-dir / path-is-file', () => {
