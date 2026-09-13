@@ -212,6 +212,11 @@ function readableSessionEventTypes() {
 
 const READABLE = readableSessionEventTypes();
 
+/** 是否存在值得诊断的 DSH 环境（真实用户机器有 sessions/ 或 settings.yaml；干净容器/仓库检出没有）。 */
+function hasDshEnvironment() {
+  return existsSync(join(HOME, 'sessions')) || existsSync(join(HOME, 'settings.yaml'));
+}
+
 function report(section, id, ok, detail, fix, src) {
   results.push({ section, id, ok, detail, fix, src: src ?? 'builtin' });
 }
@@ -1647,8 +1652,14 @@ export function runCatalogCheck(check, ctx) {
   switch (probe.type) {
     case 'command-exists': {
       const found = findCommand(probe.cmd);
-      return found ? { ok: true, detail: check.detailOk ?? `${probe.cmd} 在 PATH: ${found}` }
-                   : { ok: false, detail: check.detailFail ?? `${probe.cmd} 不在 PATH` };
+      if (found) return { ok: true, detail: check.detailOk ?? `${probe.cmd} 在 PATH: ${found}` };
+      // 无 DSH 环境可言时 skip（2026-09）：在干净容器/仓库检出里跑本工具时，dsh 当然不在 PATH ——
+      // 那不是"用户环境有问题"，而是"这里没有被诊断的 DSH 环境"。据此报 error 会让 CI 与 fixture
+      // 得到无意义的失败（CI 三次红都源于同类检查：E4 → E1-pnpm → E7）。
+      if (!hasDshEnvironment()) {
+        return { skipped: true, detail: `未发现 DSH 环境（无 sessions/ 与 settings.yaml），跳过 ${probe.cmd} 的 PATH 检查` };
+      }
+      return { ok: false, detail: check.detailFail ?? `${probe.cmd} 不在 PATH` };
     }
     case 'path-exists':
     case 'path-is-dir':
