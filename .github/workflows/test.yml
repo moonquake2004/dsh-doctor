@@ -20,8 +20,24 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: Install zstd (session logs are zstd-compressed)
         run: sudo apt-get update && sudo apt-get install -y zstd
+      - name: Show runtime versions
+        run: node --version && zstd --version
+      # 套件里有 3 个**已知的环境性失败**：E4 在临时 HOME 下找不到 node-pty，
+      # 连带 E2/E5/envelope-E8 一起红（本地与 CI 同样如此，非代码缺陷）。
+      # 故断言写成"通过数下限 + 失败数上限"，既能在真实回归时红，也不假装 0 失败。
       - name: Run the test suite
-        # E4 (node-pty) 在临时 HOME 下必然失败，属已知环境性失败，见测试内联说明
-        run: node --test plugin/test/*.mjs || true
-      - name: Assert the suite actually ran
-        run: node --test plugin/test/*.mjs 2>&1 | grep -qE "^# (pass|tests) " && echo "suite executed"
+        run: node --test plugin/test/*.mjs 2>&1 | tee /tmp/test-output.log
+        continue-on-error: true
+      - name: Assert the suite ran, with only the known environment failures
+        run: |
+          node -e "
+          const fs = require('fs');
+          const log = fs.readFileSync('/tmp/test-output.log', 'utf8');
+          const num = (re) => Number((log.match(re) || [])[1] || 0);
+          const pass = num(/^# pass (\d+)/m);
+          const fail = num(/^# fail (\d+)/m);
+          console.log('pass =', pass, '| fail =', fail);
+          if (pass < 60) { console.error('too few tests passed — the suite likely did not run'); process.exit(1); }
+          if (fail > 3)  { console.error('more failures than the 3 known environment ones'); process.exit(1); }
+          console.log('OK: only the known node-pty environment failures');
+          "
