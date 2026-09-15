@@ -595,6 +595,62 @@ function checkProfile(name) {
     }
   }
 
+  // P19：插件声明的 host peer 范围 vs 实际提供的 host 版本（社区 #6678 @ciceroyang 提案）
+  // 这是"升级后起不来"的常见原因之一：插件声明只支持某段 core 版本，而实际装的核心已在区间外，
+  // 安装时却没有任何警告（#6680 的机制：profile 的 pnpm 配置 autoInstallPeers:false 且 host 由
+  // CLI 共享根层提供，pnpm 没有可解析的 peer 目标）。完全离线可判。
+  {
+    const findings19 = [];
+    let unknown19 = 0;
+    let checked19 = 0;
+    // 内联枚举（含 scoped；isDirectory() || isSymbolicLink() —— pnpm 与 file:/dev 安装都是软链接，
+    // 只看 isDirectory 会漏掉它们，这正是社区提醒的坑）
+    const pkgDirs19 = [];
+    try {
+      for (const e of readdirSync(join(dir, 'node_modules'), { withFileTypes: true })) {
+        if (!e.name || e.name.startsWith('.') || e.name === '.bin') continue;
+        if (e.name.startsWith('@')) {
+          try {
+            for (const sub of readdirSync(join(dir, 'node_modules', e.name), { withFileTypes: true })) {
+              if (!sub.name || sub.name.startsWith('.')) continue;
+              if (sub.isDirectory() || sub.isSymbolicLink()) pkgDirs19.push({ name: `${e.name}/${sub.name}`, dir: join(dir, 'node_modules', e.name, sub.name) });
+            }
+          } catch { /* 跳过不可读 scope */ }
+        } else if (e.isDirectory() || e.isSymbolicLink()) {
+          pkgDirs19.push({ name: e.name, dir: join(dir, 'node_modules', e.name) });
+        }
+      }
+    } catch { /* 无 node_modules */ }
+    for (const { name: pkgName, dir: pkgDir } of pkgDirs19) {
+      let mf;
+      try { mf = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')); } catch { continue; }
+      const peers = mf.peerDependencies ?? {};
+      const hostPeers = Object.entries(peers).filter(([k]) => k.startsWith('@deepseek-ai/'));
+      for (const [hostName, range] of hostPeers) {
+        checked19++;
+        const host = resolveHostVersion(dir, hostName);
+        if (!host) { unknown19++; continue; } // 解析不到 → unknown（不猜、不算兼容）
+        const r = peerRangeState(host.version, range);
+        if (r.state === 'satisfied') continue;
+        if (r.state === 'unknown') { unknown19++; continue; }
+        findings19.push(`${pkgName} 声明 ${hostName} ${range}，但实际提供 ${host.version}`);
+      }
+    }
+    if (findings19.length) {
+      report('profile', 'P19', false,
+        `插件声明的 host peer 范围不接受实际安装的核心版本（${findings19.length} 处，共核对 ${checked19} 条 peer 声明）：\n  `
+        + findings19.slice(0, 8).join('\n  ')
+        + (unknown19 ? `\n  （另有 ${unknown19} 条无法判定：区间为 * / 未声明 / host 解析不到，或纯 release 区间面对预发布版本——按"未知"处理，不计为不兼容）` : ''),
+        '按提示升级到该插件声明支持的版本（或降级核心）。安装时不会有警告，所以升级 dsh 前先用本检查看一眼最省事');
+    } else if (checked19 === 0) {
+      reportSkip('profile', 'P19', '未见任何 @deepseek-ai/* 的 peer 声明，跳过 host 范围核对');
+    } else {
+      report('profile', 'P19', true,
+        `核对 ${checked19} 条 host peer 声明，均可接受当前核心版本`
+        + (unknown19 ? `（${unknown19} 条无法判定，按未知处理未计入）` : ''));
+    }
+  }
+
   // P4 file: 依赖悬空（file: 目标可能是相对（file:./plugins/x）或绝对（file:/abs/path））
   const resolveFileSpec = (spec) => {
     const target = spec.slice(5);
@@ -1638,7 +1694,8 @@ catalogSeverity.set('P14', 'warn');
 catalogSeverity.set('P15', 'error');
 catalogSeverity.set('P16', 'warn');
 catalogSeverity.set('P17', 'warn');
-catalogSeverity.set('P18', 'warn'); // #6667：条件性风险（需游离本地模块才触发），提示但不翻退出码
+catalogSeverity.set('P18', 'warn');
+catalogSeverity.set('P19', 'warn'); // #6678：声明不匹配是风险信号而非确定失败，提示但不阻断 // #6667：条件性风险（需游离本地模块才触发），提示但不翻退出码
 
 function bundledCatalog() {
   const p = new URL('./checks.json', import.meta.url);
@@ -1950,6 +2007,118 @@ const flagValue = (name) => { const i = process.argv.indexOf(name); return i >= 
 const profileArg = (() => { const i = process.argv.indexOf('--profile'); return i >= 0 ? process.argv[i + 1] : 'web'; })();
 const sessionArg = (() => { const i = process.argv.indexOf('--session'); return i >= 0 ? process.argv[i + 1] : undefined; })();
 
+
+
+/* ---- P19：插件声明的 host peer 范围 vs 磁盘上实际提供的 host 版本 ----
+ * 提案来自社区 @ciceroyang（#6678 评论，附其 dsh-doctor 实现与真实案例）：这类不匹配是
+ * "升级后起不来"的常见原因之一，且**完全可离线判定**。他给的坑我们逐条照做：
+ *   - 只取 peerDependencies 里的 @deepseek-ai/*；
+ *   - 解析 host 版本时**跟随软链接**（dev/file: 安装与 root 层复用都是软链接，用 lstat 风格会误报）；
+ *   - 作用域名按第一段斜杠切（@scope/name 两段）；
+ *   - **三态**：兼容 / 不兼容 / 未知（`*`、未声明、解析不到）；未知**不得**当作兼容，也不得当作不兼容；
+ *   - **rc 语义**（最容易做错）：区间里出现任何预发布比较器就按数值判定 ——
+ *     `>=0.1.0-rc.5 <0.2.0` 应接受 `0.1.5-rc.2`，`>=0.1.0-rc.5 <0.1.0-rc.7` 应拒绝它；
+ *     只有**纯 release 区间**（如 `>=4.0.0`）面对预发布安装版本时才记未知。
+ *     strict semver 的字面规则会把第一种判成不满足 —— 那是误报，而误报健康 profile 比不报更糟。
+ */
+
+/** 解析版本为 {nums:[a,b,c], pre:[...]}；无法解析返回 null。 */
+function parseVer(v) {
+  const m = /^\s*v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(String(v ?? ''));
+  if (!m) return null;
+  return { nums: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split('.') : [] };
+}
+/** semver 预发布优先级：数字段比数字，字母段按字典序，数字 < 字母；无 prerelease 者更高。 */
+function cmpVer(a, b) {
+  for (let i = 0; i < 3; i++) if (a.nums[i] !== b.nums[i]) return a.nums[i] < b.nums[i] ? -1 : 1;
+  if (!a.pre.length && !b.pre.length) return 0;
+  if (!a.pre.length) return 1;
+  if (!b.pre.length) return -1;
+  for (let i = 0; i < Math.max(a.pre.length, b.pre.length); i++) {
+    const x = a.pre[i], y = b.pre[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const xn = /^\d+$/.test(x), yn = /^\d+$/.test(y);
+    if (xn && yn) { if (Number(x) !== Number(y)) return Number(x) < Number(y) ? -1 : 1; continue; }
+    if (xn !== yn) return xn ? -1 : 1;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+/** 单个比较器是否满足（数值判定，已含预发布比较）。 */
+function cmpSatisfied(ver, op, target) {
+  const c = cmpVer(ver, target);
+  switch (op) {
+    case '>': return c > 0;
+    case '>=': return c >= 0;
+    case '<': return c < 0;
+    case '<=': return c <= 0;
+    case '=': return c === 0;
+    default: return false;
+  }
+}
+/** 展开 ^ / ~ 为区间对（只覆盖生态里实际出现的形态）。 */
+function expandCaret(target) {
+  const [maj, min, pat] = target.nums;
+  if (maj > 0) return { lower: ['>=', target], upper: ['<', parseVer(`${maj + 1}.0.0`)] };
+  if (min > 0) return { lower: ['>=', target], upper: ['<', parseVer(`0.${min + 1}.0`)] };
+  return { lower: ['>=', target], upper: ['<', parseVer(`0.${min}.${pat + 1}`)] };
+}
+function expandTilde(target) {
+  const [maj, min] = target.nums;
+  return { lower: ['>=', target], upper: ['<', parseVer(`${maj}.${min + 1}.0`)] };
+}
+/**
+ * 判定 range 是否接受 version。返回 { state: 'satisfied' | 'unsatisfied' | 'unknown', hasPreComparator }
+ * 未知的三种来源：`*`/空、区间不可解析、**纯 release 区间面对预发布安装版本**（不猜）。
+ */
+function peerRangeState(version, range) {
+  const ver = parseVer(version);
+  const raw = String(range ?? '').trim();
+  if (!ver || !raw) return { state: 'unknown', hasPreComparator: null };
+  if (raw === '*' || raw === '' || raw === 'x' || raw === 'latest') return { state: 'unknown', hasPreComparator: false };
+  let hasPre = false;
+  const groups = raw.split('||').map((g) => g.trim()).filter(Boolean);
+  if (!groups.length) return { state: 'unknown', hasPreComparator: null };
+  for (const g of groups) {
+    const parts = g.split(/\s+/).filter(Boolean);
+    let ok = true; let preHere = false;
+    for (const part of parts) {
+      const m = /^([\^~]|>=|<=|>|<|=)?\s*v?(.+)$/.exec(part);
+      if (!m) { ok = false; break; }
+      const op = m[1] ?? '=';
+      const target = parseVer(m[2]);
+      if (!target) { ok = false; break; }
+      if (target.pre.length) preHere = true;
+      if (op === '^' || op === '~') {
+        const { lower, upper } = op === '^' ? expandCaret(target) : expandTilde(target);
+        if (!(cmpSatisfied(ver, lower[0], lower[1]) && cmpSatisfied(ver, upper[0], upper[1]))) { ok = false; break; }
+      } else if (!cmpSatisfied(ver, op, target)) { ok = false; break; }
+    }
+    if (ok) {
+      hasPre = hasPre || preHere;
+      return { state: 'satisfied', hasPreComparator: hasPre };
+    }
+    hasPre = hasPre || preHere;
+  }
+  // 全部组都不满足：若这次不匹配发生在"纯 release 区间 vs 预发布版本"，按规则记 unknown
+  if (!hasPre && ver.pre.length) return { state: 'unknown', hasPreComparator: false };
+  return { state: 'unsatisfied', hasPreComparator: hasPre };
+}
+
+/** 解析 host 包版本：profile node_modules → 共享镜像根；**跟随软链接**（readFileSync 会跟随）。 */
+function resolveHostVersion(profileDir, name) {
+  const roots = [join(profileDir, 'node_modules'), join(dirname(profileDir), 'node_modules')];
+  for (const root of roots) {
+    try {
+      const mf = join(root, name, 'package.json');
+      if (!existsSync(mf)) continue;
+      const v = JSON.parse(readFileSync(mf, 'utf8')).version;
+      if (v) return { version: v, from: mf };
+    } catch { /* 继续下一个根 */ }
+  }
+  return null;
+}
 
 /* ================= 启动失败自救：装载模拟 + 隔离 =================
  * 场景（用户高频反馈）：装了个不兼容的插件、或 dsh 升级后与旧插件不兼容 → **dsh 根本起不来**，

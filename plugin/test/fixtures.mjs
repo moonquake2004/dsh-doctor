@@ -1552,3 +1552,51 @@ test('--post-upgrade --auto-quarantine：自动隔离后可启动', () => {
   assert.ok(!after.dsh.profile.bundles.includes('broken-plugin'), '自动隔离应已摘出坏 bundle');
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- P19：host peer 范围 vs 实际提供版本（社区 #6678 @ciceroyang 提案） ---------- */
+
+function peerFixture(range) {
+  const home = tempHome();
+  const p = join(home, 'profiles', 'web');
+  mkdirSync(join(p, 'node_modules', 'plug'), { recursive: true });
+  mkdirSync(join(p, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local'), { recursive: true });
+  writeFileSync(join(p, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', dsh: { profile: { bundles: [] } } }));
+  writeFileSync(join(p, 'node_modules', 'plug', 'package.json'),
+    JSON.stringify({ name: 'plug', version: '0.17.8', dsh: {}, peerDependencies: { '@deepseek-ai/dsh-subprocess-local': range } }));
+  writeFileSync(join(p, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local', 'package.json'),
+    JSON.stringify({ name: '@deepseek-ai/dsh-subprocess-local', version: '0.1.5-rc.2' }));
+  return home;
+}
+const p19 = (home) => runCli({ home, args: ['--profile', 'web'] }).raw.checks.find((c) => c.id === 'P19');
+
+test('P19：区间不含所装版本 → warn（真实案例 dsh-win32 声明 <0.1.0-rc.7 而核心是 0.1.5-rc.2）', () => {
+  const home = peerFixture('>=0.1.0-rc.5 <0.1.0-rc.7');
+  const c = p19(home);
+  assert.equal(c.status, 'warn', '#6678 的案例必须报出（warn：声明不匹配是风险信号）');
+  assert.match(c.detail, /dsh-subprocess-local/);
+  assert.match(c.detail, /0\.1\.5-rc\.2/);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P19（rc 回归）：>=0.1.0-rc.5 <0.2.0 必须接受 0.1.5-rc.2 —— 不得误报', () => {
+  const home = peerFixture('>=0.1.0-rc.5 <0.2.0');
+  const c = p19(home);
+  assert.notEqual(c.status, 'warn', 'strict semver 会判不满足，但那正是社区指出的误报：健康插件被报成不兼容');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P19：纯 release 区间面对预发布版本 → 记为未知，不作不兼容', () => {
+  const home = peerFixture('>=4.0.0');
+  const c = p19(home);
+  assert.notEqual(c.status, 'warn', '区间从未考虑预发布，据此断言不兼容就是猜');
+  assert.match(c.detail, /无法判定/, '应如实说明有多少条无法判定');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P19：通配 * → 未知（不猜、也不算兼容）', () => {
+  const home = peerFixture('*');
+  const c = p19(home);
+  assert.notEqual(c.status, 'warn');
+  assert.match(c.detail, /无法判定/);
+  rmSync(home, { recursive: true, force: true });
+});
