@@ -136,6 +136,37 @@ npx @moonquake2004/dsh-doctor --safe-add <包名> --profile web
 | 有 entry 导入失败 | **自动隔离**该 bundle（dsh 仍能启动），并报告失败类别与原始报错 |
 | 隔离后仍不可启动 | **整体回滚**到安装前的 manifest（最坏情况只是一次无害的失败尝试） |
 
+### 升级 dsh 前后：一条命令记基线，一条命令自动复检
+
+升级 dsh 是最容易"升完就起不来"的时刻。把对比做成两步：
+
+```bash
+# 升级前（此时 dsh 还好好跑着）
+npx @moonquake2004/dsh-doctor --pre-upgrade --profile web
+#   核心版本: 0.1.5-rc.1 | bundle 16 个 | entry 15 条
+
+# …在这里升级 dsh…
+
+# 升级后
+npx @moonquake2004/dsh-doctor --post-upgrade --profile web
+```
+
+`--post-upgrade` 会拿基线与现状对比并**直接跑装载模拟**：
+
+```
+升级后复检（基线取自 2026-09-15T01:51）：
+  · 核心版本: 0.1.5-rc.1 → 0.1.6-rc.1（已变化）
+  · 插件版本变化: dshmarket: 1.45.1 → 1.46.0
+  · 新增/变更 entry: at-file (at-file → dsh-at-file)
+  ✗ 装载模拟失败 1 条（这就是"升级后起不来"的直接原因）：
+      [dsh-at-file] at-file → dsh-at-file
+        missing-export: SyntaxError: ... does not provide an export named 'settingsNamespace'
+        修复方向：插件比所装的 @deepseek-ai/* 旧/新：把该插件升级到匹配版本
+        先起来：npx @moonquake2004/dsh-doctor --quarantine dsh-at-file --profile web
+```
+
+加 `--auto-quarantine` 可让它**直接把失败的 bundle 隔离掉**，一条命令完成"诊断 + 让 dsh 先起来"。
+
 ### 抓到"不是这次装的东西干的"：漂移对比
 
 `--boot-check` 每次通过时都会写一份"已知良好"快照（bundle 版本 + entry 列表）。

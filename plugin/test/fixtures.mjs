@@ -1497,3 +1497,58 @@ test('--safe-add：隔离救不回来 → 整体回滚到安装前', { skip: pro
   assert.equal(readFileSync(mf, 'utf8'), before, 'manifest 必须逐字节还原为安装前内容');
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- 升级前后基线：--pre-upgrade / --post-upgrade ---------- */
+
+test('--pre-upgrade 写基线（含核心版本）；--post-upgrade 报出变化与失败 entry', () => {
+  const home = bootFixture(); // 含 good + broken（broken 导入不存在的导出）
+  const env = { ...process.env, DSH_HOME: home };
+  // 先只留 good 作为"升级前"的干净基线
+  const p = join(home, 'profiles', 'web', 'package.json');
+  const m0 = JSON.parse(readFileSync(p, 'utf8'));
+  m0.dsh.profile.bundles = ['good-plugin'];
+  writeFileSync(p, JSON.stringify(m0));
+  const pre = spawnSync(process.execPath, [CLI, '--pre-upgrade', '--profile', 'web'], { encoding: 'utf8', env });
+  assert.equal(pre.status, 0, pre.stderr);
+  assert.match(pre.stdout, /已记录升级前基线/);
+  const base = JSON.parse(readFileSync(join(home, 'profiles', 'web', '.dsh-doctor-pre-upgrade.json'), 'utf8'));
+  assert.equal(base.kind, 'pre-upgrade');
+  assert.ok('coreVersion' in base, '基线必须记录核心版本（升级对比的另一半）');
+  assert.deepEqual(Object.keys(base.bundles), ['good-plugin']);
+
+  // 模拟"升级后插件不兼容"：把 broken 加回启动列表
+  const m1 = JSON.parse(readFileSync(p, 'utf8'));
+  m1.dsh.profile.bundles = ['good-plugin', 'broken-plugin'];
+  writeFileSync(p, JSON.stringify(m1));
+  const post = spawnSync(process.execPath, [CLI, '--post-upgrade', '--profile', 'web'], { encoding: 'utf8', env });
+  assert.equal(post.status, 2, '升级后 entry 失败应以非零退出');
+  assert.match(post.stdout, /升级后复检/);
+  assert.match(post.stdout, /新增 bundle: broken-plugin/);
+  assert.match(post.stdout, /broken-plugin/, '必须点名失败的 entry');
+  assert.match(post.stdout, /--quarantine broken-plugin/);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('--post-upgrade：没有基线时明确报错并指路（不猜）', () => {
+  const home = bootFixture();
+  const r = spawnSync(process.execPath, [CLI, '--post-upgrade', '--profile', 'web'], { encoding: 'utf8', env: { ...process.env, DSH_HOME: home } });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /没找到升级前基线/);
+  assert.match(r.stderr, /--pre-upgrade/);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('--post-upgrade --auto-quarantine：自动隔离后可启动', () => {
+  const home = bootFixture();
+  const env = { ...process.env, DSH_HOME: home };
+  const p = join(home, 'profiles', 'web', 'package.json');
+  const m0 = JSON.parse(readFileSync(p, 'utf8')); m0.dsh.profile.bundles = ['good-plugin']; writeFileSync(p, JSON.stringify(m0));
+  spawnSync(process.execPath, [CLI, '--pre-upgrade', '--profile', 'web'], { encoding: 'utf8', env });
+  const m1 = JSON.parse(readFileSync(p, 'utf8')); m1.dsh.profile.bundles = ['good-plugin', 'broken-plugin']; writeFileSync(p, JSON.stringify(m1));
+  const post = spawnSync(process.execPath, [CLI, '--post-upgrade', '--auto-quarantine', '--profile', 'web'], { encoding: 'utf8', env });
+  assert.equal(post.status, 2);
+  assert.match(post.stdout, /已自动隔离: broken-plugin/);
+  const after = JSON.parse(readFileSync(p, 'utf8'));
+  assert.ok(!after.dsh.profile.bundles.includes('broken-plugin'), '自动隔离应已摘出坏 bundle');
+  rmSync(home, { recursive: true, force: true });
+});

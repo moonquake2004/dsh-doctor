@@ -2106,6 +2106,49 @@ function runBootCheckSync(profileDir) {
   return out;
 }
 
+
+/* ---- 升级前后基线（2026-09）：升级 dsh 前记一次，升级后自动复检 ---- */
+
+const PRE_UPGRADE_FILE = '.dsh-doctor-pre-upgrade.json';
+
+/** 取当前 dsh 核心版本：先问 CLI，再从 PATH 里 dsh 的安装树读 package.json。 */
+function coreVersion() {
+  try {
+    const bin = process.platform === 'win32' ? 'dsh.cmd' : 'dsh';
+    const r = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 10000, shell: process.platform === 'win32' });
+    const m = String(r.stdout || '').trim().match(/\d+\.\d+\.\d+[-\w.]*/);
+    if (m) return m[0];
+  } catch { /* 落到安装树 */ }
+  for (const p of (process.env.PATH || '').split(PATH_DELIM)) {
+    if (p.endsWith('node_modules/.bin') && existsSync(join(p, 'dsh'))) {
+      try {
+        const mf = join(dirname(p), '@deepseek-ai', 'dsh', 'package.json');
+        return JSON.parse(readFileSync(mf, 'utf8')).version ?? null;
+      } catch { /* 继续找 */ }
+    }
+  }
+  return null;
+}
+
+/** 升级前基线：核心版本 + bundle 版本 + entry 列表 + manifest 原文（用于必要时人工比对）。 */
+function writePreUpgrade(profileDir) {
+  const snap = bootSnapshot(profileDir);
+  const payload = {
+    kind: 'pre-upgrade',
+    at: snap.at,
+    coreVersion: coreVersion(),
+    bundles: snap.bundles,
+    entries: snap.entries,
+    bundleCount: Object.keys(snap.bundles).length,
+  };
+  writeFileSync(join(profileDir, PRE_UPGRADE_FILE), JSON.stringify(payload, null, 2) + '\n');
+  return payload;
+}
+
+function readPreUpgrade(profileDir) {
+  try { return JSON.parse(readFileSync(join(profileDir, PRE_UPGRADE_FILE), 'utf8')); } catch { return null; }
+}
+
 async function runBootCheck(profileDir) {
   const entries = collectBootEntries(profileDir);
   const targets = entries.filter((e) => e.name);
@@ -2158,6 +2201,67 @@ async function run() {
   const quarantineArg = flagValue('--quarantine');
   const unquarantineArg = flagValue('--unquarantine');
   const safeAddArg = flagValue('--safe-add');
+  const preUpgradeArg = process.argv.includes('--pre-upgrade');
+  const postUpgradeArg = process.argv.includes('--post-upgrade');
+  if (preUpgradeArg || postUpgradeArg) {
+    const profDir = resolveProfile(profileArg || 'web');
+    if (preUpgradeArg) {
+      const base = writePreUpgrade(profDir);
+      if (jsonOut) console.log(JSON.stringify({ ok: true, ...base }, null, 2));
+      else {
+        console.log(`✓ 已记录升级前基线（${profDir}）`);
+        console.log(`  核心版本: ${base.coreVersion ?? '(未能确定)'} | bundle ${base.bundleCount} 个 | entry ${Object.keys(base.entries).length} 条`);
+        console.log('  下一步：升级 dsh，然后运行');
+        console.log(`    npx @moonquake2004/dsh-doctor --post-upgrade --profile ${profileArg || 'web'}`);
+        console.log('  （--post-upgrade 会自动对比核心与插件变化、跑装载模拟，并给出修复/隔离命令）');
+      }
+      process.exit(0);
+    }
+    const base = readPreUpgrade(profDir);
+    if (!base) {
+      console.error(`✗ 没找到升级前基线（${join(profDir, PRE_UPGRADE_FILE)}）——请先在升级前运行 --pre-upgrade`);
+      process.exit(1);
+    }
+    const nowCore = coreVersion();
+    const nowSnap = bootSnapshot(profDir);
+    const drift = diffSnapshot({ bundles: base.bundles, entries: base.entries }, nowSnap) ?? {};
+    const results = runBootCheckSync(profDir);
+    const failed = results.filter((r) => r.status === 'failed');
+    const coreChanged = base.coreVersion !== nowCore;
+    const lines = [];
+    lines.push(`核心版本: ${base.coreVersion ?? '?'} → ${nowCore ?? '?'}${coreChanged ? '（已变化）' : '（未变化）'}`);
+    if ((drift.addedBundles ?? []).length) lines.push(`新增 bundle: ${drift.addedBundles.join(', ')}`);
+    if ((drift.removedBundles ?? []).length) lines.push(`移除 bundle: ${drift.removedBundles.join(', ')}`);
+    if ((drift.versionChanged ?? []).length) lines.push(`插件版本变化: ${drift.versionChanged.join('; ')}`);
+    if ((drift.addedEntries ?? []).length) lines.push(`新增/变更 entry: ${drift.addedEntries.join('; ')}`);
+    if (jsonOut) {
+      console.log(JSON.stringify({ ok: failed.length === 0, profile: profDir, baselineAt: base.at, coreChanged, from: base.coreVersion, to: nowCore, drift, checked: results.length, failed: failed.length, results }, null, 2));
+      process.exit(failed.length ? 2 : 0);
+    }
+    console.log(`升级后复检（基线取自 ${String(base.at).slice(0, 16)}）：`);
+    for (const l of lines) console.log(`  · ${l}`);
+    if (!failed.length) {
+      console.log('  ✓ 装载模拟通过——升级未破坏任何可探测 entry');
+      writeSnapshot(profDir, nowSnap);
+    } else {
+      console.log(`  ✗ 装载模拟失败 ${failed.length} 条（这就是"升级后起不来"的直接原因）：`);
+      for (const f of failed) {
+        console.log(`      [${f.bundle}] ${f.id} → ${f.spec}`);
+        console.log(`        ${f.kind}: ${f.error}`);
+        console.log(`        修复方向：${f.hint}`);
+        console.log(`        先起来：npx @moonquake2004/dsh-doctor --quarantine ${f.bundle} --profile ${profileArg || 'web'}`);
+      }
+      if (process.argv.includes('--auto-quarantine')) {
+        const q = [];
+        for (const name of new Set(failed.map((f) => f.bundle))) {
+          if (name === '(user patch)') continue;
+          try { const r = quarantineBundle(profDir, name, false); if (r.ok) q.push(name); } catch { /* 忽略 */ }
+        }
+        if (q.length) console.log(`  → 已自动隔离: ${q.join(', ')}（重启 dsh 即可；用 --unquarantine 放回）`);
+      }
+    }
+    process.exit(failed.length ? 2 : 0);
+  }
   if (safeAddArg) {
     // 装完立即预检、坏了自动回滚——"装了个不兼容插件导致 dsh 起不来"的预防手段
     const profDir = resolveProfile(profileArg || 'web');
