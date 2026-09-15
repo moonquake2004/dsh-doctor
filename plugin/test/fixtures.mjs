@@ -1737,3 +1737,23 @@ test('P21：本地声明同名变量 → 不算沙箱符号', () => {
   assert.notEqual(c.status, 'fail', '本地定义的同名对象是合法的');
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- S11/读取路径：区分"文件损坏"与"读取间歇性失败"（社区 #6739） ---------- */
+
+test('读取分类：全部成功 = ok；全失败 = 损坏；部分成功 = 间歇性失败（不判损坏）', async () => {
+  // classifyReadAttempts 是纯函数，直接从源码抽取来测（与外部行为解耦）
+  const src = readFileSync(CLI, 'utf8');
+  const m = src.match(/function classifyReadAttempts\([\s\S]*?\n}/);
+  assert.ok(m, '未找到 classifyReadAttempts');
+  const fn = new Function(`${m[0]}\nreturn classifyReadAttempts;`)();
+  assert.equal(fn([{ ok: true }]), 'ok');
+  assert.equal(fn([{ ok: false, err: 'x' }]), 'failed', '三次都失败 → 倾向文件损坏');
+  assert.equal(fn([{ ok: false, err: 'x' }, { ok: true }]), 'intermittent');
+  assert.equal(fn([{ ok: true }, { ok: false }, { ok: true }]), 'intermittent');
+});
+
+test('S11：读取路径带重试（#6739 的 25MB 场景不再一次失败即判损坏）', () => {
+  const src = readFileSync(CLI, 'utf8');
+  assert.match(src, /function readSessionText\(file, attempts = 3\)/, '会话读取必须带重试');
+  assert.match(src, /重试即成功 → \*\*不是损坏\*\*|读取间歇性失败/, 'S11 必须把间歇失败与损坏分开报告');
+});

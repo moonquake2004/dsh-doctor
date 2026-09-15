@@ -1865,7 +1865,8 @@ function scanAllSessions() {
   // 世代感知：每个会话目录只取权威世代（v3 优先于 v0），与 store 的会话列表对齐
   const files = listSessionLogs(root).map((x) => x.f);
   if (files.length === 0) { report('session', 'S11', true, '未发现会话日志', undefined); return; }
-  const corrupt = []; const oversized = []; const clean = [];
+  const corrupt = [];
+  const unstableReads = []; const oversized = []; const clean = [];
   let totalDS = 0; let totalEvents = 0;
   for (const f of files) {
     const cs = statSync(f).size;
@@ -1876,8 +1877,16 @@ function scanAllSessions() {
       for (let i = 0; i <= raw.length - 4; i++) if (raw[i] === magic[0] && raw[i + 1] === magic[1] && raw[i + 2] === magic[2] && raw[i + 3] === magic[3]) frames++;
     } catch { corrupt.push({ id: basename(dirname(f)), problems: ['读取失败'] }); continue; }
     let text;
-    try { text = f.endsWith('.zstd') ? execFileSync('zstd', ['-dc', f], { maxBuffer: 512 * 1024 * 1024 }).toString('utf8') : readFileSync(f, 'utf8'); }
-    catch { corrupt.push({ id: basename(dirname(f)), problems: ['解压/读取失败'] }); continue; }
+    {
+      const rd = readSessionText(f);
+      if (rd.state === 'failed') { corrupt.push({ id: basename(dirname(f)), problems: ['解压/读取失败（3 次尝试均失败 → 倾向于文件本身损坏）'] }); continue; }
+      if (rd.state === 'intermittent') {
+        // 重试即成功 → **不是损坏**，是读取路径不稳（社区 #6739 实测：失败帧位置每次不同）
+        unstableReads.push({ id: basename(dirname(f)), attempts: rd.attemptLog.length, sample: rd.attemptLog.find((a) => !a.ok)?.err || '' });
+        continue;
+      }
+      text = rd.text;
+    }
     const ds = Buffer.byteLength(text, 'utf8');
     totalDS += ds;
     // 轻量损坏扫描：seq==index + end-seed 重放 + 未知类型
@@ -1935,11 +1944,18 @@ function scanAllSessions() {
   const totalRisk = estHeapMB > heapLimit;
   if (quars.length) {
     report('session', 'S11', false, `全会话扫描：${corrupt.length} 个损坏会话（#1550：冷打开会拖垮服务器）: ${quars.join(' | ')}`, `隔离：把这些会话目录移出 ${join(HOME, 'sessions')}（如 mv 到备份目录）`);
-  } else if (oversized.length || totalRisk) {
+  } else if (oversized.length || totalRisk || unstableReads.length) {
     const parts = [];
+    // 间歇性读取失败：**不是文件损坏**（重试即成功、失败帧位置每次不同，见 #6739），
+    // 指向存储/内存/驱动层面的偶发读错误。宿主不重试，一次失败就整场读不出（0.1.6-alpha.1 仍如此）；
+    // 我们重试后能读出来，所以这里既如实报告、又明确说清"文件没坏"。
+    if (unstableReads.length) parts.push(`${unstableReads.length} 个会话**读取间歇性失败**（重试即成功 → 非损坏，指向存储/内存/驱动的偶发读错误，社区 #6739）: ${unstableReads.slice(0, 3).map((u) => `${u.id}(${u.attempts} 次尝试)`).join(' | ')}`);
     if (oversized.length) parts.push(`${oversized.length} 个超大会话: ${oversized.map((o) => `${o.id}(${o.dsMB}MB/${o.events}事件)`).join(' | ')}`);
     if (totalRisk) parts.push(`工作区估算物化堆 ~${estHeapMB}MB（估算= max(${totalEvents}事件×600B, ${totalMB}MB×6)，跨 ${files.length} 会话累积，#1550 场景；阈值 ${heapLimit}MB，可设 DSH_DOCTOR_HEAP_MB）`);
-    report('session', 'S11', true, `⚠ 全会话扫描：${parts.join('；')}（未损坏，可接受或归档）`, '冷启动会明显变慢；必要时压缩/归档历史会话');
+    report('session', 'S11', true, `⚠ 全会话扫描：${parts.join('；')}（未损坏，可接受或归档）`,
+      unstableReads.length
+        ? '间歇性读取失败不是日志问题：先重试读取；持续出现则排查存储健康（SMART）、内存与磁盘驱动（#6739 的证据是失败帧位置每次不同）'
+        : '冷启动会明显变慢；必要时压缩/归档历史会话');
   } else {
     report('session', 'S11', true, `全会话扫描：${clean.length} 个会话均健康（损坏 0 / 超大 0 / 估算物化堆 ${estHeapMB}MB）`, undefined);
   }
@@ -2484,6 +2500,43 @@ function classifyImportError(msg) {
   return { kind: 'other', hint: '按上面的原始报错定位；确认后可先隔离该 bundle 让 dsh 起来' };
 }
 
+
+
+/**
+ * 会话日志读取：**带重试**，并区分"文件损坏"与"读取路径不稳"。
+ *
+ * 社区 #6739 的证据：同一个 25MB 会话，每次重读时 `corrupt Zstandard session log: frame at byte N
+ * failed validation` 里的 **N 每次不同**，而在 DSH 外对同一文件手动重试**立即成功**。
+ * 也就是说——那不是文件损坏，而是**偶发的读取/校验失败**（存储、内存或驱动层面的抖动）。
+ * 宿主不重试，一次失败就整场历史读不出来（0.1.6-alpha.1 仍如此：persistence 的三处 throw 无重试）；
+ * 我们此前的做法同样糟糕：直接把这种日志记成"损坏"。
+ *
+ * 现在：失败重试若干次；只要有一次成功，就**不判为损坏**，而是单独报"读取间歇性失败"——
+ * 这是宿主不会给出的区分，也是用户真正需要的那一句："你的日志没坏，是你的读取路径在抖"。
+ */
+function readSessionText(file, attempts = 3) {
+  const attemptLog = [];
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const text = file.endsWith('.zstd')
+        ? execFileSync('zstd', ['-dc', file], { maxBuffer: 512 * 1024 * 1024 }).toString('utf8')
+        : readFileSync(file, 'utf8');
+      attemptLog.push({ ok: true });
+      return { text, attemptLog, state: attemptLog.length === 1 ? 'ok' : 'intermittent' };
+    } catch (e) {
+      attemptLog.push({ ok: false, err: String(e.stderr || e.message || '').split('\n').find((l) => /failed validation|error/i.test(l)) || String(e.message || '') });
+    }
+  }
+  return { text: null, attemptLog, state: 'failed' };
+}
+
+/** 由若干次尝试的结果判定状态（纯函数，便于测试）。 */
+function classifyReadAttempts(attemptLog) {
+  const ok = attemptLog.filter((a) => a.ok).length;
+  if (ok === attemptLog.length) return 'ok';
+  if (ok === 0) return 'failed';
+  return 'intermittent';
+}
 
 /* ---- 预检增强（2026-09）：快照对比 + 安全安装 ---- */
 
