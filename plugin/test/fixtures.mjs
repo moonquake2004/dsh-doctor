@@ -1757,3 +1757,32 @@ test('S11：读取路径带重试（#6739 的 25MB 场景不再一次失败即�
   assert.match(src, /function readSessionText\(file, attempts = 3\)/, '会话读取必须带重试');
   assert.match(src, /重试即成功 → \*\*不是损坏\*\*|读取间歇性失败/, 'S11 必须把间歇失败与损坏分开报告');
 });
+
+/* ---------- P22：profile manifest 带 UTF-8 BOM（#6758：启动硬失败且报错不指向病因） ---------- */
+
+test('P22：manifest 带 BOM → 失败并点明病因；其余检查仍照常运行（不被它打败）', () => {
+  const home = tempHome();
+  const p = join(home, 'profiles', 'web');
+  mkdirSync(p, { recursive: true });
+  // PowerShell 5.1 的 `Set-Content -Encoding UTF8` 会写出 BOM
+  writeFileSync(join(p, 'package.json'), Buffer.concat([
+    Buffer.from([0xEF, 0xBB, 0xBF]),
+    Buffer.from(JSON.stringify({ name: 'dsh-profile-web', version: '0.0.0', dsh: { profile: { bundles: [] } } })),
+  ]));
+  const { raw } = runCli({ home, args: ['--profile', 'web'] });
+  const p22 = raw.checks.find((c) => c.id === 'P22');
+  assert.equal(p22.status, 'fail', 'BOM 会让 DSH 启动硬失败，必须报出');
+  assert.match(p22.detail, /BOM/);
+  assert.match(p22.detail, /6758/);
+  const p0 = raw.checks.find((c) => c.id === 'P0');
+  assert.ok(!p0 || p0.status !== 'fail', '诊断工具不能被它要诊断的输入打败：剥离 BOM 后其余检查应照常');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P22：无 BOM → 通过', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', { manifest: { name: 'dsh-profile-web', version: '0.0.0', dsh: { profile: { bundles: [] } } }, patch: '' });
+  const { raw } = runCli({ home, args: ['--profile', 'web'] });
+  assert.notEqual(raw.checks.find((c) => c.id === 'P22').status, 'fail');
+  rmSync(home, { recursive: true, force: true });
+});

@@ -549,7 +549,14 @@ function checkProfile(name) {
   try { dir = resolveProfile(name); } catch (e) { report('profile', 'P0', false, e.message); return; }
   const manifestPath = join(dir, 'package.json');
   if (!existsSync(manifestPath)) { report('profile', 'P0', false, `profile 不存在: ${dir}`); return; }
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  // 用**带 BOM 感知**的读取：带 BOM 的 manifest 会让 DSH 启动硬失败（#6758），
+  // 而诊断工具更不能被它要诊断的那份输入打败——剥离 BOM 后继续工作，并由 P22 单独报出病因。
+  const mainRead = readJsonReportingBom(manifestPath);
+  const manifest = mainRead.data;
+  if (manifest === null) {
+    report('profile', 'P0', false, `profile manifest 无法解析为 JSON${mainRead.hadBom ? '（且带 UTF-8 BOM —— 见 P22，这正是 DSH 启动硬失败的原因 #6758）' : ''}`);
+    return;
+  }
   const bundles = manifest.dsh?.profile?.bundles ?? [];
   const deps = manifest.dependencies ?? {};
 
@@ -678,7 +685,10 @@ function checkProfile(name) {
   // DeepSeek 请求以 REQUEST_EXTENSION 失败（#6667 报告的最小复现）。故这里按"条件性风险"报 warn，不报 fail。
   {
     let profManifest = null;
-    try { profManifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')); } catch { profManifest = null; }
+    let manifestHadBom = false;
+    const profRead = readJsonReportingBom(join(dir, 'package.json'));
+    profManifest = profRead.data;
+    manifestHadBom = profRead.hadBom;
     if (!profManifest || !(profManifest.dsh && profManifest.dsh.profile)) {
       reportSkip('profile', 'P18', '未找到 profile manifest（无 dsh.profile），跳过 version 检查');
     } else if (typeof profManifest.version === 'string' && profManifest.version.length > 0) {
@@ -791,6 +801,27 @@ function checkProfile(name) {
       report('profile', 'P21', true, `未见裸引用沙箱专属符号（${notes21.length} 处有 typeof 守卫，未计入）`);
     } else {
       report('profile', 'P21', true, `扫描 ${hostFiles.length} 个 host 入口与 ${clientFiles.length} 个 client 产物，未见沙箱专属符号引用`);
+    }
+  }
+
+  // P22：profile manifest 带 UTF-8 BOM（#6758）—— **硬失败且报错不指向病因**
+  // DSH 直接 `JSON.parse` 该文件：带 BOM 时抛 `Unexpected token '...' is not valid JSON` 并**起不来**；
+  // 而 GBK 控制台会把 BOM 三个字节渲染成乱码，用户完全看不出是编码问题。
+  // 这条判据零误报，且正是"报错不指向病因"要补的那一句：**是 BOM，不是 JSON 语法**。
+  {
+    const profRead22 = readJsonReportingBom(join(dir, 'package.json'));
+    if (!profRead22.exists) {
+      reportSkip('profile', 'P22', '无 profile manifest，跳过 BOM 检查');
+    } else if (profRead22.hadBom) {
+      report('profile', 'P22', false,
+        `profile manifest 带 **UTF-8 BOM**（EF BB BF）—— DSH 会直接 \`JSON.parse\` 该文件：`
+        + `BOM 会让它抛 \`SyntaxError: Unexpected token '…' is not valid JSON\`（#6758）并**启动硬失败**；`
+        + `而在 GBK 控制台上那三个字节会显示成乱码，报错里看不出是编码问题`,
+        '去掉 BOM（保留 UTF-8 无 BOM）：PowerShell 5.1 的 `Set-Content -Encoding UTF8` 默认会写 BOM，改用 '
+        + '`[IO.File]::WriteAllText($p, (Get-Content $p -Raw), (New-Object Text.UTF8Encoding $false))`，'
+        + '或任何「UTF-8（无 BOM）」保存方式；本工具的其余检查已忽略 BOM 继续工作');
+    } else {
+      report('profile', 'P22', true, 'profile manifest 无 UTF-8 BOM（不会触发 #6758 的启动硬失败）');
     }
   }
 
@@ -1979,7 +2010,8 @@ catalogSeverity.set('P16', 'warn');
 catalogSeverity.set('P17', 'warn');
 catalogSeverity.set('P18', 'warn');
 catalogSeverity.set('P19', 'warn');
-catalogSeverity.set('P20', 'warn'); // #6693：client 格式问题在浏览器才炸，服务端零痕迹——高价值提示但不阻断 CI
+catalogSeverity.set('P20', 'warn');
+catalogSeverity.set('P22', 'error'); // #6758：BOM 会让启动硬失败，零误报 → 按 error // #6693：client 格式问题在浏览器才炸，服务端零痕迹——高价值提示但不阻断 CI
 // P21 不设 warn：它是在 apply() 内**同步抛出**、直接中断整棵装载链的致命类（#6693 实测 195+55 次），
 // 且我们两轮去误报（注释/字符串）后在真实 profile 的 8 个 host 入口 + 8 个 client 产物上零误报，故按 error 处理。 // #6678：声明不匹配是风险信号而非确定失败，提示但不阻断 // #6667：条件性风险（需游离本地模块才触发），提示但不翻退出码
 
@@ -2536,6 +2568,26 @@ function classifyReadAttempts(attemptLog) {
   if (ok === attemptLog.length) return 'ok';
   if (ok === 0) return 'failed';
   return 'intermittent';
+}
+
+
+/**
+ * 读 JSON 并**报告是否带 UTF-8 BOM**。
+ *
+ * 社区 #6758：profile 清单只要带 BOM（PowerShell 5.1 的 `Set-Content -Encoding UTF8` 默认会写），
+ * `JSON.parse` 就抛 `Unexpected token '...'`，DSH **硬失败起不来**；而 GBK 控制台会把 BOM 三个字节
+ * 渲染成乱码，报错里完全看不出是编码问题——"报错不指向病因"。
+ *
+ * 我们自己也踩同一个坑：此前直接 `JSON.parse(readFileSync(...))` 失败后置 null，于是 P18 会报
+ * "未找到 profile manifest"——**错误结论**。诊断工具在它要诊断的输入上给出错判，正是最该避免的。
+ * 所以：**剥离 BOM 后再解析**（让其余检查继续工作），并把 hadBom 单独报出来（P22）。
+ */
+function readJsonReportingBom(file) {
+  let raw;
+  try { raw = readFileSync(file); } catch { return { data: null, hadBom: false, exists: false }; }
+  const hadBom = raw.length >= 3 && raw[0] === 0xEF && raw[1] === 0xBB && raw[2] === 0xBF;
+  const text = hadBom ? raw.subarray(3).toString('utf8') : raw.toString('utf8');
+  try { return { data: JSON.parse(text), hadBom, exists: true }; } catch { return { data: null, hadBom, exists: true }; }
 }
 
 /* ---- 预检增强（2026-09）：快照对比 + 安全安装 ---- */

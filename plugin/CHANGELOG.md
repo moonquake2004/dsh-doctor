@@ -16,6 +16,16 @@
 
 ---
 
+## [0.6.0] — 2026-09-15
+
+### Added
+
+- **P22 profile manifest 带 UTF-8 BOM**（社区 #6758，**error**）：DSH 直接 `JSON.parse` 该文件，带 BOM 时抛 `Unexpected token '…' is not valid JSON` 并**启动硬失败**；而 GBK 控制台会把 BOM 三个字节渲染成乱码，用户看不出是编码问题。判据零误报，补的正是"报错不指向病因"缺的那一句，并给出无 BOM 保存的具体做法（PowerShell 5.1 的 `Set-Content -Encoding UTF8` 默认会写 BOM）。
+
+### Fixed — 我们自己在同一输入上的错判
+
+- 此前直接 `JSON.parse(readFileSync(profile/package.json))`：**带 BOM 时解析失败 → 置 null → P18 报"未找到 profile manifest"**，是**错误结论**；整个 profile 段更会直接报"检查异常"。现在所有 manifest 读取走**带 BOM 感知**的读取：剥离 BOM 后继续工作，`hadBom` 交给 P22 单独报出。**诊断工具不能被它要诊断的那份输入打败**——#6758 让我们发现了自己在同一个输入上的同类问题。
+
 ## [0.5.1] — 2026-09-15
 
 ### Fixed — 把"读取间歇性失败"错判成"文件损坏"（社区 #6739）
