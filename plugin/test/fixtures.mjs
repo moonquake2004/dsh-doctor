@@ -222,10 +222,19 @@ const T = {
   sourceref: (seq, refs) => ({ type: 'compaction/summary', seq, sourceEventSeqs: refs }),
 };
 
-function sessionFixture(home, name, lines) {
+/**
+ * 造会话日志。**默认写入真实的会话头**（#6651：首行必须是 {"type":"session"}，
+ * 否则 harness 拒绝启动 dsh web，S13 也会正确地报出来）。此前 fixture 不带头，
+ * 加 S13 后暴露为 5 个既有用例失败——那说明 fixture 本就不真实，而不是检查有误。
+ * 需要测"头损坏"的用例显式传 { header: false }。
+ */
+function sessionFixture(home, name, lines, { header = true } = {}) {
   const dir = join(home, 'sessions', name);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'session.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  const rows = header
+    ? [{ type: 'session', version: 3, id: name, createdAt: Date.now(), cwd: '/tmp', isSeeded: false, delegationDepth: 0, agentPreset: 'standard' }, ...lines]
+    : lines;
+  writeFileSync(join(dir, 'session.jsonl'), rows.map((l) => JSON.stringify(l)).join('\n') + '\n');
   return join(dir, 'session.jsonl');
 }
 
@@ -1250,5 +1259,46 @@ test('P3：真正缺失的包仍必须报出（修复不得放宽）', () => {
   });
   const { map } = runCli({ home, args: ['--profile', 'web'] });
   assert.equal(map.get('P3'), false, '真的不存在时必须报出');
+  rmSync(home, { recursive: true, force: true });
+});
+
+/* ---------- S13：会话头完整性（#6651）——首行不是 {"type":"session"} 时 harness 拒绝启动 dsh web ---------- */
+
+test('S13：首行不是会话头 → 失败（#6651 启动阻断）', () => {
+  const home = tempHome();
+  const dir = join(home, 'sessions', 'proj', 'sess-bad');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'session.v3.jsonl'),
+    JSON.stringify({ type: 'user/message', seq: 0, data: {} }) + '\n' +
+    JSON.stringify({ type: 'assistant/message', seq: 1, data: {} }) + '\n');
+  const { raw } = runCli({ home, args: ['--session'] });
+  const s13 = raw.checks.find((c) => c.id === 'S13');
+  assert.equal(s13.status, 'fail', '首行非会话头必须报出（其余 S 检查看不出这类损坏）');
+  assert.ok(/dsh web/.test(s13.detail), 'detail 应点明会阻断 dsh web 启动');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('S11：首行不是会话头的日志必须计入"损坏"，不得报健康（回归）', () => {
+  const home = tempHome();
+  const dir = join(home, 'sessions', 'proj', 'sess-bad');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'session.v3.jsonl'),
+    JSON.stringify({ type: 'user/message', seq: 0, data: {} }) + '\n');
+  const { raw } = runCli({ home, args: ['--session'] });
+  const s11 = raw.checks.find((c) => c.id === 'S11');
+  assert.equal(s11.status, 'fail', 'S11 此前会把这情况报成"均健康"——正是本项目定义为漏洞的假阴性');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('S13：正常会话头 → 通过', () => {
+  const home = tempHome();
+  const dir = join(home, 'sessions', 'proj', 'sess-ok');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'session.v3.jsonl'),
+    JSON.stringify({ type: 'session', version: 3, id: 'sess-ok', createdAt: Date.now(), cwd: '/tmp' }) + '\n' +
+    JSON.stringify({ type: 'user/message', seq: 0, data: { content: [] } }) + '\n');
+  const { raw } = runCli({ home, args: ['--session'] });
+  const s13 = raw.checks.find((c) => c.id === 'S13');
+  assert.notEqual(s13.status, 'fail', '正常会话头不得报错');
   rmSync(home, { recursive: true, force: true });
 });

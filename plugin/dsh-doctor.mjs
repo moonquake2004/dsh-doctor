@@ -1149,6 +1149,23 @@ function checkSession(targetPath) {
   } else {
     report('session', 'S9', true, '非 zstd 输入，跳过容器检查', undefined);
   }
+
+  // S13：会话头完整性（#6651）——首行必须是 {"type":"session",...}
+  // 实测：首行被写成事件时 dsh-doctor 的其余 S 检查**全部照常通过**（它们看的是事件流），
+  // S11 甚至会报"均健康"；而 harness 侧会 `corrupt Zstandard session log` 直接拒绝启动 `dsh web`。
+  {
+    const firstLine = String(text).split('\n').find((l) => l.trim());
+    let header = null;
+    try { header = firstLine ? JSON.parse(firstLine) : null; } catch { header = null; }
+    if (!header || header.type !== 'session') {
+      report('session', 'S13', false,
+        `日志首行不是会话头（type=${header && header.type ? JSON.stringify(header.type) : '缺失/无法解析'}）——#6651：此类损坏会让 \`dsh web\` **整体启动失败**（corrupt Zstandard session log: first frame is not exactly …），会话列表一并损坏`,
+        '优先从备份恢复该日志；无备份时把整个会话目录**移出** sessions/（隔离，勿删）后重启 dsh，再用本工具复查');
+    } else {
+      report('session', 'S13', true,
+        `会话头完整（type=session, version=${header.version ?? '?'}, id=${String(header.id ?? '').slice(0, 12)}）`);
+    }
+  }
   const calls = new Map(); const results2 = new Set(); let maxSeq = -1;
   const turnStarts = new Set(); const turnEnds = new Set();
   const positions = []; const endSeedSeqs = [];
@@ -1462,11 +1479,17 @@ function scanAllSessions() {
     totalDS += ds;
     // 轻量损坏扫描：seq==index + end-seed 重放 + 未知类型
     const problems = [];
+    let firstRowSeen = false;
     let evIndex = 0, lastSeed = -1, seedIdx = -1, posList = [];
     const lines = text.split('\n');
     for (let li = 0; li < lines.length; li++) {
       const ln = lines[li]; if (!ln.trim()) continue;
       let d; try { d = JSON.parse(ln); } catch { problems.push(`行 ${li + 1} 无法解析`); continue; }
+      // #6651：首行必须是会话头——否则 harness 拒绝启动 dsh web，而其余检查看不出问题
+      if (!firstRowSeen) {
+        firstRowSeen = true;
+        if (d.type !== 'session') problems.push(`首行不是会话头（#6651 启动阻断，实际 type=${d.type}）`);
+      }
       if (!STORAGE_ROW_TYPES.has(d.type) && !READABLE.has(d.type) && d.ignorable !== true) problems.push(`未知类型 ${d.type}`);
       if (d.type === 'session/end-seed' && typeof d.seq === 'number') { lastSeed = d.seq; seedIdx = posList.length; }
       const t = d.type;
