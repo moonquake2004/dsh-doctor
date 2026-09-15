@@ -2025,13 +2025,31 @@ const sessionArg = (() => { const i = process.argv.indexOf('--session'); return 
  *     strict semver 的字面规则会把第一种判成不满足 —— 那是误报，而误报健康 profile 比不报更糟。
  */
 
-/** 解析版本为 {nums:[a,b,c], pre:[...]}；无法解析返回 null。 */
+/**
+ * 版本与区间判定 —— **按参考实现的代码对齐**（ciceroyang/dsh-doctor `satisfiesRange`），
+ * 并经其差分测试 `scripts/range-difftest.mjs` 验收（13 条边界语料 0 分歧）。
+ *
+ * 规则（照其代码，而非文档表格——两者不一致，见下）：
+ *   1. 逐组做**数值**判定；任一比较器为假 → 该组 false；有无法解析的比较器 → 该组 null；
+ *   2. 全部比较器数值通过后，若**被判版本是预发布**且**该组不含任何预发布比较器** → 该组 null；
+ *      否则 → 该组 true；
+ *   3. 任一组成立 → 兼容；否则若有组为 null → 未知；否则 → 不兼容。
+ *
+ * 文档表格第二行（"numeric 满足但 strict 不满足 → unknown"）与其代码/后果清单不一致：
+ * 代码对 `>=0.1.0-rc.5 <0.2.0` 配 `0.1.5-rc.2` 返回**兼容**（该组是预发布感知的），
+ * 而按表格字面会得到"未知"。我们按**代码**对齐，并已把该不一致回报给作者。
+ */
+
+/** 解析（可含部分的）版本：1 / 1.2 / 1.2.3[-pre]；缺失段补 0。无法解析返回 null。 */
 function parseVer(v) {
-  const m = /^\s*v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(String(v ?? ''));
+  const m = /^\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?\s*$/.exec(String(v ?? ''));
   if (!m) return null;
-  return { nums: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split('.') : [] };
+  return {
+    nums: [Number(m[1]), m[2] === undefined ? 0 : Number(m[2]), m[3] === undefined ? 0 : Number(m[3])],
+    pre: m[4] ? m[4].split('.') : [],
+  };
 }
-/** semver 预发布优先级：数字段比数字，字母段按字典序，数字 < 字母；无 prerelease 者更高。 */
+/** semver 预发布优先级：数字段比数字，字母段按字典序，数字段 < 字母段；无 prerelease 者更高。 */
 function cmpVer(a, b) {
   for (let i = 0; i < 3; i++) if (a.nums[i] !== b.nums[i]) return a.nums[i] < b.nums[i] ? -1 : 1;
   if (!a.pre.length && !b.pre.length) return 0;
@@ -2048,8 +2066,8 @@ function cmpVer(a, b) {
   }
   return 0;
 }
-/** 单个比较器是否满足（数值判定，已含预发布比较）。 */
-function cmpSatisfied(ver, op, target) {
+/** 单个比较器：true / false / null（前缀无法解析）。 */
+function cmpHalf(ver, op, target) {
   const c = cmpVer(ver, target);
   switch (op) {
     case '>': return c > 0;
@@ -2057,10 +2075,9 @@ function cmpSatisfied(ver, op, target) {
     case '<': return c < 0;
     case '<=': return c <= 0;
     case '=': return c === 0;
-    default: return false;
+    default: return null;
   }
 }
-/** 展开 ^ / ~ 为区间对（只覆盖生态里实际出现的形态）。 */
 function expandCaret(target) {
   const [maj, min, pat] = target.nums;
   if (maj > 0) return { lower: ['>=', target], upper: ['<', parseVer(`${maj + 1}.0.0`)] };
@@ -2071,42 +2088,47 @@ function expandTilde(target) {
   const [maj, min] = target.nums;
   return { lower: ['>=', target], upper: ['<', parseVer(`${maj}.${min + 1}.0`)] };
 }
+/** 一个 `||` 组的判定：true / false / null。 */
+function evalGroup(ver, group) {
+  let prereleaseAware = false;
+  for (const part of group.split(/\s+/).filter(Boolean)) {
+    const m = /^([\^~]|>=|<=|>|<|=)?\s*v?(.+)$/.exec(part);
+    if (!m) return null;
+    const op = m[1] ?? '=';
+    const target = parseVer(m[2]);
+    if (!target) return null;
+    if (target.pre.length > 0) prereleaseAware = true;
+    if (op === '^' || op === '~') {
+      const { lower, upper } = op === '^' ? expandCaret(target) : expandTilde(target);
+      if (cmpHalf(ver, lower[0], lower[1]) === false || cmpHalf(ver, upper[0], upper[1]) === false) return false;
+    } else {
+      const r = cmpHalf(ver, op, target);
+      if (r === false) return false;
+      if (r === null) return null;
+    }
+  }
+  // 数值全通过：预发布版本只对"预发布感知"的组才敢断言兼容
+  if (ver.pre.length > 0 && !prereleaseAware) return null;
+  return true;
+}
 /**
- * 判定 range 是否接受 version。返回 { state: 'satisfied' | 'unsatisfied' | 'unknown', hasPreComparator }
- * 未知的三种来源：`*`/空、区间不可解析、**纯 release 区间面对预发布安装版本**（不猜）。
+ * 判定 range 是否接受 version。返回 { state: 'satisfied' | 'unsatisfied' | 'unknown' }。
+ * 未知（null）的三种来源：`*`/空、比较器不可解析、预发布版本面对"非预发布感知"的组。
  */
 function peerRangeState(version, range) {
   const ver = parseVer(version);
   const raw = String(range ?? '').trim();
-  if (!ver || !raw) return { state: 'unknown', hasPreComparator: null };
-  if (raw === '*' || raw === '' || raw === 'x' || raw === 'latest') return { state: 'unknown', hasPreComparator: false };
-  let hasPre = false;
-  const groups = raw.split('||').map((g) => g.trim()).filter(Boolean);
-  if (!groups.length) return { state: 'unknown', hasPreComparator: null };
+  if (!ver || !raw) return { state: 'unknown' };
+  if (raw === '*' || /^x$/i.test(raw) || raw.toLowerCase() === 'latest') return { state: 'unknown' };
+  const groups = raw.split('||').map((x) => x.trim()).filter(Boolean);
+  if (!groups.length) return { state: 'unknown' };
+  let undecidable = false;
   for (const g of groups) {
-    const parts = g.split(/\s+/).filter(Boolean);
-    let ok = true; let preHere = false;
-    for (const part of parts) {
-      const m = /^([\^~]|>=|<=|>|<|=)?\s*v?(.+)$/.exec(part);
-      if (!m) { ok = false; break; }
-      const op = m[1] ?? '=';
-      const target = parseVer(m[2]);
-      if (!target) { ok = false; break; }
-      if (target.pre.length) preHere = true;
-      if (op === '^' || op === '~') {
-        const { lower, upper } = op === '^' ? expandCaret(target) : expandTilde(target);
-        if (!(cmpSatisfied(ver, lower[0], lower[1]) && cmpSatisfied(ver, upper[0], upper[1]))) { ok = false; break; }
-      } else if (!cmpSatisfied(ver, op, target)) { ok = false; break; }
-    }
-    if (ok) {
-      hasPre = hasPre || preHere;
-      return { state: 'satisfied', hasPreComparator: hasPre };
-    }
-    hasPre = hasPre || preHere;
+    const v = evalGroup(ver, g);
+    if (v === true) return { state: 'satisfied' };
+    if (v === null) undecidable = true;
   }
-  // 全部组都不满足：若这次不匹配发生在"纯 release 区间 vs 预发布版本"，按规则记 unknown
-  if (!hasPre && ver.pre.length) return { state: 'unknown', hasPreComparator: false };
-  return { state: 'unsatisfied', hasPreComparator: hasPre };
+  return { state: undecidable ? 'unknown' : 'unsatisfied' };
 }
 
 /** 解析 host 包版本：profile node_modules → 共享镜像根；**跟随软链接**（readFileSync 会跟随）。 */

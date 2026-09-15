@@ -1555,7 +1555,7 @@ test('--post-upgrade --auto-quarantine：自动隔离后可启动', () => {
 
 /* ---------- P19：host peer 范围 vs 实际提供版本（社区 #6678 @ciceroyang 提案） ---------- */
 
-function peerFixture(range) {
+function peerFixture(range, hostVersion = '0.1.5-rc.2') {
   const home = tempHome();
   const p = join(home, 'profiles', 'web');
   mkdirSync(join(p, 'node_modules', 'plug'), { recursive: true });
@@ -1564,7 +1564,7 @@ function peerFixture(range) {
   writeFileSync(join(p, 'node_modules', 'plug', 'package.json'),
     JSON.stringify({ name: 'plug', version: '0.17.8', dsh: {}, peerDependencies: { '@deepseek-ai/dsh-subprocess-local': range } }));
   writeFileSync(join(p, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local', 'package.json'),
-    JSON.stringify({ name: '@deepseek-ai/dsh-subprocess-local', version: '0.1.5-rc.2' }));
+    JSON.stringify({ name: '@deepseek-ai/dsh-subprocess-local', version: hostVersion }));
   return home;
 }
 const p19 = (home) => runCli({ home, args: ['--profile', 'web'] }).raw.checks.find((c) => c.id === 'P19');
@@ -1585,8 +1585,9 @@ test('P19（rc 回归）：>=0.1.0-rc.5 <0.2.0 必须接受 0.1.5-rc.2 —— �
   rmSync(home, { recursive: true, force: true });
 });
 
-test('P19：纯 release 区间面对预发布版本 → 记为未知，不作不兼容', () => {
-  const home = peerFixture('>=4.0.0');
+test('P19：纯 release 区间面对【数值上满足】的预发布版本 → 记为未知，不作不兼容', () => {
+  // 规范用例：>=4.0.0 对 4.1.0-rc.1 —— 数值上满足、但该组不含预发布比较器 → 未知
+  const home = peerFixture('>=4.0.0', '4.1.0-rc.1');
   const c = p19(home);
   assert.notEqual(c.status, 'warn', '区间从未考虑预发布，据此断言不兼容就是猜');
   assert.match(c.detail, /无法判定/, '应如实说明有多少条无法判定');
