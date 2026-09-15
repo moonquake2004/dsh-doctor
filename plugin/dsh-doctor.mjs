@@ -241,8 +241,11 @@ function resolveProfile(name) {
 
 /* ================= env ================= */
 /** v1 词汇表 r5（#1719/#2259）node 语义：pass = 满足 ^22.19.0 || >=24.0.0，其余 warn——无民间 fail 阈值。
- *  注（2026-09 更正）：该范围来自 v1 词汇表对齐，**不是**从某个 package.json 读来的；
- *  已发布的 `@deepseek-ai/dsh@0.1.5-rc.1` **不含 engines 字段**，此前文案写"root package.json engines"属出处误引。 */
+ *  出处（2026-09 两次更正后的准确版本，由社区 @ciceroyang 核实、我们复核）：
+ *  该范围**确实声明在 manifest 里** —— 仓库根 `package.json` 的 `engines.node`，
+ *  即 `@deepseek-ai/dsh-root`（`private: true`，非发布包）。**没有任何已发布包继承它**，
+ *  所以 registry 查不到、npm 安装时既不校验也不警告；这正是社区里"没有 engines"印象的由来。
+ *  我们内置的范围与之一致（等于官方声明值），但它是**手写维护**的：上游改动时需同步。 */
 function nodeInSupportedRange(v) {
   const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(String(v));
   if (!m) return false;
@@ -266,8 +269,8 @@ function checkEnv() {
     const version = String(nv.stdout).trim();
     const supported = nodeInSupportedRange(version);
     report('env', 'E3-node', supported,
-      supported ? `node ${version}（满足 v1 词汇表支持范围 ^22.19.0 || >=24.0.0；该版本未发布 engines 字段，#2259）` : `node ${version} 不在支持范围（^22.19.0 || >=24.0.0，v1 词汇表）——会话日志读取等能力受限`,
-      supported ? undefined : '升级 node 到 ^22.19.0 或 >=24.0.0（v1 词汇表范围，见 #2259）');
+      supported ? `node ${version}（满足声明范围 ^22.19.0 || >=24.0.0——出处为仓库根私有 workspace package.json 的 engines，#2259）` : `node ${version} 不在支持范围（^22.19.0 || >=24.0.0，v1 词汇表）——会话日志读取等能力受限`,
+      supported ? undefined : '升级 node 到 ^22.19.0 或 >=24.0.0（仓库根 engines 声明的范围，见 #2259）');
   }
 
   // E12：运行时 zstd 稳定性（#6651 的运行时线索）
