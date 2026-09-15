@@ -1316,6 +1316,51 @@ function checkSession(targetPath) {
     report('session', 'S9', true, '非 zstd 输入，跳过容器检查', undefined);
   }
 
+  // S14：投影安全性预检（#6686）——迁移**成功**、但打开(project)时抛错的会话
+  // 报告者实测：v0→v3 迁移后部分事件**没有消息体**，而 stock projection 直接穿透读取，
+  // 于是 `failed to project session: Cannot read properties of undefined (reading 'content')`，
+  // 整个历史会话打不开。我们离线预判同一批形态，让用户在"点开之前"就知道哪些会话会炸：
+  //   ① 事件类型暗示有消息体，但 data.message 缺失/非对象（如 assistant/message、tool/result、
+  //      system/message —— 三个 stock projection 分别读 data.message.content、
+  //      data.message.source.callId、data.message.content[0].isError）；
+  //   ② surfaceOp 为 replace 形态（{op:'replace', start/end} 或 startSeq/endSeq），
+  //      但引用的位置在本日志里解析不到。
+  {
+    const rows = [];
+    for (const ln of String(text).split('\n')) {
+      if (!ln.trim()) continue;
+      try { rows.push(JSON.parse(ln)); } catch { /* 解析失败由 S11/SS4 报 */ }
+    }
+    const seqs = new Set(rows.map((r) => r.seq).filter((x) => typeof x === 'number'));
+    const probs = [];
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const bodyTypes = /^(assistant\/message|tool\/result|system\/message)$/;
+      if (bodyTypes.test(String(r.type)) && !(r.data && typeof r.data.message === 'object' && r.data.message !== null)) {
+        probs.push(`行 ${i + 1}（${r.type}）缺 data.message——stock projection 会穿透读取并抛错`);
+      }
+      const so = r.surfaceOp;
+      if (so && typeof so === 'object' && so.op === 'replace') {
+        const hasStartEnd = Object.hasOwn(so, 'start') && Object.hasOwn(so, 'end');
+        const hasSeqRange = Object.hasOwn(so, 'startSeq') && Object.hasOwn(so, 'endSeq');
+        const okRef = hasSeqRange
+          ? (seqs.has(so.startSeq) || seqs.has(so.endSeq))
+          : (hasStartEnd && (seqs.has(so.start) || seqs.has(so.end)));
+        if (!okRef) probs.push(`行 ${i + 1}（${r.type}）surfaceOp replace 的位置在本日志里解析不到`);
+      }
+    }
+    if (probs.length) {
+      report('session', 'S14', false,
+        `检测到 ${probs.length} 处会让会话**打不开**的事件体/引用不完整（#6686：迁移成功但 project 抛错）：\n  `
+        + probs.slice(0, 6).join('\n  ')
+        + (probs.length > 6 ? `\n  …另有 ${probs.length - 6} 处` : ''),
+        '这类会话在 GUI 里点开会报 failed to project session；上游修法（可选链 + 中性兜底）见 #6686；'
+        + '在那之前可先把该会话目录移出 sessions/ 隔离，避免它影响会话列表');
+    } else {
+      report('session', 'S14', true, `投影安全性预检通过（${rows.length} 个事件：消息体完整、replace 引用可解析）`);
+    }
+  }
+
   // S13：会话头完整性（#6651）——首行必须是 {"type":"session",...}
   // 实测：首行被写成事件时 dsh-doctor 的其余 S 检查**全部照常通过**（它们看的是事件流），
   // S11 甚至会报"均健康"；而 harness 侧会 `corrupt Zstandard session log` 直接拒绝启动 `dsh web`。
@@ -1682,6 +1727,11 @@ function scanAllSessions() {
     for (let li = 0; li < lines.length; li++) {
       const ln = lines[li]; if (!ln.trim()) continue;
       let d; try { d = JSON.parse(ln); } catch { problems.push(`行 ${li + 1} 无法解析`); continue; }
+      // #6686：事件类型暗示有消息体却没有 → 打开(project)时会抛错，整个会话打不开
+      if (/^(assistant\/message|tool\/result|system\/message)$/.test(String(d.type))
+          && !(d.data && typeof d.data.message === 'object' && d.data.message !== null)) {
+        problems.push(`行 ${li + 1}（${d.type}）缺 data.message（#6686：project 会抛错，会话打不开）`);
+      }
       // #6651：首行必须是会话头——否则 harness 拒绝启动 dsh web，而其余检查看不出问题
       if (!firstRowSeen) {
         firstRowSeen = true;

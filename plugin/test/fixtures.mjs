@@ -1601,3 +1601,52 @@ test('P19：通配 * → 未知（不猜、也不算兼容）', () => {
   assert.match(c.detail, /无法判定/);
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- S14：投影安全性预检（#6686：迁移成功但打开即炸） ---------- */
+
+function legacyFixture(rows) {
+  const home = tempHome();
+  const dir = join(home, 'sessions', 'proj', 'sess-legacy');
+  mkdirSync(dir, { recursive: true });
+  const all = [{ type: 'session', version: 3, id: 'sess-legacy', createdAt: 1, cwd: '/tmp' }, ...rows];
+  writeFileSync(join(dir, 'session.v3.jsonl'), all.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  return { home, file: join(dir, 'session.v3.jsonl') };
+}
+
+test('S14：assistant/message 缺 data.message → 失败并点名（#6686 会 project 抛错）', () => {
+  const { home, file } = legacyFixture([
+    { type: 'assistant/message', seq: 1, data: { turn: 1, step: 1 } },
+  ]);
+  const c = runCli({ home, args: ['--session', file] }).raw.checks.find((x) => x.id === 'S14');
+  assert.equal(c.status, 'fail', '缺消息体是"打不开"的直接原因，必须在点开之前报出');
+  assert.match(c.detail, /assistant\/message/);
+  assert.match(c.detail, /6686/);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('S14：tool/result 缺 data.message → 失败', () => {
+  const { home, file } = legacyFixture([
+    { type: 'tool/result', seq: 1, data: { turn: 1, step: 1 } },
+  ]);
+  const c = runCli({ home, args: ['--session', file] }).raw.checks.find((x) => x.id === 'S14');
+  assert.equal(c.status, 'fail');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('S14：消息体完整 → 通过（不得误报）', () => {
+  const { home, file } = legacyFixture([
+    { type: 'assistant/message', seq: 1, data: { turn: 1, step: 1, message: { content: [] } } },
+    { type: 'tool/result', seq: 2, data: { turn: 1, step: 1, message: { content: [], source: { callId: 'c1' } } } },
+  ]);
+  const c = runCli({ home, args: ['--session', file] }).raw.checks.find((x) => x.id === 'S14');
+  assert.notEqual(c.status, 'fail', `完整消息体不得报错：${c.detail.slice(0, 120)}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('S11：全库扫描须把"缺消息体"的会话计入损坏（#6686 的受害者要能找到是哪些会话）', () => {
+  const { home } = legacyFixture([{ type: 'assistant/message', seq: 1, data: { turn: 1, step: 1 } }]);
+  const c = runCli({ home, args: ['--session'] }).raw.checks.find((x) => x.id === 'S11');
+  assert.equal(c.status, 'fail');
+  assert.match(c.detail, /data\.message|6686/, '全库报告里要点明原因，便于隔离');
+  rmSync(home, { recursive: true, force: true });
+});
