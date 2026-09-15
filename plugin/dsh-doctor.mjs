@@ -2286,7 +2286,14 @@ async function run() {
       if (quarantineArg || unquarantineArg) {
         const r = quarantineBundle(profDir, quarantineArg || unquarantineArg, !!unquarantineArg);
         if (!r.ok) { console.error(`✗ ${r.error}`); process.exit(1); }
-        console.log(JSON.stringify({ ok: true, action: unquarantineArg ? 'unquarantine' : 'quarantine', ...r, next: '重启 dsh；随后用 --boot-check 复查，或用 --unquarantine 撤销' }, null, 2));
+        const payload = { ok: true, action: unquarantineArg ? 'unquarantine' : 'quarantine', ...r, next: '重启 dsh；随后用 --boot-check 复查，或用 --unquarantine 撤销' };
+        if (jsonOut) console.log(JSON.stringify(payload, null, 2));
+        else if (unquarantineArg) {
+          console.log(`✓ 已放回 ${unquarantineArg}（当前启动列表 ${r.bundles} 项）——重启 dsh 生效`);
+        } else {
+          console.log(`✓ 已隔离 ${quarantineArg}（启动列表现为 ${r.bundles} 项；原始 package.json 已备份）`);
+          console.log(`  重启 dsh，然后用 --boot-check 复查；要放回：--unquarantine ${quarantineArg}`);
+        }
         process.exit(0);
       }
       const results = await runBootCheck(profDir);
