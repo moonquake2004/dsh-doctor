@@ -506,7 +506,32 @@ function checkPort3080() {
     srv.on('error', finish((e) => {
       if (e.code === 'EADDRINUSE') {
         const info = portOccupierInfo(port);
-        if (info && info.dsh) report('env', 'E10-port-3080', true, `端口 ${port} 被 dsh web 实例占用（PID ${info.pid}）——宿主自身或另一实例，正常`, undefined);
+        // 端口被占用 **不等于** 服务健康（#6693）：一个在 apply() 里抛错的插件会让 cordis 中断装载链、
+        // 进程退出、systemd 重启 —— 表现为"端口绑着、systemd active、页面永远打不开"。故这里真发一次 HTTP：
+        // 应答 → 正常；无应答 → 如实报"绑着但不服务"，这正是崩溃重启循环的样子。
+        const httpAlive = (() => {
+          for (const bin of ['curl', 'wget']) {
+            try {
+              const args = bin === 'curl'
+                ? ['-s', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '5', `http://127.0.0.1:${port}/`]
+                : ['-q', '-O', '-T', '2', `http://127.0.0.1:${port}/`];
+              const rr = spawnSync(bin, args, { encoding: 'utf8', timeout: 8000 });
+              const code = String(rr.stdout || '').trim();
+              if (bin === 'wget') return rr.status === 0;
+              return /^\d{3}$/.test(code) && code !== '000';
+            } catch { /* 换下一个工具 */ }
+          }
+          return null; // 无工具可探测 → 不据此下结论
+        })();
+        if (info && info.dsh && httpAlive === false) {
+          report('env', 'E10-port-3080', false,
+            `端口 ${port} 被 dsh 进程占用（PID ${info.pid}）但 **HTTP 无应答** —— 绑定成功 ≠ 服务健康：`
+            + `这与"插件在 apply() 期间抛错 → 装载链中断 → 进程退出 → systemd 重启"的崩溃重启循环一致（#6693）`,
+            `先在会话外跑 npx @moonquake2004/dsh-doctor --boot-check 找失败的 entry；确认后 --quarantine <包名> 让 dsh 先起来`);
+        } else if (info && info.dsh) {
+          report('env', 'E10-port-3080', true,
+            `端口 ${port} 被 dsh web 实例占用（PID ${info.pid}）${httpAlive === true ? '且 HTTP 有应答' : ''}——宿主自身或另一实例，正常`, undefined);
+        }
         else if (info) report('env', 'E10-port-3080', false, `端口 ${port} 被其他程序占用（PID ${info.pid}: ${info.cmd}），dsh web 启动会 address in use（#1719）`, `关掉占用进程，或让 dsh web 用别的端口`);
         else report('env', 'E10-port-3080', true, `⚠ 端口 ${port} 被占用但无法识别占用者`, undefined);
       } else {
