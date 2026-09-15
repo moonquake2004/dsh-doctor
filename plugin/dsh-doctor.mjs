@@ -246,11 +246,31 @@ function resolveProfile(name) {
  *  即 `@deepseek-ai/dsh-root`（`private: true`，非发布包）。**没有任何已发布包继承它**，
  *  所以 registry 查不到、npm 安装时既不校验也不警告；这正是社区里"没有 engines"印象的由来。
  *  我们内置的范围与之一致（等于官方声明值），但它是**手写维护**的：上游改动时需同步。 */
-function nodeInSupportedRange(v) {
+/**
+ * 支持范围。默认是**内置常量**（出处与核对日期见上一条注释）；若设置了
+ * `DSH_DOCTOR_HARNESS_ROOT` 指向 harness 检出，则**真读**其仓库根 package.json 的
+ * `engines.node` —— 这是社区建议的方向（#6651 @ciceroyang）：手维护的常量会随上游漂移，
+ * 能读元数据就别抄数字。真正的解法仍是 #2259（让**已发布**的入口包带上 engines）。
+ */
+const NODE_RANGE_FALLBACK = '^22.19.0 || >=24.0.0'; // 核对日期 2026-09-15（master）
+function nodeRangeSource() {
+  const root = process.env.DSH_DOCTOR_HARNESS_ROOT;
+  if (root) {
+    try {
+      const e = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).engines?.node;
+      if (typeof e === 'string' && e.trim()) return { range: e.trim(), from: `真读 ${root}/package.json` };
+    } catch { /* 落到内置常量 */ }
+  }
+  return { range: NODE_RANGE_FALLBACK, from: '内置常量（出处：仓库根 package.json engines.node，核对 2026-09-15）' };
+}
+function nodeInSupportedRange(v, range = NODE_RANGE_FALLBACK) {
   const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(String(v));
   if (!m) return false;
   const major = Number(m[1]); const minor = Number(m[2]);
-  return (major === 22 && minor >= 19) || major >= 24;
+  // 规则来自该范围本身（^22.19.0 || >=24.0.0）：22.19+ 或 24+
+  if (range === NODE_RANGE_FALLBACK) return (major === 22 && minor >= 19) || major >= 24;
+  const cur = { nums: [Number(m[1]), Number(m[2]), Number(m[3])], pre: [] };
+  return peerRangeState(String(v).replace(/^v/, ''), range).state === 'satisfied';
 }
 function checkEnv() {
   if (!wants('env')) return;
@@ -265,12 +285,29 @@ function checkEnv() {
     report('env', 'E2-env', !isDir, isDir ? `${envFile} 是目录，dsh 启动会报 failed to load .env: EISDIR（#71）` : `${envFile} 正常`, isDir ? '删除或改名该目录' : undefined);
   }
   const nv = spawnSync('node', ['-e', 'console.log(process.version)']);
+  // 支持范围：优先**从仓库根 manifest 真读**（若给了 DSH_DOCTOR_HARNESS_ROOT 或存在检出），
+  // 否则用内置常量。社区（#6651 @ciceroyang）指出：两个实现都把这个范围写成手维护常量，
+  // 上游一改就各自漂移；真正的解法在 #2259（让已发布的入口包带上 engines，从而可读安装树元数据）。
+  // 在那之前，任何写死它的地方都必须标注**出处与核对日期**。
+  const RANGE_FALLBACK = '^22.19.0 || >=24.0.0';   // 出处：deepseek-harness 仓库根 package.json engines.node（@deepseek-ai/dsh-root，private）；核对日期 2026-09-15（master）
+  const rangeInfo = (() => {
+    const root = process.env.DSH_DOCTOR_HARNESS_ROOT;
+    if (root) {
+      try {
+        const e = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).engines?.node;
+        if (typeof e === 'string' && e.trim()) return { range: e.trim(), from: `${root}/package.json（真读）` };
+      } catch { /* 落到内置 */ }
+    }
+    return { range: RANGE_FALLBACK, from: '内置常量（出处：仓库根 package.json engines.node；核对日期 2026-09-15）' };
+  })();
+
   if (nv.status === 0) {
     const version = String(nv.stdout).trim();
-    const supported = nodeInSupportedRange(version);
+    const rangeSrc = nodeRangeSource();
+    const supported = nodeInSupportedRange(version, rangeSrc.range);
     report('env', 'E3-node', supported,
-      supported ? `node ${version}（满足声明范围 ^22.19.0 || >=24.0.0——出处为仓库根私有 workspace package.json 的 engines，#2259）` : `node ${version} 不在支持范围（^22.19.0 || >=24.0.0，v1 词汇表）——会话日志读取等能力受限`,
-      supported ? undefined : '升级 node 到 ^22.19.0 或 >=24.0.0（仓库根 engines 声明的范围，见 #2259）');
+      supported ? `node ${version}（满足 ${rangeSrc.range}——${rangeSrc.from}；该范围声明在私有 workspace 上、无发布物继承，见 #2259/#6651）` : `node ${version} 不在支持范围（^22.19.0 || >=24.0.0，v1 词汇表）——会话日志读取等能力受限`,
+      supported ? undefined : `升级 node 到 ${rangeSrc.range}（${rangeSrc.from}，见 #2259）`);
   }
 
   // E12：运行时 zstd 稳定性（#6651 的运行时线索）
