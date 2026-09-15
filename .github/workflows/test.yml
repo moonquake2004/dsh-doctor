@@ -8,22 +8,31 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        node: ['20.x', '22.x', '24.x']
+        # 2026-09：加入 windows-latest —— 生态里已有多起 Windows 平台缺陷报告
+        # （#6644 git-bash 路径形态、#6649 NTFS 时间戳抖动与非 C: 盘的模块解析回退），
+        # 而本工具声称覆盖 win32（catalog 的 when.os 含 win32）。只在 ubuntu 上跑等于没验证过这个声明。
+        os: [ubuntu-latest, windows-latest]
+        node: ['22.x', '24.x']   # 20.x 无 zlib zstd（E12 会正确报出），单列观察价值低于成本
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - name: Install zstd (session logs are zstd-compressed)
-        run: sudo apt-get update && sudo apt-get install -y zstd
-      - name: Show runtime versions
-        run: node --version && zstd --version
-      # 2026-09 起套件是**全绿**的：此前 E4 在合成 HOME（无 node_modules）里报"未找到 node-pty"，
-      # 连累 E2/E5/envelope 三个用例。那是检查的语义错误（无对象可查 ⇒ 应 skip 而非 fail），
-      # 已修。因此这里可以直接要求 0 失败——不再需要"已知环境失败"的豁免。
+      - name: Install zstd
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            choco install zstd --no-progress -y || echo "zstd install failed; zstd-gated tests will skip"
+          else
+            sudo apt-get update && sudo apt-get install -y zstd
+          fi
+      - name: Show runtime
+        shell: bash
+        run: node --version && (zstd --version || echo "no zstd")
       - name: Run the test suite
+        shell: bash
         run: node --test plugin/test/*.mjs
