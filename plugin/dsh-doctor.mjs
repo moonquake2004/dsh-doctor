@@ -575,6 +575,26 @@ function checkProfile(name) {
   }
   if (bad.length) report('profile', 'P3', false, `用户 patch 中不可解析的 name（#1197/#880）: ${bad.join(', ')}`, `dsh plugin --profile ${name} add <包> 或修复 file: 依赖`);
   else report('profile', 'P3', true, '用户 patch insert 均可解析', undefined);
+  // P18：profile manifest 的 version（#6667）
+  // 锚点：dsh-plugin-package-inventory-deepseek/lib/index.js:34 —— identityFromManifest 会抛
+  // `must declare non-empty name and version`；它虽有 allowAnonymous 容忍**缺 name**，但**不容忍缺 version**。
+  // 而 harness 自己生成的 profile manifest 恰恰是「有 name、无 version」（本机 web/daily 皆如此）。
+  // 触发条件：从 profile 根解析到**游离本地模块**时，最近的 manifest（即 profile 自身）会被当包处理 → 抛错 →
+  // DeepSeek 请求以 REQUEST_EXTENSION 失败（#6667 报告的最小复现）。故这里按"条件性风险"报 warn，不报 fail。
+  {
+    let profManifest = null;
+    try { profManifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')); } catch { profManifest = null; }
+    if (!profManifest || !(profManifest.dsh && profManifest.dsh.profile)) {
+      reportSkip('profile', 'P18', '未找到 profile manifest（无 dsh.profile），跳过 version 检查');
+    } else if (typeof profManifest.version === 'string' && profManifest.version.length > 0) {
+      report('profile', 'P18', true, `profile manifest 声明了 version（${profManifest.version}），不触发 #6667`);
+    } else {
+      report('profile', 'P18', false,
+        `profile manifest 有 name（${profManifest.name}）但**没有 version**——与 #6667 的条件一致：package inventory 在解析**游离本地模块**时会把该 manifest 当包处理并抛 "must declare non-empty name and version"（dsh-plugin-package-inventory-deepseek:34；其 allowAnonymous 只容忍缺 name），表现为 DeepSeek 请求 REQUEST_EXTENSION 失败`,
+        '上游修复前可先给 profile manifest 补一行 version（如 "version": "0.0.0"）作为绕过；若有游离 .mjs/.js 模块被加载，这是首要排查点');
+    }
+  }
+
   // P4 file: 依赖悬空（file: 目标可能是相对（file:./plugins/x）或绝对（file:/abs/path））
   const resolveFileSpec = (spec) => {
     const target = spec.slice(5);
@@ -1618,6 +1638,7 @@ catalogSeverity.set('P14', 'warn');
 catalogSeverity.set('P15', 'error');
 catalogSeverity.set('P16', 'warn');
 catalogSeverity.set('P17', 'warn');
+catalogSeverity.set('P18', 'warn'); // #6667：条件性风险（需游离本地模块才触发），提示但不翻退出码
 
 function bundledCatalog() {
   const p = new URL('./checks.json', import.meta.url);

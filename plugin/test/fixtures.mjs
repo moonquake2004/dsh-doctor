@@ -1343,3 +1343,30 @@ test('E12：无 DSH 环境 → skip（与 E7 同一纪律：没有可诊断对�
   assert.equal(e12.status, 'skip', '干净环境里不得因运行时差异报失败');
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- P18：profile manifest 的 version（#6667）---------- */
+
+test('P18：profile manifest 有 name 无 version → 失败（warn 级，#6667 条件）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: { name: 'dsh-profile-web', dsh: { profile: { bundles: [] } } }, // 无 version，同 harness 自己生成的形态
+    patch: '',
+  });
+  const { raw } = runCli({ home, args: ['--profile', 'web'] });
+  const p18 = raw.checks.find((c) => c.id === 'P18');
+  assert.equal(p18.status, 'warn', '#6667 是条件性风险（需游离本地模块），故 warn 而不阻断');
+  assert.ok(/6667|REQUEST_EXTENSION/.test(p18.detail));
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P18：profile manifest 声明了 version → 通过', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: { name: 'dsh-profile-web', version: '0.0.0', dsh: { profile: { bundles: [] } } },
+    patch: '',
+  });
+  const { raw } = runCli({ home, args: ['--profile', 'web'] });
+  const p18 = raw.checks.find((c) => c.id === 'P18');
+  assert.equal(p18.status, 'pass');
+  rmSync(home, { recursive: true, force: true });
+});
