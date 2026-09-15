@@ -2001,6 +2001,111 @@ function classifyImportError(msg) {
   return { kind: 'other', hint: '按上面的原始报错定位；确认后可先隔离该 bundle 让 dsh 起来' };
 }
 
+
+/* ---- 预检增强（2026-09）：快照对比 + 安全安装 ---- */
+
+const SNAPSHOT_FILE = '.dsh-doctor-snapshot.json';
+
+/** 采集"启动关键状态"：每个 bundle 的解析版本 + 每条 entry 的 spec。 */
+function bootSnapshot(profileDir) {
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'));
+  const prof = manifest.dsh?.profile ?? {};
+  const bundles = {};
+  for (const b of prof.bundles ?? []) {
+    let v = null;
+    try { v = JSON.parse(readFileSync(join(profileDir, 'node_modules', b, 'package.json'), 'utf8')).version ?? null; } catch { /* 未装/不可读 */ }
+    bundles[b] = v;
+  }
+  const entries = {};
+  for (const e of collectBootEntries(profileDir)) if (e.name) entries[e.id] = `${e.bundle} → ${e.name}`;
+  return { at: new Date().toISOString(), bundles, entries };
+}
+
+/** 与上次"已知良好"快照对比——这是"到底改了什么"的直接答案（dshmarket 自升级、手动 pnpm add 都算）。 */
+function diffSnapshot(prev, cur) {
+  if (!prev) return null;
+  const out = { addedBundles: [], removedBundles: [], versionChanged: [], addedEntries: [], removedEntries: [] };
+  for (const [k, v] of Object.entries(cur.bundles)) {
+    if (!(k in prev.bundles)) out.addedBundles.push(k);
+    else if (prev.bundles[k] !== v) out.versionChanged.push(`${k}: ${prev.bundles[k]} → ${v}`);
+  }
+  for (const k of Object.keys(prev.bundles)) if (!(k in cur.bundles)) out.removedBundles.push(k);
+  for (const [k, v] of Object.entries(cur.entries)) {
+    if (!(k in prev.entries)) out.addedEntries.push(`${k} (${v})`);
+    else if (prev.entries[k] !== v) out.addedEntries.push(`${k}: ${prev.entries[k]} → ${v}`);
+  }
+  for (const k of Object.keys(prev.entries)) if (!(k in cur.entries)) out.removedEntries.push(k);
+  return out;
+}
+
+function readSnapshot(profileDir) {
+  try { return JSON.parse(readFileSync(join(profileDir, SNAPSHOT_FILE), 'utf8')); } catch { return null; }
+}
+function writeSnapshot(profileDir, snap) {
+  try { writeFileSync(join(profileDir, SNAPSHOT_FILE), JSON.stringify(snap, null, 2) + '\n'); } catch { /* 写不了不致命 */ }
+}
+
+/**
+ * --safe-add <pkg>：装完立即预检，坏了自动回滚。
+ * 顺序：先备份 manifest → 调 `dsh plugin --profile <name> add <pkg>` → boot-check →
+ *  通过：写"已知良好"快照；
+ *  失败：先自动隔离出问题的那几个 bundle（若能就此恢复可启动，则保留安装并如实报告），
+ *        若隔离后仍不可启动 → **整体回滚**到安装前的 manifest。
+ * 这样"装了个不兼容的插件导致 dsh 起不来"在最坏情况下也只是一次无害的失败尝试。
+ */
+function safeAdd(profileArg, pkg) {
+  const profDir = resolveProfile(profileArg || 'web');
+  const manifestPath = join(profDir, 'package.json');
+  const before = readFileSync(manifestPath, 'utf8');
+  writeFileSync(`${manifestPath}.dsh-doctor.pre-add.${Date.now()}`, before);
+  const install = spawnSync(process.platform === 'win32' ? 'dsh.cmd' : 'dsh',
+    ['plugin', '--profile', profileArg || 'web', 'add', pkg],
+    { cwd: profDir, encoding: 'utf8', stdio: 'inherit', timeout: 15 * 60 * 1000 });
+  if (install.status !== 0) {
+    writeFileSync(manifestPath, before); // 安装本身失败：还原
+    return { ok: false, stage: 'install', restored: true, exit: install.status };
+  }
+  const results = runBootCheckSync(profDir);
+  const failed = results.filter((r) => r.status === 'failed');
+  if (!failed.length) {
+    writeSnapshot(profDir, bootSnapshot(profDir));
+    return { ok: true, stage: 'verified', checked: results.length, failed: 0 };
+  }
+  // 自动隔离出问题的 bundle
+  const quarantined = [];
+  for (const name of new Set(failed.map((f) => f.bundle))) {
+    if (name === '(user patch)') continue;
+    try { const r = quarantineBundle(profDir, name, false); if (r.ok) quarantined.push(name); } catch { /* 忽略 */ }
+  }
+  const after = runBootCheckSync(profDir);
+  const stillFailed = after.filter((r) => r.status === 'failed');
+  if (stillFailed.length) {
+    writeFileSync(manifestPath, before); // 隔离都救不回来 → 整体回滚
+    return { ok: false, stage: 'verify', quarantined, restored: true, failures: failed.map((f) => `${f.bundle}/${f.id}: ${f.kind}`) };
+  }
+  writeSnapshot(profDir, bootSnapshot(profDir));
+  return { ok: true, stage: 'quarantined', quarantined, failures: failed.map((f) => `${f.bundle}/${f.id}: ${f.kind} ${f.error}`) };
+}
+
+/** 同步版装载模拟（--safe-add 内部用；与 --boot-check 同一逻辑） */
+function runBootCheckSync(profileDir) {
+  const out = [];
+  for (const e of collectBootEntries(profileDir)) {
+    if (!e.name) continue;
+    const spec = e.name;
+    if (spec.startsWith('cordis:') || spec.startsWith('.') || spec.startsWith('/')) { out.push({ id: e.id, bundle: e.bundle, spec, status: 'skipped' }); continue; }
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(spec)});`],
+      { cwd: profileDir, encoding: 'utf8', timeout: 20000, maxBuffer: 8 * 1024 * 1024 });
+    if (r.status === 0) out.push({ id: e.id, bundle: e.bundle, spec, status: 'loadable' });
+    else {
+      const raw = String((r.stderr || '') + (r.stdout || ''));
+      const cls = classifyImportError(raw);
+      out.push({ id: e.id, bundle: e.bundle, spec, status: 'failed', kind: cls.kind, hint: cls.hint, error: (raw.split('\n').find((l) => /Error/.test(l)) || raw.slice(0, 160)).slice(0, 220) });
+    }
+  }
+  return out;
+}
+
 async function runBootCheck(profileDir) {
   const entries = collectBootEntries(profileDir);
   const targets = entries.filter((e) => e.name);
@@ -2052,6 +2157,25 @@ async function run() {
   const bootCheckArg = process.argv.includes('--boot-check');
   const quarantineArg = flagValue('--quarantine');
   const unquarantineArg = flagValue('--unquarantine');
+  const safeAddArg = flagValue('--safe-add');
+  if (safeAddArg) {
+    // 装完立即预检、坏了自动回滚——"装了个不兼容插件导致 dsh 起不来"的预防手段
+    const profDir = resolveProfile(profileArg || 'web');
+    const r = safeAdd(profileArg || 'web', safeAddArg);
+    if (jsonOut) console.log(JSON.stringify(r, null, 2));
+    else if (r.ok && r.stage === 'verified') console.log(`✓ 已安装并预检通过（${r.checked} 条 entry 均可导入）——重启 dsh 即可`);
+    else if (r.ok && r.stage === 'quarantined') {
+      console.log(`⚠ 已安装，但该插件的 entry 导入失败，已自动隔离以避免 dsh 起不来：`);
+      for (const f of r.failures || []) console.log(`    ${f}`);
+      console.log(`  隔离项：${r.quarantined.join(', ')}（用 --unquarantine <包名> 放回，修好版本后再重试）`);
+      console.log(`  dsh 现在可以正常启动。`);
+    } else if (r.stage === 'install') console.log(`✗ 安装命令本身失败（exit ${r.exit}），已还原 manifest`);
+    else {
+      console.log(`✗ 安装后无法启动，且隔离也救不回来 → 已整体回滚到安装前状态`);
+      for (const f of r.failures || []) console.log(`    ${f}`);
+    }
+    process.exit(r.ok ? 0 : 2);
+  }
   if (bootCheckArg || quarantineArg || unquarantineArg) {
     const profDir = resolveProfile(profileArg || 'web');
     try {
@@ -2063,8 +2187,25 @@ async function run() {
       }
       const results = await runBootCheck(profDir);
       const failed = results.filter((r) => r.status === 'failed');
+      const prevSnap = readSnapshot(profDir);
+      const curSnap = bootSnapshot(profDir);
+      const drift = diffSnapshot(prevSnap, curSnap);
+      if (drift && !jsonOut) {
+        const lines = [];
+        if (drift.addedBundles.length) lines.push(`新增 bundle: ${drift.addedBundles.join(', ')}`);
+        if (drift.versionChanged.length) lines.push(`版本变化: ${drift.versionChanged.join('; ')}`);
+        if (drift.removedBundles.length) lines.push(`移除 bundle: ${drift.removedBundles.join(', ')}`);
+        if (drift.addedEntries.length) lines.push(`新增/变更 entry: ${drift.addedEntries.join('; ')}`);
+        if (drift.removedEntries.length) lines.push(`移除 entry: ${drift.removedEntries.join(', ')}`);
+        if (lines.length) {
+          console.log(`自上次预检通过以来（${String(prevSnap.at).slice(0, 16)}）：`);
+          for (const l of lines) console.log(`  · ${l}`);
+          console.log('  ——若本次启动失败，上面这些就是首要嫌疑。');
+        }
+      }
+      if (!failed.length) writeSnapshot(profDir, curSnap); // 只有通过时才更新"已知良好"快照
       if (jsonOut) {
-        console.log(JSON.stringify({ ok: failed.length === 0, profile: profDir, checked: results.length, failed: failed.length, results }, null, 2));
+        console.log(JSON.stringify({ ok: failed.length === 0, profile: profDir, checked: results.length, failed: failed.length, drift, results }, null, 2));
       } else {
         console.log(`装载模拟（${profDir}）：检查 ${results.length} 条 entry，失败 ${failed.length} 条`);
         for (const r of results) {

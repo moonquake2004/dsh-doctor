@@ -119,6 +119,38 @@ npx @moonquake2004/dsh-doctor --unquarantine broken-plugin --profile web
 | `module-format` | `ERR_PACKAGE_PATH_NOT_EXPORTED` / `ERR_REQUIRE_ESM` | 上游未适配模块格式 → 升级插件 |
 | `hang` | 顶层代码阻塞超时 | 上游在加载期做了阻塞操作 |
 
+### 让它自动发生：`--safe-add`（装完立即验证，坏了自动回滚）
+
+与其"装完发现起不来再救"，不如让安装这一步自己带上预检：
+
+```bash
+npx @moonquake2004/dsh-doctor --safe-add <包名> --profile web
+```
+
+它做四件事：① 备份 manifest → ② 执行真正的 `dsh plugin --profile web add <包名>` →
+③ 立刻跑装载模拟 → ④ 按结果收尾：
+
+| 结果 | 行为 |
+|---|---|
+| entry 全部可导入 | 写"已知良好"快照，提示可重启 |
+| 有 entry 导入失败 | **自动隔离**该 bundle（dsh 仍能启动），并报告失败类别与原始报错 |
+| 隔离后仍不可启动 | **整体回滚**到安装前的 manifest（最坏情况只是一次无害的失败尝试） |
+
+### 抓到"不是这次装的东西干的"：漂移对比
+
+`--boot-check` 每次通过时都会写一份"已知良好"快照（bundle 版本 + entry 列表）。
+下次运行时会把当前状态与之对比，直接告诉你**自上次通过以来变了什么**：
+
+```
+自上次预检通过以来（2026-09-15T01:28）：
+  · 新增 bundle: new-plugin
+  · 版本变化: dshmarket: 1.45.1 → 1.46.0
+  ——若本次启动失败，上面这些就是首要嫌疑。
+```
+
+这一点对 **`dshmarket` 自升级**尤其有用：它会在运行时 `@latest` 自更新并重启，
+绕过你的版本锁定——出问题时上面这行就是直接答案。
+
 **两点如实说明**：
 - `--boot-check` 会**执行插件顶层代码**（这正是"启动"本身的语义），因此它是**显式开关**、不是默认行为；
   `--quarantine` 只改 profile 的启动列表，**不动任何包文件**，且必定先写 `package.json.bak.<时间戳>`。

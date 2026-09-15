@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, symlinkSync, chmodSync, realpathSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, delimiter } from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process';
 
 const CLI = join(process.cwd(), 'plugin', 'dsh-doctor.mjs');
@@ -1432,5 +1432,68 @@ test('--unquarantine：撤销隔离，坏 bundle 回到启动列表', () => {
   const after = JSON.parse(readFileSync(join(home, 'profiles', 'web', 'package.json'), 'utf8'));
   assert.ok(after.dsh.profile.bundles.includes('broken-plugin'));
   assert.ok(!after.dsh.profile._quarantined.some((x) => x.name === 'broken-plugin'));
+  rmSync(home, { recursive: true, force: true });
+});
+
+/* ---------- 预检增强：漂移对比 + --safe-add（装完立即验证、坏了自动回滚） ---------- */
+
+/** 造一个 stub `dsh`（POSIX 脚本，仅用于让 --safe-add 的安装步骤"成功但不做实事"） */
+function stubDsh(home) {
+  const bin = join(home, 'bin');
+  mkdirSync(bin, { recursive: true });
+  const f = join(bin, 'dsh');
+  writeFileSync(f, '#!/bin/sh\nexit 0\n');
+  chmodSync(f, 0o755);
+  return bin;
+}
+
+test('--boot-check：报出"自上次预检通过以来"的变更（漂移检测）', () => {
+  const home = bootFixture(); // 首跑会因坏插件失败 → 不会写快照，故先隔离一次得到"良好"状态
+  const env = { ...process.env, DSH_HOME: home };
+  spawnSync(process.execPath, [CLI, '--quarantine', 'broken-plugin', '--profile', 'web'], { encoding: 'utf8', env });
+  spawnSync(process.execPath, [CLI, '--boot-check', '--profile', 'web'], { encoding: 'utf8', env }); // 写快照
+  // 再装一个新 bundle
+  const p = join(home, 'profiles', 'web', 'node_modules', 'third-plugin');
+  mkdirSync(p, { recursive: true });
+  writeFileSync(join(p, 'package.json'), JSON.stringify({ name: 'third-plugin', version: '9.9.9', type: 'module', main: 'index.js' }));
+  writeFileSync(join(p, 'index.js'), 'export default {};\n');
+  writeFileSync(join(p, 'cordis.patch.yml'), '- insert:\n    - id: third-plugin\n      name: third-plugin\n');
+  const mf = join(home, 'profiles', 'web', 'package.json');
+  const m = JSON.parse(readFileSync(mf, 'utf8'));
+  m.dsh.profile.bundles.push('third-plugin');
+  writeFileSync(mf, JSON.stringify(m));
+  const r = spawnSync(process.execPath, [CLI, '--boot-check', '--profile', 'web'], { encoding: 'utf8', env });
+  assert.match(r.stdout, /自上次预检通过以来/);
+  assert.match(r.stdout, /third-plugin/, '新增的 bundle 必须被点名（dshmarket 自升级/手动安装都会走这条路）');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('--safe-add：装完预检失败 → 自动隔离该 bundle，dsh 仍可启动', { skip: process.platform === 'win32' ? 'stub dsh 是 POSIX shell 脚本' : false }, () => {
+  const home = bootFixture();
+  const bin = stubDsh(home); // 安装步骤空转成功
+  const env = { ...process.env, DSH_HOME: home, PATH: `${bin}${delimiter}${process.env.PATH}` };
+  const r = spawnSync(process.execPath, [CLI, '--safe-add', 'broken-plugin', '--profile', 'web'], { encoding: 'utf8', env });
+  assert.equal(r.status, 0, `隔离成功后应正常退出：${r.stderr}`);
+  assert.match(r.stdout, /已自动隔离/, '必须说明它隔离了什么');
+  const m = JSON.parse(readFileSync(join(home, 'profiles', 'web', 'package.json'), 'utf8'));
+  assert.ok(!m.dsh.profile.bundles.includes('broken-plugin'), '坏 bundle 应已被摘出启动列表');
+  assert.ok(m.dsh.profile._quarantined.some((x) => x.name === 'broken-plugin'));
+  const check = spawnSync(process.execPath, [CLI, '--boot-check', '--profile', 'web'], { encoding: 'utf8', env });
+  assert.equal(check.status, 0, '隔离后 dsh 应可启动');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('--safe-add：隔离救不回来 → 整体回滚到安装前', { skip: process.platform === 'win32' ? 'stub dsh 是 POSIX shell 脚本' : false }, () => {
+  const home = bootFixture();
+  const bin = stubDsh(home);
+  const env = { ...process.env, DSH_HOME: home, PATH: `${bin}${delimiter}${process.env.PATH}` };
+  const mf = join(home, 'profiles', 'web', 'package.json');
+  const before = readFileSync(mf, 'utf8');
+  // 让"坏"来自用户 patch（不属于任何 bundle → 无法通过隔离解决）→ 必须整体回滚
+  writeFileSync(join(home, 'profiles', 'web', 'cordis.patch.yml'), '- insert:\n    - id: broken-user-entry\n      name: no-such-package-xyz\n');
+  const r = spawnSync(process.execPath, [CLI, '--safe-add', 'good-plugin', '--profile', 'web'], { encoding: 'utf8', env });
+  assert.equal(r.status, 2, '无法救回时应以非零退出');
+  assert.match(r.stdout, /已整体回滚/);
+  assert.equal(readFileSync(mf, 'utf8'), before, 'manifest 必须逐字节还原为安装前内容');
   rmSync(home, { recursive: true, force: true });
 });
