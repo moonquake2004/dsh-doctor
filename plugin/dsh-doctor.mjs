@@ -310,6 +310,36 @@ function checkEnv() {
       supported ? undefined : `升级 node 到 ${rangeSrc.range}（${rangeSrc.from}，见 #2259）`);
   }
 
+  // E13：CLI 是否真的会执行（#6341 的静默失效签名）
+  // `lib/bin.js` 末尾是 `if (import.meta.main) await runCli();`，而 `import.meta.main` 只在
+  // Node **≥22.18.0 / ≥24.2.0** 存在。落在窗口外的 Node 上，**任何** dsh 命令都零输出、退出码 0。
+  // 判据（#6341 的关键观察）：连 `--version` 都静默——缺原生模块、端口占用、patch 问题都会打印东西，
+  // 只有"入口根本没执行"才会连版本号都不输出。故这里直接问一次版本号。
+  {
+    const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+    const found = (() => { const r = spawnSync(whichCmd, ['dsh'], { encoding: 'utf8' }); return r.status === 0 ? String(r.stdout).split(/\r?\n/)[0].trim() : null; })();
+    if (!found) {
+      reportSkip('env', 'E13', 'PATH 中未找到 dsh，跳过 CLI 可执行性探测');
+    } else {
+      const r = spawnSync(process.platform === 'win32' ? 'dsh.cmd' : 'dsh', ['--version'], { encoding: 'utf8', timeout: 15000, shell: process.platform === 'win32' });
+      const out = String(r.stdout || '').trim();
+      const ver = /\d+\.\d+\.\d+[-\w.]*/.exec(out);
+      if (r.status === 0 && out === '') {
+        report('env', 'E13', false,
+          `dsh 在 PATH 中（${found}）但 \`dsh --version\` **零输出且退出码 0** —— 这是 #6341 的静默失效签名：`
+          + `CLI 入口被 \`if (import.meta.main) await runCli();\` 门控，而该 API 仅在 Node **≥22.18.0 / ≥24.2.0** 存在；`
+          + `（当前 Node ${process.version}；若它落在窗口外，这就是原因——本机 Node 24.20 上该 API 存在、命令正常）`,
+          '换用 Node ≥22.18.0 或 ≥24.2.0（注意：仓库声明范围 >=24.0.0 **包含** 24.0/24.1 这两个不可用版本）');
+      } else if (r.status !== 0) {
+        report('env', 'E13', false,
+          `dsh 在 PATH 中但 \`--version\` 以退出码 ${r.status} 失败：${String((r.stderr || '') + out).slice(0, 120)}`,
+          '按上面的报错定位（依赖缺失 / 入口异常）');
+      } else {
+        report('env', 'E13', true, `CLI 可执行（dsh --version → ${ver ? ver[0] : out.slice(0, 24)}）`);
+      }
+    }
+  }
+
   // E12：运行时 zstd 稳定性（#6651 的运行时线索）
   // 锚点已核实：dsh-session-persistence-jsonl:15 直接 `import { zstdCompress, zstdDecompress,
   // zstdDecompressSync } from "node:zlib"`（用于 :1263 / :1287 / :1368）——会话日志的读写**依赖 Node 内置 zstd**。

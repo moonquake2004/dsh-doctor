@@ -1650,3 +1650,20 @@ test('S11：全库扫描须把"缺消息体"的会话计入损坏（#6686 的受
   assert.match(c.detail, /data\.message|6686/, '全库报告里要点明原因，便于隔离');
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- E13：CLI 静默失效签名（#6341 / #6692） ---------- */
+
+test('E13：dsh 在 PATH 但 --version 零输出 → 失败（#6341 签名）', { skip: process.platform === 'win32' ? '桩是 POSIX shell 脚本' : false }, () => {
+  const home = tempHome();
+  mkdirSync(join(home, 'sessions'), { recursive: true }); // 构造"有 DSH 环境"，让 env 段正常评估
+  const bin = join(home, 'bin');
+  mkdirSync(bin, { recursive: true });
+  const stub = join(bin, 'dsh');
+  writeFileSync(stub, '#!/bin/sh\nexit 0\n'); // 零输出、退出码 0 —— 正是 import.meta.main 门控失效的表现
+  chmodSync(stub, 0o755);
+  const { raw } = runCli({ home, args: ['--env'], env: { PATH: `${bin}${delimiter}${process.env.PATH}` } });
+  const e13 = raw.checks.find((c) => c.id === 'E13');
+  assert.equal(e13.status, 'fail', '连 --version 都零输出是"入口根本没执行"的判据');
+  assert.match(e13.detail, /import\.meta\.main|6341/);
+  rmSync(home, { recursive: true, force: true });
+});
