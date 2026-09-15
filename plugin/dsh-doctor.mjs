@@ -240,7 +240,9 @@ function resolveProfile(name) {
 }
 
 /* ================= env ================= */
-/** v1 词汇表 r5（#1719）node 语义：pass = 满足 ^22.19.0 || >=24.0.0（root package.json engines），其余 warn——无民间 fail 阈值。 */
+/** v1 词汇表 r5（#1719/#2259）node 语义：pass = 满足 ^22.19.0 || >=24.0.0，其余 warn——无民间 fail 阈值。
+ *  注（2026-09 更正）：该范围来自 v1 词汇表对齐，**不是**从某个 package.json 读来的；
+ *  已发布的 `@deepseek-ai/dsh@0.1.5-rc.1` **不含 engines 字段**，此前文案写"root package.json engines"属出处误引。 */
 function nodeInSupportedRange(v) {
   const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(String(v));
   if (!m) return false;
@@ -264,8 +266,8 @@ function checkEnv() {
     const version = String(nv.stdout).trim();
     const supported = nodeInSupportedRange(version);
     report('env', 'E3-node', supported,
-      supported ? `node ${version}（满足 ^22.19.0 || >=24.0.0，root package.json engines）` : `node ${version} 不在支持范围（^22.19.0 || >=24.0.0）——会话日志读取等能力受限`,
-      supported ? undefined : '升级 node 到 ^22.19.0 或 >=24.0.0（root package.json engines，见 #2259）');
+      supported ? `node ${version}（满足 v1 词汇表支持范围 ^22.19.0 || >=24.0.0；该版本未发布 engines 字段，#2259）` : `node ${version} 不在支持范围（^22.19.0 || >=24.0.0，v1 词汇表）——会话日志读取等能力受限`,
+      supported ? undefined : '升级 node 到 ^22.19.0 或 >=24.0.0（v1 词汇表范围，见 #2259）');
   }
 
   // E12：运行时 zstd 稳定性（#6651 的运行时线索）
