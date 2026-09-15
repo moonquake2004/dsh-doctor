@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, symlinkSync, chmodSync, realpathSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 
 const CLI = join(process.cwd(), 'plugin', 'dsh-doctor.mjs');
 
@@ -228,6 +228,11 @@ const T = {
  * 加 S13 后暴露为 5 个既有用例失败——那说明 fixture 本就不真实，而不是检查有误。
  * 需要测"头损坏"的用例显式传 { header: false }。
  */
+/** zstd 是否可用（CI 与本机都装了；缺失时相关用例跳过而非失败） */
+function hasZstd() {
+  try { execFileSync('zstd', ['--version'], { stdio: 'ignore' }); return true; } catch { return false; }
+}
+
 function sessionFixture(home, name, lines, { header = true } = {}) {
   const dir = join(home, 'sessions', name);
   mkdirSync(dir, { recursive: true });
@@ -1300,5 +1305,20 @@ test('S13：正常会话头 → 通过', () => {
   const { raw } = runCli({ home, args: ['--session'] });
   const s13 = raw.checks.find((c) => c.id === 'S13');
   assert.notEqual(s13.status, 'fail', '正常会话头不得报错');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('S13：会话头存在但首帧裹住多行（帧边界错位）→ 失败', { skip: !hasZstd() }, () => {
+  const home = tempHome();
+  const dir = join(home, 'sessions', 'proj', 'sess-frame');
+  mkdirSync(dir, { recursive: true });
+  const plain = JSON.stringify({ type: 'session', version: 3, id: 'x', createdAt: 1, cwd: '/tmp' }) + '\n'
+    + JSON.stringify({ type: 'user/message', seq: 0, data: {} }) + '\n';
+  const plainPath = join(dir, 'plain.jsonl');
+  writeFileSync(plainPath, plain);
+  execFileSync('zstd', ['-q', '-f', '-o', join(dir, 'session.v3.jsonl.zstd'), plainPath]);
+  const { raw } = runCli({ home, args: ['--session', join(dir, 'session.v3.jsonl.zstd')] });
+  const s13 = raw.checks.find((c) => c.id === 'S13');
+  assert.equal(s13.status, 'fail', 'harness 要求首帧恰好一行；首帧裹住事件同样会 corrupt（dsh-session-persistence-jsonl:1891）');
   rmSync(home, { recursive: true, force: true });
 });

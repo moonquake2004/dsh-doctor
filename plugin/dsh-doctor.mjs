@@ -54,11 +54,11 @@
  * 退出码：0 = 全部通过；1 = 发现可修复问题（内置 + catalog severity=error）；warn 级失败不改退出码。
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import net from 'node:net';
 import { basename, delimiter as PATH_DELIM, dirname, join, relative, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
 const HOME = process.env.DSH_HOME || join(homedir(), '.dsh');
@@ -1162,8 +1162,44 @@ function checkSession(targetPath) {
         `日志首行不是会话头（type=${header && header.type ? JSON.stringify(header.type) : '缺失/无法解析'}）——#6651：此类损坏会让 \`dsh web\` **整体启动失败**（corrupt Zstandard session log: first frame is not exactly …），会话列表一并损坏`,
         '优先从备份恢复该日志；无备份时把整个会话目录**移出** sessions/（隔离，勿删）后重启 dsh，再用本工具复查');
     } else {
-      report('session', 'S13', true,
-        `会话头完整（type=session, version=${header.version ?? '?'}, id=${String(header.id ?? '').slice(0, 12)}）`);
+      // 更精确的判据：harness 要求的是「**第一个 zstd 帧恰好只含一行**（即头行）」，
+      // 见 dsh-session-persistence-jsonl:1891/2185 —— 首帧里若多裹了事件，同样抛
+      // corrupt Zstandard session log。只查"首行是不是头"会漏掉帧边界错位这一类。
+      let frameNote = '';
+      let frameBad = false;
+      if (target.endsWith('.zstd')) {
+        try {
+          const raw = readFileSync(target);
+          const magic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+          const offs = [];
+          for (let i = 0; i <= raw.length - 4; i++) {
+            if (raw[i] === magic[0] && raw[i + 1] === magic[1] && raw[i + 2] === magic[2] && raw[i + 3] === magic[3]) offs.push(i);
+          }
+          if (offs.length >= 2) {
+            const tmp = join(tmpdir(), `dsh-doctor-firstframe-${process.pid}.zst`);
+            writeFileSync(tmp, raw.subarray(0, offs[1]));
+            let first = '';
+            try { first = execFileSync('zstd', ['-dc', tmp], { maxBuffer: 16 * 1024 * 1024 }).toString('utf8'); }
+            finally { try { unlinkSync(tmp); } catch { /* 清理失败不致命 */ } }
+            const frameLines = first.split('\n').filter((l) => l.trim());
+            if (frameLines.length !== 1) {
+              frameBad = true;
+              frameNote = `首帧含 ${frameLines.length} 行（应为 1 行头）——帧边界错位同样会让 harness 抛 corrupt Zstandard session log`;
+            }
+          } else {
+            frameBad = true;
+            frameNote = '仅 1 个 zstd 帧（首帧裹住了全部行）——harness 要求首帧恰好一行，与 #1043 同族';
+          }
+        } catch { frameNote = '（首帧边界无法确认，未据此判定）'; }
+      }
+      if (frameBad) {
+        report('session', 'S13', false,
+          `会话头存在但**首帧边界不合规**：${frameNote}`,
+          '优先从备份恢复；无备份时把整个会话目录移出 sessions/（隔离，勿删）后重启 dsh，再用本工具复查');
+      } else {
+        report('session', 'S13', true,
+          `会话头完整（type=session, version=${header.version ?? '?'}, id=${String(header.id ?? '').slice(0, 12)}）${frameNote}`);
+      }
     }
   }
   const calls = new Map(); const results2 = new Set(); let maxSeq = -1;
