@@ -268,6 +268,38 @@ function checkEnv() {
       supported ? undefined : '升级 node 到 ^22.19.0 或 >=24.0.0（root package.json engines，见 #2259）');
   }
 
+  // E12：运行时 zstd 稳定性（#6651 的运行时线索）
+  // 锚点已核实：dsh-session-persistence-jsonl:15 直接 `import { zstdCompress, zstdDecompress,
+  // zstdDecompressSync } from "node:zlib"`（用于 :1263 / :1287 / :1368）——会话日志的读写**依赖 Node 内置 zstd**。
+  // 该 API 在部分 Node 版本上仍是实验性的；社区报告 #6651（Linux + Node 22.22.3）出现首帧损坏让
+  // `dsh web` 无法启动，换到 Node 26 后正常，怀疑写入侧不稳。故这里如实报告运行时状态，不做因果断言。
+  if (!hasDshEnvironment(HOME)) {
+    reportSkip('env', 'E12', '未发现 DSH 环境，跳过运行时 zstd 稳定性检查');
+  } else {
+    const zstdFn = (() => { try { return createRequire(import.meta.url)('node:zlib').zstdDecompressSync; } catch { return null; } })();
+    if (typeof zstdFn !== 'function') {
+      report('env', 'E12', false,
+        `当前 Node（${process.version}）没有 zlib.zstdDecompressSync——而会话持久化直接依赖它读写 .zstd 日志（#6651 同族风险）`,
+        '升级 Node 到内置 zstd 的版本（22.15+/23.8+），否则该运行时的 .zstd 会话日志无法读写');
+    } else {
+      // 用子进程观察 Node 是否对该 API 发出实验性警告（版本无关的经验判据，避免硬编码版本表）
+      let experimental = false; let probed = false;
+      try {
+        const r = spawnSync(process.execPath, ['-e', 'require("node:zlib").zstdDecompressSync(require("node:zlib").zstdCompressSync(Buffer.from("x")))'], { encoding: 'utf8', timeout: 10000 });
+        probed = true;
+        experimental = /ExperimentalWarning/.test(String(r.stderr || ''));
+      } catch { /* 探测失败 → 下面按"未探明"处理 */ }
+      if (!probed) reportSkip('env', 'E12', '运行时 zstd 实验性探测未能执行，跳过（不外推为通过）');
+      else if (experimental) {
+        report('env', 'E12', false,
+          `当前 Node（${process.version}）的 zlib zstd 仍标记为**实验性**——会话持久化直接依赖它读写日志；社区报告 #6651 在同类运行时上出现首帧损坏并导致 dsh web 无法启动（换新版 Node 后正常，因果未定）`,
+          '升级到 zstd 已稳定的 Node（本工具在 24.x 上实测无实验性警告）后再观察；同时建议先用 dsh-doctor 扫一遍会话库有无 S13 类损坏');
+      } else {
+        report('env', 'E12', true, `运行时 zstd 非实验性（Node ${process.version}）`, undefined);
+      }
+    }
+  }
+
   // E4：node-pty 原生模块完整性（#1219：pty.node 缺失 → dsh web 启动失败）
   const ptyDirs = [];
   for (const p of (process.env.PATH || '').split(PATH_DELIM)) {
@@ -1162,35 +1194,30 @@ function checkSession(targetPath) {
         `日志首行不是会话头（type=${header && header.type ? JSON.stringify(header.type) : '缺失/无法解析'}）——#6651：此类损坏会让 \`dsh web\` **整体启动失败**（corrupt Zstandard session log: first frame is not exactly …），会话列表一并损坏`,
         '优先从备份恢复该日志；无备份时把整个会话目录**移出** sessions/（隔离，勿删）后重启 dsh，再用本工具复查');
     } else {
-      // 更精确的判据：harness 要求的是「**第一个 zstd 帧恰好只含一行**（即头行）」，
-      // 见 dsh-session-persistence-jsonl:1891/2185 —— 首帧里若多裹了事件，同样抛
-      // corrupt Zstandard session log。只查"首行是不是头"会漏掉帧边界错位这一类。
+      // 更精确的判据：harness 的读取路径是 **Node 的 `zlib.zstdDecompressSync`**，它**只解第一个帧**，
+      // 然后要求该帧明文恰好是一行（dsh-session-persistence-jsonl:1891/2185 的
+      // `plaintext.indexOf(10) !== plaintext.length - 1`）。所以最忠实的做法不是自己扫 magic 猜帧边界，
+      // 而是**用同一个解压器**复现同一个条件（2026-09 与 #6651 的运行时线索一致后再校准）。
       let frameNote = '';
       let frameBad = false;
       if (target.endsWith('.zstd')) {
-        try {
-          const raw = readFileSync(target);
-          const magic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
-          const offs = [];
-          for (let i = 0; i <= raw.length - 4; i++) {
-            if (raw[i] === magic[0] && raw[i + 1] === magic[1] && raw[i + 2] === magic[2] && raw[i + 3] === magic[3]) offs.push(i);
-          }
-          if (offs.length >= 2) {
-            const tmp = join(tmpdir(), `dsh-doctor-firstframe-${process.pid}.zst`);
-            writeFileSync(tmp, raw.subarray(0, offs[1]));
-            let first = '';
-            try { first = execFileSync('zstd', ['-dc', tmp], { maxBuffer: 16 * 1024 * 1024 }).toString('utf8'); }
-            finally { try { unlinkSync(tmp); } catch { /* 清理失败不致命 */ } }
-            const frameLines = first.split('\n').filter((l) => l.trim());
-            if (frameLines.length !== 1) {
+        const zstdSync = (() => { try { return createRequire(import.meta.url)('node:zlib').zstdDecompressSync; } catch { return null; } })();
+        if (typeof zstdSync !== 'function') {
+          frameNote = '（本机 Node 无 zlib.zstdDecompressSync，未据此判定）';
+        } else {
+          try {
+            const first = zstdSync(readFileSync(target)).toString('utf8');
+            const exactlyOneLine = first.length > 0 && first.indexOf('\n') === first.length - 1;
+            if (!exactlyOneLine) {
               frameBad = true;
-              frameNote = `首帧含 ${frameLines.length} 行（应为 1 行头）——帧边界错位同样会让 harness 抛 corrupt Zstandard session log`;
+              const n = first.split('\n').filter((l) => l.trim()).length;
+              frameNote = `首帧明文含 ${n} 行（harness 要求恰好 1 行头）——帧边界错位/单帧容器都会触发 corrupt Zstandard session log`;
             }
-          } else {
+          } catch (e) {
             frameBad = true;
-            frameNote = '仅 1 个 zstd 帧（首帧裹住了全部行）——harness 要求首帧恰好一行，与 #1043 同族';
+            frameNote = `首帧无法解压（${String(e.code || e.message).slice(0, 40)}）——与 harness 读取路径一致，启动会被拒绝`;
           }
-        } catch { frameNote = '（首帧边界无法确认，未据此判定）'; }
+        }
       }
       if (frameBad) {
         report('session', 'S13', false,

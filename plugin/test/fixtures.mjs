@@ -1322,3 +1322,24 @@ test('S13：会话头存在但首帧裹住多行（帧边界错位）→ 失败'
   assert.equal(s13.status, 'fail', 'harness 要求首帧恰好一行；首帧裹住事件同样会 corrupt（dsh-session-persistence-jsonl:1891）');
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- E12：运行时 zstd 稳定性（#6651 的运行时线索；锚点 dsh-session-persistence-jsonl:15） ---------- */
+
+test('E12：有 DSH 环境时判定运行时 zstd 稳定性', () => {
+  const home = tempHome();
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  const { raw } = runCli({ home, args: ['--env'] });
+  const e12 = raw.checks.find((c) => c.id === 'E12');
+  assert.ok(e12, 'E12 应存在');
+  // 本机/CI 上 Node 要么有非实验性 zstd（pass），要么无 zstd（fail）——都必须是明确判定而非误报
+  assert.notEqual(e12.status, 'skip', '有 DSH 环境时必须给出判定（此环境已被显式构造出来）');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('E12：无 DSH 环境 → skip（与 E7 同一纪律：没有可诊断对象时不报失败）', () => {
+  const home = tempHome();
+  const { raw } = runCli({ home, args: ['--env'] });
+  const e12 = raw.checks.find((c) => c.id === 'E12');
+  assert.equal(e12.status, 'skip', '干净环境里不得因运行时差异报失败');
+  rmSync(home, { recursive: true, force: true });
+});
