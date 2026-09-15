@@ -1326,10 +1326,29 @@ function checkSession(targetPath) {
   //   ② surfaceOp 为 replace 形态（{op:'replace', start/end} 或 startSeq/endSeq），
   //      但引用的位置在本日志里解析不到。
   {
-    const rows = [];
+    const rawRows = [];
     for (const ln of String(text).split('\n')) {
       if (!ln.trim()) continue;
-      try { rows.push(JSON.parse(ln)); } catch { /* 解析失败由 S11/SS4 报 */ }
+      try { rawRows.push(JSON.parse(ln)); } catch { /* 解析失败由 S11/SS4 报 */ }
+    }
+    // **判定对象必须是"打开时真正被投影的那条流"**：对需要迁移的日志（v0/v1/v2），
+    // 缺消息体可能是在**迁移过程中**产生的，磁盘行上看不出来。所以这里优先走真实迁移链取"迁移后的视图"。
+    // （2026-09 自查：初版只看磁盘行，会漏掉报告者 #6686 的实际病例。）
+    let rows = rawRows;
+    let view = '磁盘原始行';
+    const hdr = rawRows[0];
+    if (hdr && hdr.type === 'session' && hdr.version !== 3 && FORMAT_CATALOG) {
+      try {
+        const r = FORMAT_CATALOG.createRestore(hdr, { validation: 'current', recovery: 'strict' });
+        const decoded = [];
+        for (let i = 1; i < rawRows.length; i++) {
+          const d = r.decodeRow(rawRows[i]);
+          decoded.push((d && d.type) ? d : (d && d.event) ? d.event : rawRows[i]);
+        }
+        r.finish();
+        rows = decoded;
+        view = `迁移后视图（v${hdr.version} → v3，走真实迁移链）`;
+      } catch { /* 迁移被拒由 S12 报；这里退回磁盘行并注明 */ view = '磁盘原始行（迁移链未走通，见 S12）'; }
     }
     const seqs = new Set(rows.map((r) => r.seq).filter((x) => typeof x === 'number'));
     const probs = [];
@@ -1351,13 +1370,13 @@ function checkSession(targetPath) {
     }
     if (probs.length) {
       report('session', 'S14', false,
-        `检测到 ${probs.length} 处会让会话**打不开**的事件体/引用不完整（#6686：迁移成功但 project 抛错）：\n  `
+        `检测到 ${probs.length} 处会让会话**打不开**的事件体/引用不完整（#6686：迁移成功但 project 抛错；判定视图：${view}）：\n  `
         + probs.slice(0, 6).join('\n  ')
         + (probs.length > 6 ? `\n  …另有 ${probs.length - 6} 处` : ''),
         '这类会话在 GUI 里点开会报 failed to project session；上游修法（可选链 + 中性兜底）见 #6686；'
         + '在那之前可先把该会话目录移出 sessions/ 隔离，避免它影响会话列表');
     } else {
-      report('session', 'S14', true, `投影安全性预检通过（${rows.length} 个事件：消息体完整、replace 引用可解析）`);
+      report('session', 'S14', true, `投影安全性预检通过（${rows.length} 个事件：消息体完整、replace 引用可解析；判定视图：${view}）`);
     }
   }
 
