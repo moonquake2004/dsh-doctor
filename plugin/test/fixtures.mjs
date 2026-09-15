@@ -1370,3 +1370,67 @@ test('P18：profile manifest 声明了 version → 通过', () => {
   assert.equal(p18.status, 'pass');
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- 启动失败自救：--boot-check / --quarantine（dsh 起不来时用，不依赖 dsh 启动） ---------- */
+
+/** 造一个装了两个 bundle 的 profile：good 可导入，broken 导入一个不存在的导出 */
+function bootFixture() {
+  const home = tempHome();
+  const p = join(home, 'profiles', 'web');
+  mkdirSync(join(p, 'node_modules', 'broken-plugin'), { recursive: true });
+  mkdirSync(join(p, 'node_modules', 'good-plugin'), { recursive: true });
+  mkdirSync(join(p, 'node_modules', '@deepseek-ai', 'dsh-settings'), { recursive: true });
+  writeFileSync(join(p, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web', dsh: { profile: { bundles: ['broken-plugin', 'good-plugin'] } },
+  }));
+  writeFileSync(join(p, 'node_modules', 'broken-plugin', 'package.json'), JSON.stringify({ name: 'broken-plugin', version: '1.0.0', type: 'module', main: 'index.js' }));
+  writeFileSync(join(p, 'node_modules', 'broken-plugin', 'index.js'), 'import { nope } from "@deepseek-ai/dsh-settings"; export default {};\n');
+  writeFileSync(join(p, 'node_modules', 'broken-plugin', 'cordis.patch.yml'), '- insert:\n    - id: broken-plugin\n      name: broken-plugin\n');
+  writeFileSync(join(p, 'node_modules', 'good-plugin', 'package.json'), JSON.stringify({ name: 'good-plugin', version: '1.0.0', type: 'module', main: 'index.js' }));
+  writeFileSync(join(p, 'node_modules', 'good-plugin', 'index.js'), 'export default {};\n');
+  writeFileSync(join(p, 'node_modules', 'good-plugin', 'cordis.patch.yml'), '- insert:\n    - id: good-plugin\n      name: good-plugin\n');
+  writeFileSync(join(p, 'node_modules', '@deepseek-ai', 'dsh-settings', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-settings', version: '0.1.5-rc.2', type: 'module', exports: { '.': './index.js' } }));
+  writeFileSync(join(p, 'node_modules', '@deepseek-ai', 'dsh-settings', 'index.js'), 'export const SettingsProvider = 1;\n');
+  return home;
+}
+
+test('--boot-check：点名导入失败的 entry（缺导出），并给出错误类别与隔离命令', () => {
+  const home = bootFixture();
+  const r = spawnSync(process.execPath, [CLI, '--boot-check', '--profile', 'web'], { encoding: 'utf8', env: { ...process.env, DSH_HOME: home } });
+  assert.equal(r.status, 2, '有 entry 导入失败时应以非零退出（dsh 起不来的直接原因）');
+  assert.match(r.stdout, /broken-plugin/);
+  assert.match(r.stdout, /missing-export/);
+  assert.match(r.stdout, /does not provide an export named/);
+  assert.match(r.stdout, /--quarantine broken-plugin/, '应给出可照做的下一步');
+  assert.doesNotMatch(r.stdout, /✗ \[good-plugin\]/, '健康的 bundle 不得被误报');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('--quarantine：摘掉坏 bundle 并备份 manifest；复查后装载模拟通过', () => {
+  const home = bootFixture();
+  const p = join(home, 'profiles', 'web', 'package.json');
+  const before = readFileSync(p, 'utf8');
+  const q = spawnSync(process.execPath, [CLI, '--quarantine', 'broken-plugin', '--profile', 'web'], { encoding: 'utf8', env: { ...process.env, DSH_HOME: home } });
+  assert.equal(q.status, 0, q.stderr);
+  const after = JSON.parse(readFileSync(p, 'utf8'));
+  assert.ok(!after.dsh.profile.bundles.includes('broken-plugin'), '坏 bundle 应被移出启动列表');
+  assert.ok(after.dsh.profile._quarantined.some((x) => x.name === 'broken-plugin'), '应记录隔离以便撤销');
+  const backups = readdirSync(join(home, 'profiles', 'web')).filter((f) => f.startsWith('package.json.bak.'));
+  assert.equal(backups.length, 1, '必须先备份原 manifest');
+  assert.equal(readFileSync(join(home, 'profiles', 'web', backups[0]), 'utf8'), before, '备份内容应与原文件一致');
+
+  const check = spawnSync(process.execPath, [CLI, '--boot-check', '--profile', 'web'], { encoding: 'utf8', env: { ...process.env, DSH_HOME: home } });
+  assert.equal(check.status, 0, '隔离后装载模拟应通过（这就是"让 dsh 先起来"）');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('--unquarantine：撤销隔离，坏 bundle 回到启动列表', () => {
+  const home = bootFixture();
+  spawnSync(process.execPath, [CLI, '--quarantine', 'broken-plugin', '--profile', 'web'], { encoding: 'utf8', env: { ...process.env, DSH_HOME: home } });
+  const u = spawnSync(process.execPath, [CLI, '--unquarantine', 'broken-plugin', '--profile', 'web'], { encoding: 'utf8', env: { ...process.env, DSH_HOME: home } });
+  assert.equal(u.status, 0, u.stderr);
+  const after = JSON.parse(readFileSync(join(home, 'profiles', 'web', 'package.json'), 'utf8'));
+  assert.ok(after.dsh.profile.bundles.includes('broken-plugin'));
+  assert.ok(!after.dsh.profile._quarantined.some((x) => x.name === 'broken-plugin'));
+  rmSync(home, { recursive: true, force: true });
+});

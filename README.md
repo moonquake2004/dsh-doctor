@@ -84,6 +84,47 @@ With `--envelope` (doctor-contract mode): `0` = all pass · `1` = any WARN · `2
 
 
 
+## dsh 起不来怎么办（不依赖其它工具）
+
+装了个不兼容的插件、或 dsh 升级后与旧插件不兼容，导致 **dsh 完全无法启动** 时，本工具仍然可用——
+它是**独立 Node CLI**（`npx` 直接跑），**不需要 dsh 能启动**，也不需要借别的 AI 工具。
+
+```bash
+# 1) 离线模拟插件树装载：逐条 entry 真去 import，直接点名哪一条炸、炸在哪
+npx @moonquake2004/dsh-doctor --boot-check --profile web
+
+#    输出形如：
+#    ✗ [broken-plugin] broken-plugin → broken-plugin
+#        missing-export: SyntaxError: The requested module '@deepseek-ai/dsh-settings'
+#          does not provide an export named 'settingsNamespace'
+#        修复方向：插件比所装的 @deepseek-ai/* 旧/新：把该插件升级到匹配版本
+#        先起来：npx @moonquake2004/dsh-doctor --quarantine broken-plugin
+
+# 2) 按提示隔离坏 bundle（**先备份** manifest，并记入 _quarantined 以便撤销）
+npx @moonquake2004/dsh-doctor --quarantine broken-plugin --profile web
+
+# 3) 重启 dsh —— 现在应该能起来了；随后再从容处理该插件的版本问题
+
+# 需要放回来时：
+npx @moonquake2004/dsh-doctor --unquarantine broken-plugin --profile web
+```
+
+**能识别并归类这些启动期硬失败**（都是我们见过的真实形态）：
+
+| 类别 | 典型报错 | 修复方向 |
+|---|---|---|
+| `missing-export` | `does not provide an export named X` | 插件与核心版本不匹配 → 升级插件 |
+| `not-installed` | `ERR_MODULE_NOT_FOUND` | 依赖/包没装全 → 重装该插件 |
+| `native-abi` | `NODE_MODULE_VERSION` / `compiled against a different Node.js version` | Node 升级后原生模块失配 → 重装（rebuild） |
+| `module-format` | `ERR_PACKAGE_PATH_NOT_EXPORTED` / `ERR_REQUIRE_ESM` | 上游未适配模块格式 → 升级插件 |
+| `hang` | 顶层代码阻塞超时 | 上游在加载期做了阻塞操作 |
+
+**两点如实说明**：
+- `--boot-check` 会**执行插件顶层代码**（这正是"启动"本身的语义），因此它是**显式开关**、不是默认行为；
+  `--quarantine` 只改 profile 的启动列表，**不动任何包文件**，且必定先写 `package.json.bak.<时间戳>`。
+- 若 `--boot-check` 报告全部可导入而 dsh 仍起不来，问题通常不在模块导入，而在**配置合并**（见 P2/P7）
+  或**会话日志损坏**（见 S13），请按输出提示继续查。
+
 ## Symptom → check quick-start (dsh-diagnose alignment)
 
 If you're coming from a symptom (rather than from the machine), these are the checks to run first. Coverage is honest: ✅ = direct offline coverage, ⚠️ = partial (we see the log/profile effects, not the runtime internals), ❌ = gap (runtime-only, no offline probe today).

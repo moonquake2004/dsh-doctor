@@ -1950,7 +1950,136 @@ const flagValue = (name) => { const i = process.argv.indexOf(name); return i >= 
 const profileArg = (() => { const i = process.argv.indexOf('--profile'); return i >= 0 ? process.argv[i + 1] : 'web'; })();
 const sessionArg = (() => { const i = process.argv.indexOf('--session'); return i >= 0 ? process.argv[i + 1] : undefined; })();
 
+
+/* ================= 启动失败自救：装载模拟 + 隔离 =================
+ * 场景（用户高频反馈）：装了个不兼容的插件、或 dsh 升级后与旧插件不兼容 → **dsh 根本起不来**，
+ * 于是没法用 dsh 自己来诊断，只能借别的工具。本工具是独立 Node CLI（`npx @moonquake2004/dsh-doctor`），
+ * **不需要 dsh 能启动**，所以这两个子命令正是为此设计：
+ *   --boot-check         离线模拟插件树装载：逐条 entry 真去 import，报出到底哪一条炸、炸在哪
+ *   --quarantine <包名>  把某个 bundle 从启动列表里摘掉（先备份），让 dsh 能先起来
+ *   --unquarantine <包名> 撤销隔离
+ * 注意：--boot-check 会**执行插件顶层代码**（这正是"启动"本身的语义），故为显式开关、非默认行为。
+ */
+
+/** 解析 profile 的启动列表与各 bundle 的 entry（含用户 patch 的 insert），跳过 disabled 与已隔离项。 */
+function collectBootEntries(profileDir) {
+  const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'));
+  const prof = manifest.dsh?.profile ?? {};
+  const quarantined = new Set((prof._quarantined ?? []).map((q) => q.name));
+  const bundles = (prof.bundles ?? []).filter((b) => !quarantined.has(b));
+  const out = [];
+  const parsePatch = (text, source) => {
+    let cur = null;
+    const flush = () => { if (cur) out.push(cur); cur = null; };
+    for (const line of text.split('\n')) {
+      const idM = /^\s*-?\s*id:\s*['"]?([\w@/.\-]+)['"]?\s*$/.exec(line);
+      if (idM) { flush(); cur = { id: idM[1], bundle: source, name: null, disabled: false }; continue; }
+      if (!cur) continue;
+      const nameM = /^\s*name:\s*['"]?([^'"\s]+)['"]?\s*$/.exec(line);
+      if (nameM) { cur.name = nameM[1]; continue; }
+      if (/^\s*disabled:\s*true\s*$/.test(line)) cur.disabled = true;
+    }
+    flush();
+  };
+  for (const b of bundles) {
+    const patchPath = join(profileDir, 'node_modules', b, 'cordis.patch.yml');
+    if (!existsSync(patchPath)) continue;
+    try { parsePatch(readFileSync(patchPath, 'utf8'), b); } catch { /* 读不了由 P1/P7 报 */ }
+  }
+  const userPatch = join(profileDir, 'cordis.patch.yml');
+  if (existsSync(userPatch)) { try { parsePatch(readFileSync(userPatch, 'utf8'), '(user patch)'); } catch { /* 同上 */ } }
+  return out.filter((e) => !e.disabled);
+}
+
+/** 归类 import 失败，给出人能照做的判断。 */
+function classifyImportError(msg) {
+  if (/does not provide an export named/.test(msg)) return { kind: 'missing-export', hint: '插件比所装的 @deepseek-ai/* 旧/新：把该插件升级到匹配版本（或降级核心）' };
+  if (/ERR_MODULE_NOT_FOUND|Cannot find module/.test(msg)) return { kind: 'not-installed', hint: '依赖或包本身没装全：在该 profile 里重装该插件' };
+  if (/NODE_MODULE_VERSION|compiled against a different Node\.js version|invalid ELF header|not a valid Win32/.test(msg)) return { kind: 'native-abi', hint: '原生模块与当前 Node ABI 不匹配：重装该插件（npm rebuild / 重新 pnpm add）' };
+  if (/ERR_PACKAGE_PATH_NOT_EXPORTED|ERR_REQUIRE_ESM|require\(\) of ES Module/.test(msg)) return { kind: 'module-format', hint: '包导出/模块格式问题：升级该插件（多为上游未适配）' };
+  if (/was killed|ETIMEDOUT|timed out/.test(msg)) return { kind: 'hang', hint: '顶层代码卡住：该插件在加载期做了阻塞操作，需上游修复' };
+  return { kind: 'other', hint: '按上面的原始报错定位；确认后可先隔离该 bundle 让 dsh 起来' };
+}
+
+async function runBootCheck(profileDir) {
+  const entries = collectBootEntries(profileDir);
+  const targets = entries.filter((e) => e.name);
+  const results = [];
+  for (const e of targets) {
+    const spec = e.name;
+    // 宿主内置与相对路径不做 import 探测（前者由宿主提供，后者依赖运行上下文）
+    if (spec.startsWith('cordis:') || spec.startsWith('.') || spec.startsWith('/')) {
+      results.push({ id: e.id, bundle: e.bundle, spec, status: 'skipped', reason: '宿主内置或相对路径，不在本探测范围' });
+      continue;
+    }
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(spec)});`],
+      { cwd: profileDir, encoding: 'utf8', timeout: 20000, maxBuffer: 8 * 1024 * 1024 });
+    if (r.status === 0) { results.push({ id: e.id, bundle: e.bundle, spec, status: 'loadable' }); continue; }
+    const raw = String((r.stderr || '') + (r.stdout || '')).trim();
+    const first = raw.split('\n').find((l) => /Error|error/.test(l)) || raw.split('\n')[0] || '(无输出)';
+    const cls = classifyImportError(raw);
+    results.push({ id: e.id, bundle: e.bundle, spec, status: 'failed', kind: cls.kind, hint: cls.hint, error: first.slice(0, 220) });
+  }
+  return results;
+}
+
+function quarantineBundle(profileDir, name, undo = false) {
+  const manifestPath = join(profileDir, 'package.json');
+  const raw = readFileSync(manifestPath, 'utf8');
+  const manifest = JSON.parse(raw);
+  manifest.dsh = manifest.dsh ?? {};
+  manifest.dsh.profile = manifest.dsh.profile ?? {};
+  const prof = manifest.dsh.profile;
+  prof.bundles = prof.bundles ?? [];
+  prof._quarantined = prof._quarantined ?? [];
+  if (undo) {
+    const hit = prof._quarantined.find((q) => q.name === name);
+    if (!hit) return { ok: false, error: `隔离列表里没有 ${name}` };
+    prof._quarantined = prof._quarantined.filter((q) => q.name !== name);
+    if (!prof.bundles.includes(name)) prof.bundles.push(name);
+  } else {
+    if (!prof.bundles.includes(name)) return { ok: false, error: `${name} 不在 dsh.profile.bundles 里（当前 ${prof.bundles.length} 项）` };
+    writeFileSync(`${manifestPath}.bak.${Date.now()}`, raw); // 备份原始 manifest
+    prof.bundles = prof.bundles.filter((b) => b !== name);
+    prof._quarantined.push({ name, at: new Date().toISOString(), by: 'dsh-doctor --quarantine' });
+  }
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+  return { ok: true, bundles: prof.bundles.length, quarantined: prof._quarantined.map((q) => q.name) };
+}
+
 async function run() {
+  // 启动失败自救子命令（不需要 dsh 能启动）
+  const bootCheckArg = process.argv.includes('--boot-check');
+  const quarantineArg = flagValue('--quarantine');
+  const unquarantineArg = flagValue('--unquarantine');
+  if (bootCheckArg || quarantineArg || unquarantineArg) {
+    const profDir = resolveProfile(profileArg || 'web');
+    try {
+      if (quarantineArg || unquarantineArg) {
+        const r = quarantineBundle(profDir, quarantineArg || unquarantineArg, !!unquarantineArg);
+        if (!r.ok) { console.error(`✗ ${r.error}`); process.exit(1); }
+        console.log(JSON.stringify({ ok: true, action: unquarantineArg ? 'unquarantine' : 'quarantine', ...r, next: '重启 dsh；随后用 --boot-check 复查，或用 --unquarantine 撤销' }, null, 2));
+        process.exit(0);
+      }
+      const results = await runBootCheck(profDir);
+      const failed = results.filter((r) => r.status === 'failed');
+      if (jsonOut) {
+        console.log(JSON.stringify({ ok: failed.length === 0, profile: profDir, checked: results.length, failed: failed.length, results }, null, 2));
+      } else {
+        console.log(`装载模拟（${profDir}）：检查 ${results.length} 条 entry，失败 ${failed.length} 条`);
+        for (const r of results) {
+          if (r.status === 'failed') console.log(`  ✗ [${r.bundle}] ${r.id} → ${r.spec}\n      ${r.kind}: ${r.error}\n      修复方向：${r.hint}\n      先起来：npx @moonquake2004/dsh-doctor --quarantine ${r.bundle}`);
+          else if (r.status === 'skipped') console.log(`  ⊖ ${r.id}（${r.reason}）`);
+        }
+        if (!failed.length) console.log('  ✓ 所有可探测 entry 均可导入——启动失败若仍发生，问题多在配置合并或原生环境，请贴 --json 输出');
+      }
+      process.exit(failed.length ? 2 : 0);
+    } catch (e) {
+      console.error(`启动模拟失败: ${e.message}`);
+      process.exit(1);
+    }
+  }
+
   // 层 C 观察者（--observe / --observe-apply）：独立子命令，跑完即退出，不执行常规检查
   const observeArg = flagValue('--observe');
   const observeApplyArg = flagValue('--observe-apply');
