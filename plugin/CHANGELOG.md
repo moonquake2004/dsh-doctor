@@ -1,0 +1,72 @@
+# Changelog
+
+本文件记录面向使用者的变更。检查清单与判定语义属于公开契约的一部分，故**新增检查、子命令、判定翻转都算 MINOR**。
+
+## 发布规则 / Release policy
+
+| 变更类型 | 版本位 | 例 |
+|---|---|---|
+| 新增检查、新增子命令/开关 | **MINOR** | 新增 `--boot-check`、新增 S13 |
+| 判定或语义变化（同一输入给出不同结论）、默认行为变化、输出结构新增字段 | **MINOR**（并在下方 *Changed* 里逐条写明） | 默认会话目标改为跳过活跃会话；P21 定为 error |
+| 纯修复（错判、崩溃、文案出处错误、CI/依赖问题） | PATCH | E4 无安装树时改 skip |
+| 新增**远程目录检查**（数据驱动，`checks.json`） | **不动版本** | 6 小时内自动生效，无需发版 |
+
+> 0.x 期间 MINOR 位是"特性/行为"轴。此前的实践曾把特性当成 PATCH 连发（2026-09-15 一天 19 个 PATCH），
+> 那会让 `^0.4.x` 的消费者静默收到判定翻转——本文件与 `0.5.0` 就是为纠正这一点。
+
+---
+
+## [0.5.0] — 2026-09-15
+
+累积自 `0.4.6` 的全部变更（中间以 0.4.14–0.4.32 的 PATCH 形式先行发布过，此处归并到 MINOR）。
+
+### Added — 新检查
+
+- **S13 会话头完整性**（#6651）：首行必须是 `{"type":"session"}` 头，且**第一个 zstd 帧恰好只有一行**——判据取自 harness 自身的读取路径（`zlib.zstdDecompressSync` 只解首帧）。此类损坏会让 `dsh web` **整体启动失败**。
+- **S14 投影安全性预检**（#6686）：迁移**成功但打开抛错**的会话——缺 `data.message` 的 `assistant/message`/`tool/result`/`system/message`，以及 replace 形态 `surfaceOp` 引用解析不到。对需要迁移的日志**走真实迁移链取"迁移后视图"**再判定，并在输出里注明判定视图。
+- **E12 运行时 zstd 稳定性**（#6651）：会话持久化直接依赖 `node:zlib` 的 zstd；用子进程探测是否仍标为实验性。
+- **E13 CLI 静默失效签名**（#6341 / #6692）：`dsh` 在 PATH 中但 `--version` **零输出且退出码 0** —— `import.meta.main` 门控（该 API 仅 Node ≥22.18.0 / ≥24.2.0 存在）。
+- **P18 profile manifest 的 version**（#6667）：有 `name` 无 `version` 时，解析游离本地模块会抛 `must declare non-empty name and version`。
+- **P19 host peer 范围 vs 实际提供版本**（#6678 / #6683，社区 @ciceroyang 提案）：只取 `@deepseek-ai/*`、跟随软链接、作用域名两段、三态（未知既不算兼容也不算不兼容）；另按规范规则 1 计数"有 bundle 却未声明 host 范围"的包。
+- **P20 client 产物加载格式**（#6693 规则 3）：必须是 `__ModuleLoader__.load()` 的 CJS 工厂；写成裸 ESM 会在浏览器抛 `Unexpected token 'export'` 而**服务端日志零痕迹**（`node --check` 抓不到，因为那是合法 ESM 语法）。
+- **P21 沙箱专属符号**（#6693 规则 2/4，**error**）：host 侧裸 `harness`、client 侧 `styles` / `ctx.get('host')` —— 从 `node_modules` 加载的普通插件里一律不存在；host 侧在 `apply()` 内同步抛出会**中断整棵装载链**。
+- E10 增加"端口绑着但 **HTTP 无应答**"判定（#6693）：端口占用 ≠ 服务健康（崩溃重启循环下两者同时成立）。
+
+### Added — 子命令（不依赖 dsh 能启动）
+
+- **`--boot-check`**：离线模拟插件树装载，逐条 entry 真去 import，归类失败（缺导出/未安装/原生 ABI/模块格式/卡死）并给出修复方向与隔离命令。
+- **`--quarantine <包>` / `--unquarantine <包>`**：把 bundle 移出启动列表（**先写 `package.json.bak.<ts>`**，只改列表、不动包文件，可撤销）。
+- **`--safe-add <包>`**：安装 → 立即验证 → 通过则写"已知良好"快照；失败自动隔离；隔离不足则**整体回滚**到安装前 manifest。
+- **`--pre-upgrade` / `--post-upgrade`**：升级前记基线（含核心版本），升级后自动对比 + 复检（`--auto-quarantine` 可一步隔离）。
+
+### Changed — ⚠️ 行为变更
+
+- **运行时检查默认跳过"正在写入的活跃会话"**：原先扫"最新会话"通常就是当前会话，会把操作者自己的操作报成安全发现。现取 mtime 早于活跃窗口的最新会话；窗口用 `DSH_DOCTOR_LIVE_WINDOW_MS` 调整（默认 120000，设 `0` 关闭保护）。`--session` 显式指定始终尊重。
+- **`--json` 每条检查新增 `status` 字段**（`pass`/`warn`/`fail`/`skip`，与 `--envelope` 同一词汇表）。纯新增，但消费者此前自行推导的状态应与之一致。
+- **P21 按 error 定级** → 某些环境会**新出现 exit 2**；P20 按 warn（判据较粗，不阻断）。
+- **P19 的版本判定按外部参考实现对齐**（#6683）：`>=0.1.0-rc.5 <0.2.0` 面对 `0.1.5-rc.2` 由"未知"变为**兼容**；纯 release 区间面对数值满足的预发布版本记**未知**。此前按这一条报出的结论会消失。
+- **E3 的支持范围可溯源**：默认标注"内置常量（出处：仓库根 package.json engines.node，核对日期）"；设置 `DSH_DOCTOR_HARNESS_ROOT` 时**真读**该检出。
+- `--quarantine` / `--unquarantine` 默认输出人读形态（`--json` 时保留机器形态）。
+
+### Fixed
+
+- **P3：ESM-only 包被误判为不可解析**（#1719 社区指出的 `require.resolve` 陷阱，实测命中我们）——改为存在性判据（跟随软链接、作用域名两段、排除 `cordis:`/相对路径）。
+- **E4：无安装树可查时 skip 而非 fail**——原先在合成 HOME/干净容器里报"未找到 node-pty"，连带 E2/E5/envelope 三个用例红；套件由 3 红转全绿。
+- **E7 / E13：无 DSH 环境时 skip**，探针判断"被告知的环境"而非进程全局 HOME。
+- **S13 覆盖 harness 精确判据**：从"首行是不是头"升级为"第一个 zstd 帧恰好一行"；改用与 harness 相同的解压器。
+- **S11 不再把首行非会话头的日志报成"健康"**（#6651 类的假阴性）。
+- **S14 改判迁移后视图**（#6686）：初版只看磁盘行，会漏掉迁移过程中产生的形态。
+- **P20/P21 两轮误报治理**：注释（`//#region styles`）与字符串（`"deepseek-harness"`）曾被当成符号引用——真实 profile 上 9 处命中全是假的；现要求符号处于代码位置且未被本地声明。
+- **E3 出处引用两次更正**：先写"root package.json engines"、后改成"不是来自 manifest"，两次都不准——准确说法是"范围确实声明在仓库根的**私有** workspace（`@deepseek-ai/dsh-root`）上，没有任何发布物继承它"。
+- `--boot-check` 会执行插件顶层代码（这正是"启动"的语义），故为显式开关；相关说明已写入 README。
+
+### Infra
+
+- **CI 覆盖 ubuntu + windows × Node 22/24**。加入 Windows 后立即抓出 `dsh-security` SP14 的真实平台缺陷（路径分隔符），并暴露出 7 处测试的平台假设。
+- README 新增「dsh 起不来怎么办（不依赖其它工具）」与 `--safe-add`／漂移对比两节。
+
+---
+
+## [0.4.6] 及更早
+
+早期版本请见 git 历史与 `docs/`。要点：`dsh-doctor/v1` 信封与 catalog 检查、S11/S12 全会话扫描与迁移拒载预检、P11–P17 系列、Layer C 观察者。
