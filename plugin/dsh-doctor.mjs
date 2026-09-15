@@ -690,6 +690,110 @@ function checkProfile(name) {
     }
   }
 
+  // P20 / P21：第三方插件把整棵插件树拖垮的两种**静态可判**形态（社区 #6693 实测）
+  // 报告者在 host 侧 `apply()` 里连续撞了两个独立致命错、client 侧撞了两个静默白屏错；
+  // 其核心抱怨是"唯一的诊断入口被故障本身摧毁"。这两条都不需要执行插件代码即可判定。
+  {
+    const pkgDirs19 = listProfilePackages(dir);
+    // 收集 client 产物（三种真实布局，与 dsh-security SP7 的收集口径一致）
+    const clientFiles = [];
+    const hostFiles = [];
+    const MAX_PER_PKG = 8;
+    for (const { dir: pkgDir } of pkgDirs19) {
+      const push = (arr, f) => { if (arr.length < MAX_PER_PKG && existsSync(f) && /\.(js|mjs|cjs)$/.test(f)) arr.push(f); };
+      const clientDir = join(pkgDir, 'client');
+      if (existsSync(clientDir)) {
+        try { for (const e of readdirSync(clientDir, { withFileTypes: true })) if (e.isFile()) push(clientFiles, join(clientDir, e.name)); } catch { /* 不可读 */ }
+      }
+      push(clientFiles, join(pkgDir, 'lib', 'client.js'));
+      push(clientFiles, join(pkgDir, 'client.js'));
+      let mf = null;
+      try { mf = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')); } catch { /* 跳过 */ }
+      const mainRel = typeof mf?.main === 'string' ? mf.main : (typeof mf?.exports === 'string' ? mf.exports : null);
+      if (mainRel) push(hostFiles, join(pkgDir, mainRel));
+      push(hostFiles, join(pkgDir, 'lib', 'index.js'));
+      push(hostFiles, join(pkgDir, 'index.js'));
+    }
+
+    // P20：client 产物必须是 `__ModuleLoader__.load({ id, factory })` 的 CJS 工厂。
+    // 写成裸 ESM（顶层 export/import）会在浏览器抛 `Unexpected token 'export'` 而**服务端零痕迹**——
+    // 注意：`node --check` 抓不到它，因为那是**合法 ESM 语法**（dsh-security SP7 用的是 --check）。
+    const p20 = [];
+    let p20scanned = 0;
+    for (const f of clientFiles) {
+      let text; try { text = readFileSync(f, 'utf8'); } catch { continue; }
+      p20scanned++;
+      const hasFactory = /__ModuleLoader__\s*\.\s*load\s*\(/.test(text);
+      const topLevelEsm = /^\s*(export\s|import\s)/m.test(text);
+      if (hasFactory) continue;
+      if (topLevelEsm) p20.push(`${f.split('/node_modules/')[1] || f}（未见 __ModuleLoader__.load，且有顶层 export/import）`);
+    }
+    if (!p20scanned) reportSkip('profile', 'P20', '未发现 client 产物，跳过加载格式检查');
+    else if (p20.length) {
+      report('profile', 'P20', false,
+        `client 产物不是 CJS 工厂（${p20.length}/${p20scanned} 个）：\n  ${p20.slice(0, 5).join('\n  ')}\n`
+        + `  —— 浏览器会抛 \`Uncaught SyntaxError: Unexpected token 'export'\`，**服务端日志里出现 0 次**：`
+        + `systemd 健康、端口在听、页面永远空白（#6693 实测：整份 journal 里该错误计数为 0）`,
+        '把 client 半边改成 `__ModuleLoader__.load({ id, factory })` 的 CJS 工厂形态（参照 dsh-better-sidebar / dsh-dream-skin）');
+    } else {
+      report('profile', 'P20', true, `client 产物均为 CJS 工厂形态（${p20scanned} 个）`);
+    }
+
+    // P21：**沙箱专属符号在普通插件里不存在**（host 与 client 两侧一律如此，同一根因两个面）
+    //   host 侧：裸 `harness` → ReferenceError: harness is not defined（#6693 规则 2，出现 55 次）
+    //   client 侧：`styles` / `ctx.get('host')` 等同样拿不到（#6693 规则 4）
+    // 判据保守：文件里**完全没有** `typeof <symbol>` 守卫才报（有守卫则只提示——词法上无法证明守卫顺序，
+    // 而报告者特别指出 `harness.handle && …` 这种写法挡不住：裸标识符在 `&&` 短路之前就被解析）。
+    const p21 = [];
+    const notes21 = [];
+    // 匹配前的净化（两轮实测教训，都是真实 profile 上的误报）：
+    //   1) `//#region styles` 这类**注释**区域标记会被当成裸引用（6 处全是它）；
+    //   2) `"deepseek-harness"` / `/api/harness/connector/stream` 这类**字符串**同理（3 处全是它）。
+    // 故：剥注释 + 剥字符串字面量（近似，不处理转义/嵌套模板）+ 要求符号处于**代码位置**
+    // （后跟 `.` / `[` / `(` —— 真正使用一个全局必然如此）+ 若文件本地声明了同名变量则不算。
+    const stripAll = (t) => t
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
+      .replace(/'(?:[^'\\\n]|\\.)*'/g, ' ')
+      .replace(/"(?:[^"\\\n]|\\.)*"/g, ' ')
+      .replace(/`(?:[^`\\]|\\.)*`/g, ' ');
+    const scan = (files, symbols, side) => {
+      for (const f of files) {
+        let text; try { text = stripAll(readFileSync(f, 'utf8')); } catch { continue; }
+        const rel = f.split('/node_modules/')[1] || f;
+        for (const sym of symbols) {
+          const useRe = new RegExp(`(^|[^\\w.$])\\b${sym}\\b\\s*[.[(]`, 'm');
+          if (!useRe.test(text)) continue;
+          const declared = new RegExp(`\\b(?:const|let|var|function|class)\\s+${sym}\\b|[{,]\\s*${sym}\\s*[,}]`).test(text);
+          if (declared) continue; // 本地声明同名变量 → 不是沙箱符号
+          const guarded = new RegExp(`typeof\\s+${sym}\\b`).test(text);
+          if (guarded) { notes21.push(`${rel}: 引用 ${sym}（同文件有 typeof 守卫，但词法上无法证明守卫顺序）`); continue; }
+          p21.push(`${rel}（${side}）: 裸引用沙箱专属符号 \`${sym}\``);
+        }
+      }
+    };
+    scan(hostFiles, ['harness'], 'host');
+    scan(clientFiles, ['harness', 'styles'], 'client');
+    // client 侧还常通过 ctx.get('host'/'styles') 取沙箱服务
+    for (const f of clientFiles) {
+      let text; try { text = stripAll(readFileSync(f, 'utf8')); } catch { continue; }
+      const m = /ctx\.get\(\s*['"](host|styles)['"]/.exec(text);
+      if (m) p21.push(`${f.split('/node_modules/')[1] || f}（client）: ctx.get('${m[1]}') —— 沙箱宿主专属服务，常驻 bundle 里拿不到`);
+    }
+    if (p21.length) {
+      report('profile', 'P21', false,
+        `插件的 host/client 半边引用了**沙箱专属符号**（${p21.length} 处）——这类符号在从 node_modules 加载的普通插件里一律不存在：\n  `
+        + p21.slice(0, 6).join('\n  ')
+        + (p21.length > 6 ? `\n  …另有 ${p21.length - 6} 处` : '')
+        + `\n  host 侧表现为 \`ReferenceError: harness is not defined\`（在 \`apply()\` 内同步抛出 → cordis 中断装载链 → Web UI 整体不可用）`,
+        '移除这些引用或用宿主提供的等价能力；若确需守卫，必须写成 `typeof X !== \"undefined\"` **放在最前**——`X.foo && …` 挡不住（裸标识符先被解析）');
+    } else if (notes21.length) {
+      report('profile', 'P21', true, `未见裸引用沙箱专属符号（${notes21.length} 处有 typeof 守卫，未计入）`);
+    } else {
+      report('profile', 'P21', true, `扫描 ${hostFiles.length} 个 host 入口与 ${clientFiles.length} 个 client 产物，未见沙箱专属符号引用`);
+    }
+  }
+
   // P19：插件声明的 host peer 范围 vs 实际提供的 host 版本（社区 #6678 @ciceroyang 提案）
   // 这是"升级后起不来"的常见原因之一：插件声明只支持某段 core 版本，而实际装的核心已在区间外，
   // 安装时却没有任何警告（#6680 的机制：profile 的 pnpm 配置 autoInstallPeers:false 且 host 由
@@ -698,24 +802,7 @@ function checkProfile(name) {
     const findings19 = [];
     let unknown19 = 0;
     let checked19 = 0;
-    // 内联枚举（含 scoped；isDirectory() || isSymbolicLink() —— pnpm 与 file:/dev 安装都是软链接，
-    // 只看 isDirectory 会漏掉它们，这正是社区提醒的坑）
-    const pkgDirs19 = [];
-    try {
-      for (const e of readdirSync(join(dir, 'node_modules'), { withFileTypes: true })) {
-        if (!e.name || e.name.startsWith('.') || e.name === '.bin') continue;
-        if (e.name.startsWith('@')) {
-          try {
-            for (const sub of readdirSync(join(dir, 'node_modules', e.name), { withFileTypes: true })) {
-              if (!sub.name || sub.name.startsWith('.')) continue;
-              if (sub.isDirectory() || sub.isSymbolicLink()) pkgDirs19.push({ name: `${e.name}/${sub.name}`, dir: join(dir, 'node_modules', e.name, sub.name) });
-            }
-          } catch { /* 跳过不可读 scope */ }
-        } else if (e.isDirectory() || e.isSymbolicLink()) {
-          pkgDirs19.push({ name: e.name, dir: join(dir, 'node_modules', e.name) });
-        }
-      }
-    } catch { /* 无 node_modules */ }
+    const pkgDirs19 = listProfilePackages(dir);
     for (const { name: pkgName, dir: pkgDir } of pkgDirs19) {
       let mf;
       try { mf = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')); } catch { continue; }
@@ -1875,7 +1962,10 @@ catalogSeverity.set('P15', 'error');
 catalogSeverity.set('P16', 'warn');
 catalogSeverity.set('P17', 'warn');
 catalogSeverity.set('P18', 'warn');
-catalogSeverity.set('P19', 'warn'); // #6678：声明不匹配是风险信号而非确定失败，提示但不阻断 // #6667：条件性风险（需游离本地模块才触发），提示但不翻退出码
+catalogSeverity.set('P19', 'warn');
+catalogSeverity.set('P20', 'warn'); // #6693：client 格式问题在浏览器才炸，服务端零痕迹——高价值提示但不阻断 CI
+// P21 不设 warn：它是在 apply() 内**同步抛出**、直接中断整棵装载链的致命类（#6693 实测 195+55 次），
+// 且我们两轮去误报（注释/字符串）后在真实 profile 的 8 个 host 入口 + 8 个 client 产物上零误报，故按 error 处理。 // #6678：声明不匹配是风险信号而非确定失败，提示但不阻断 // #6667：条件性风险（需游离本地模块才触发），提示但不翻退出码
 
 function bundledCatalog() {
   const p = new URL('./checks.json', import.meta.url);
@@ -2331,6 +2421,28 @@ function resolveHostVersion(profileDir, name) {
  *   --unquarantine <包名> 撤销隔离
  * 注意：--boot-check 会**执行插件顶层代码**（这正是"启动"本身的语义），故为显式开关、非默认行为。
  */
+
+/** 枚举 profile node_modules 里的包（含 scoped）。**跟随软链接**——pnpm 与 file:/dev 安装都是软链接，
+ *  只看 isDirectory() 会漏掉它们（社区 #6678 提醒的坑）。P19/P20/P21 共用。 */
+function listProfilePackages(profileDir) {
+  const out = [];
+  try {
+    for (const e of readdirSync(join(profileDir, 'node_modules'), { withFileTypes: true })) {
+      if (!e.name || e.name.startsWith('.') || e.name === '.bin') continue;
+      if (e.name.startsWith('@')) {
+        try {
+          for (const sub of readdirSync(join(profileDir, 'node_modules', e.name), { withFileTypes: true })) {
+            if (!sub.name || sub.name.startsWith('.')) continue;
+            if (sub.isDirectory() || sub.isSymbolicLink()) out.push({ name: `${e.name}/${sub.name}`, dir: join(profileDir, 'node_modules', e.name, sub.name) });
+          }
+        } catch { /* 跳过不可读 scope */ }
+      } else if (e.isDirectory() || e.isSymbolicLink()) {
+        out.push({ name: e.name, dir: join(profileDir, 'node_modules', e.name) });
+      }
+    }
+  } catch { /* 无 node_modules */ }
+  return out;
+}
 
 /** 解析 profile 的启动列表与各 bundle 的 entry（含用户 patch 的 insert），跳过 disabled 与已隔离项。 */
 function collectBootEntries(profileDir) {

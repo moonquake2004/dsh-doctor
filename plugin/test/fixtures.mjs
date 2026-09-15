@@ -1667,3 +1667,73 @@ test('E13：dsh 在 PATH 但 --version 零输出 → 失败（#6341 签名）', 
   assert.match(e13.detail, /import\.meta\.main|6341/);
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- P20/P21：把整棵树拖垮的两种静态可判形态（社区 #6693） ---------- */
+
+function contractFixture({ host = '', client = '', clientDir = true } = {}) {
+  const home = tempHome();
+  const p = join(home, 'profiles', 'web');
+  mkdirSync(join(p, 'node_modules', 'plug', 'lib'), { recursive: true });
+  if (clientDir) mkdirSync(join(p, 'node_modules', 'plug', 'client'), { recursive: true });
+  writeFileSync(join(p, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', dsh: { profile: { bundles: ['plug'] } } }));
+  writeFileSync(join(p, 'node_modules', 'plug', 'package.json'), JSON.stringify({ name: 'plug', version: '1.0.0', main: 'lib/index.js', dsh: { bundle: { patch: './cordis.patch.yml' } } }));
+  writeFileSync(join(p, 'node_modules', 'plug', 'cordis.patch.yml'), '- insert:\n    - id: x\n      name: plug\n');
+  writeFileSync(join(p, 'node_modules', 'plug', 'lib', 'index.js'), host);
+  // 默认带一个合规的 CJS 工厂 client 产物，避免 P20 在无关用例里报错
+  if (clientDir) writeFileSync(join(p, 'node_modules', 'plug', 'client', 'index.js'), client || 'window.__ModuleLoader__.load({ id: "plug", factory: () => ({}) });\n');
+  return home;
+}
+const checkOf = (home, id) => runCli({ home, args: ['--profile', 'web'] }).raw.checks.find((c) => c.id === id);
+
+test('P20：client 产物写成裸 ESM（顶层 export）→ 失败（#6693 规则 3）', () => {
+  const home = contractFixture({ client: 'export default function () { return 1; }\n' });
+  const c = checkOf(home, 'P20');
+  assert.equal(c.status, 'warn', '定级 warn：判据较粗（无工厂 + 顶层 ESM），属静默白屏、不阻断启动');
+  assert.match(c.detail, /Unexpected token|服务端/, '应点明"服务端零痕迹"这一信息不对称');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P20：合规的 CJS 工厂产物 → 通过', () => {
+  const home = contractFixture({});
+  const c = checkOf(home, 'P20');
+  assert.notEqual(c.status, 'fail');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P21：host 侧裸引用 harness → 失败（#6693 规则 2，apply() 内同步抛出会中断装载链）', () => {
+  const home = contractFixture({ host: 'export function apply(ctx) { return harness.handle; }\n' });
+  const c = checkOf(home, 'P21');
+  assert.equal(c.status, 'fail');
+  assert.match(c.detail, /harness/);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P21：client 侧裸引用 styles → 失败（#6693 规则 4）', () => {
+  const home = contractFixture({ client: 'export default () => styles.apply();\n' });
+  const c = checkOf(home, 'P21');
+  assert.equal(c.status, 'fail');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P21（误报回归）: 注释里的 `//#region styles` 不得算作引用', () => {
+  // 真实 profile 上 6 处命中全是这种打包器区域标记
+  const home = contractFixture({ host: '//#region styles\nexport function apply(ctx) { return 1; }\n' });
+  const c = checkOf(home, 'P21');
+  assert.notEqual(c.status, 'fail', '注释不是代码');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P21（误报回归）: 字符串里的 "deepseek-harness" / "/api/harness/..." 不得算作引用', () => {
+  // 真实 profile 上另外 3 处命中全在字符串字面量里
+  const home = contractFixture({ host: 'const a = "deepseek-harness";\nconst b = "/api/harness/connector/stream";\nexport function apply(ctx) { return 1; }\n' });
+  const c = checkOf(home, 'P21');
+  assert.notEqual(c.status, 'fail', '字符串不是引用');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P21：本地声明同名变量 → 不算沙箱符号', () => {
+  const home = contractFixture({ host: 'const styles = { a: 1 };\nexport function apply(ctx) { return styles.a; }\n' });
+  const c = checkOf(home, 'P21');
+  assert.notEqual(c.status, 'fail', '本地定义的同名对象是合法的');
+  rmSync(home, { recursive: true, force: true });
+});
