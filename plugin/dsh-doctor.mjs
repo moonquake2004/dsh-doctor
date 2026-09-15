@@ -639,18 +639,34 @@ function checkProfile(name) {
         findings19.push(`${pkgName} 声明 ${hostName} ${range}，但实际提供 ${host.version}`);
       }
     }
+    // 规则 1（作者侧）：未声明 host 范围 = **无信息**，不得当作兼容。这里只做计数提示，
+    // 不生成发现——声明与否是作者的选择，消费者该做的是别把它读成"已核对"。
+    let undeclared19 = 0;
+    for (const { dir: pkgDir } of pkgDirs19) {
+      try {
+        const mf = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'));
+        const isBundle = Boolean(mf.dsh && (mf.dsh.bundle || mf.dsh.profile));
+        const hasHostPeer = Object.keys(mf.peerDependencies ?? {}).some((k) => k.startsWith('@deepseek-ai/'));
+        if (isBundle && !hasHostPeer) undeclared19++;
+      } catch { /* 忽略不可读 */ }
+    }
+    const undeclaredNote = undeclared19
+      ? `\n  （另有 ${undeclared19} 个 bundle 未声明任何 @deepseek-ai/* host 范围——按规则记为"无信息"，不代表兼容）`
+      : '';
     if (findings19.length) {
       report('profile', 'P19', false,
         `插件声明的 host peer 范围不接受实际安装的核心版本（${findings19.length} 处，共核对 ${checked19} 条 peer 声明）：\n  `
         + findings19.slice(0, 8).join('\n  ')
-        + (unknown19 ? `\n  （另有 ${unknown19} 条无法判定：区间为 * / 未声明 / host 解析不到，或纯 release 区间面对预发布版本——按"未知"处理，不计为不兼容）` : ''),
+        + undeclaredNote
+        + (unknown19 ? `\n  （另有 ${unknown19} 条无法判定：区间为 * / 不可解析 / host 解析不到，或纯 release 组面对数值满足的预发布版本——按"未知"处理，不计为不兼容）` : ''),
         '按提示升级到该插件声明支持的版本（或降级核心）。安装时不会有警告，所以升级 dsh 前先用本检查看一眼最省事');
     } else if (checked19 === 0) {
       reportSkip('profile', 'P19', '未见任何 @deepseek-ai/* 的 peer 声明，跳过 host 范围核对');
     } else {
       report('profile', 'P19', true,
         `核对 ${checked19} 条 host peer 声明，均可接受当前核心版本`
-        + (unknown19 ? `（${unknown19} 条无法判定，按未知处理未计入）` : ''));
+        + (unknown19 ? `（${unknown19} 条无法判定，按未知处理未计入）` : '')
+        + undeclaredNote.replace(/\n\s*/g, ' '));
     }
   }
 
