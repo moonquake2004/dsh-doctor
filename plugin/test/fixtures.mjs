@@ -1383,10 +1383,12 @@ function bootFixture() {
   writeFileSync(join(p, 'package.json'), JSON.stringify({
     name: 'dsh-profile-web', dsh: { profile: { bundles: ['broken-plugin', 'good-plugin'] } },
   }));
-  writeFileSync(join(p, 'node_modules', 'broken-plugin', 'package.json'), JSON.stringify({ name: 'broken-plugin', version: '1.0.0', type: 'module', main: 'index.js' }));
+  // 必须声明 dsh.bundle：0.1.6-alpha.1 起 loader 严格要求（#6788），否则会先命中 bundle 级前置条件，
+  // 测不到这里真正要测的 import 失败路径
+  writeFileSync(join(p, 'node_modules', 'broken-plugin', 'package.json'), JSON.stringify({ name: 'broken-plugin', version: '1.0.0', type: 'module', main: 'index.js', dsh: { bundle: { patch: './cordis.patch.yml' } } }));
   writeFileSync(join(p, 'node_modules', 'broken-plugin', 'index.js'), 'import { nope } from "@deepseek-ai/dsh-settings"; export default {};\n');
   writeFileSync(join(p, 'node_modules', 'broken-plugin', 'cordis.patch.yml'), '- insert:\n    - id: broken-plugin\n      name: broken-plugin\n');
-  writeFileSync(join(p, 'node_modules', 'good-plugin', 'package.json'), JSON.stringify({ name: 'good-plugin', version: '1.0.0', type: 'module', main: 'index.js' }));
+  writeFileSync(join(p, 'node_modules', 'good-plugin', 'package.json'), JSON.stringify({ name: 'good-plugin', version: '1.0.0', type: 'module', main: 'index.js', dsh: { bundle: { patch: './cordis.patch.yml' } } }));
   writeFileSync(join(p, 'node_modules', 'good-plugin', 'index.js'), 'export default {};\n');
   writeFileSync(join(p, 'node_modules', 'good-plugin', 'cordis.patch.yml'), '- insert:\n    - id: good-plugin\n      name: good-plugin\n');
   writeFileSync(join(p, 'node_modules', '@deepseek-ai', 'dsh-settings', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-settings', version: '0.1.5-rc.2', type: 'module', exports: { '.': './index.js' } }));
@@ -1784,5 +1786,21 @@ test('P22：无 BOM → 通过', () => {
   profileFixture(home, 'web', { manifest: { name: 'dsh-profile-web', version: '0.0.0', dsh: { profile: { bundles: [] } } }, patch: '' });
   const { raw } = runCli({ home, args: ['--profile', 'web'] });
   assert.notEqual(raw.checks.find((c) => c.id === 'P22').status, 'fail');
+  rmSync(home, { recursive: true, force: true });
+});
+
+/* ---------- #6788：bundle 缺 dsh.bundle 会让 boot-check 假绿灯（我们自己的漏判） ---------- */
+
+test('--boot-check：列出的 bundle 缺 dsh.bundle → 失败（loader 会拒绝整个 profile，此前报"全部可导入"）', () => {
+  const home = tempHome();
+  const p = join(home, 'profiles', 'web');
+  mkdirSync(join(p, 'node_modules', 'computer-use-like'), { recursive: true });
+  writeFileSync(join(p, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', version: '0.0.0', dsh: { profile: { bundles: ['computer-use-like'] } } }));
+  // 有 main、能 import，但**没有 dsh.bundle** —— 正是 #6788 里那两个包的形态
+  writeFileSync(join(p, 'node_modules', 'computer-use-like', 'package.json'), JSON.stringify({ name: 'computer-use-like', version: '0.1.6-alpha.1', main: 'index.js' }));
+  writeFileSync(join(p, 'node_modules', 'computer-use-like', 'index.js'), 'export default {};\n');
+  const r = spawnSync(process.execPath, [CLI, '--boot-check', '--profile', 'web'], { encoding: 'utf8', env: { ...process.env, DSH_HOME: home } });
+  assert.equal(r.status, 2, '这类失败没有任何 entry 可探，只做 import 会给出假绿灯——必须由 bundle 级前置条件判出');
+  assert.match(r.stdout, /missing-bundle-manifest|dsh\.bundle/);
   rmSync(home, { recursive: true, force: true });
 });

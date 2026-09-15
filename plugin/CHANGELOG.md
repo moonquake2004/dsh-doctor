@@ -16,6 +16,24 @@
 
 ---
 
+## [0.6.1] — 2026-09-15
+
+### Fixed — `--boot-check` 在"bundle 缺 `dsh.bundle`"这一类上给假绿灯（社区 #6788）
+
+#6788 报告：0.1.6-alpha.1 起 loader **严格要求** `dsh.profile.bundles` 里每个包声明 `dsh.bundle.patch`，
+而 `@deepseek-ai/dsh-computer-use` 等包发布时**漏了这个字段** → 照文档 `dsh plugin add` 之后 profile **立刻起不来**。
+
+这一类的特点是：**没有任何 entry 可探**（包没有 patch，自然没有 insert 条目），于是只做 import 的
+`--boot-check` 会输出"✓ 所有可探测 entry 均可导入"——而用户恰恰是按我们的建议先跑它的。**假绿灯出现在
+最该给出结论的时刻**，比不报更糟。
+
+现在 `--boot-check`（及其同步版，供 `--safe-add` 使用）在探测 entry 之前先判 **bundle 级前置条件**：
+列出的包若解析得到、却没有 `dsh.bundle.patch` → 直接判失败，给出 `missing-bundle-manifest`、
+修复方向与隔离命令。宿主核心包（`dsh-base`/`dsh-web-app`，由 CLI 提供）照旧跳过。
+
+（`P1` 早已覆盖同一类：`bundle 条目 X 存在但未声明 dsh.bundle`——本次修的是**我们最推荐的那条自救路径**
+没有覆盖它。）
+
 ## [0.6.0] — 2026-09-15
 
 ### Added

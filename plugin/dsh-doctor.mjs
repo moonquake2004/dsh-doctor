@@ -2492,6 +2492,30 @@ function listProfilePackages(profileDir) {
   return out;
 }
 
+
+/**
+ * 列出 `dsh.profile.bundles` 里**能解析到、但没有 `dsh.bundle`** 的包。
+ * 这类会让 loader 拒绝整个 profile（#6788/#1378），且**没有任何 entry 可探**——
+ * 所以必须由 bundle 级前置条件来判，否则装载模拟会给出假绿灯。
+ * 宿主核心包（如 @deepseek-ai/dsh-base / dsh-web-app）由 CLI 提供、不在 profile node_modules 里，跳过。
+ */
+function bundlesMissingManifest(profileDir) {
+  const out = [];
+  try {
+    const read = readJsonReportingBom(join(profileDir, 'package.json'));
+    const bundles = read.data?.dsh?.profile?.bundles ?? [];
+    for (const b of bundles) {
+      if (String(b).startsWith('@deepseek-ai/dsh-base') || String(b).startsWith('@deepseek-ai/dsh-web-app')) continue;
+      const mf = join(profileDir, 'node_modules', String(b), 'package.json');
+      if (!existsSync(mf)) continue; // 解析不到 → 由 P1 报（且可能是宿主提供的核心包）
+      const pkg = readJsonReportingBom(mf).data;
+      if (!pkg) continue;
+      if (!pkg.dsh?.bundle?.patch) out.push({ id: String(b), bundle: String(b) });
+    }
+  } catch { /* 读不了就不判 */ }
+  return out;
+}
+
 /** 解析 profile 的启动列表与各 bundle 的 entry（含用户 patch 的 insert），跳过 disabled 与已隔离项。 */
 function collectBootEntries(profileDir) {
   const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'));
@@ -2678,6 +2702,10 @@ function safeAdd(profileArg, pkg) {
 /** 同步版装载模拟（--safe-add 内部用；与 --boot-check 同一逻辑） */
 function runBootCheckSync(profileDir) {
   const out = [];
+  // **bundle 级前置条件**（社区 #6788）：loader 要求 `dsh.profile.bundles` 里每个包都声明
+  // `dsh.bundle.patch`，否则**整场启动硬失败**。这类失败**没有任何 entry 可探**，于是只做 import 的
+  // 探针会给出"全部可导入 ✓"的**假绿灯**——而用户是按我们的建议先跑 `--boot-check` 的，被误导的代价最大。
+  for (const miss of bundlesMissingManifest(profileDir)) out.push({ id: miss.id, bundle: miss.bundle, spec: '(bundle 清单)', status: 'failed', kind: 'missing-bundle-manifest', hint: '该包未声明 dsh.bundle（loader 会拒绝整个 profile）；升级/更换该包，或从 dsh.profile.bundles 移除', error: `bundle 条目 ${miss.bundle} 存在但未声明 dsh.bundle.patch（#1378/#6788）` });
   for (const e of collectBootEntries(profileDir)) {
     if (!e.name) continue;
     const spec = e.name;
@@ -2741,6 +2769,10 @@ async function runBootCheck(profileDir) {
   const entries = collectBootEntries(profileDir);
   const targets = entries.filter((e) => e.name);
   const results = [];
+  // 同 runBootCheckSync：bundle 级前置条件必须一并判，否则这一类会得到假绿灯（#6788）
+  for (const miss of bundlesMissingManifest(profileDir)) {
+    results.push({ id: miss.id, bundle: miss.bundle, spec: '(bundle 清单)', status: 'failed', kind: 'missing-bundle-manifest', hint: '该包未声明 dsh.bundle（loader 会拒绝整个 profile）；升级/更换该包，或从 dsh.profile.bundles 移除', error: `bundle 条目 ${miss.bundle} 存在但未声明 dsh.bundle.patch（#1378/#6788）` });
+  }
   for (const e of targets) {
     const spec = e.name;
     // 宿主内置与相对路径不做 import 探测（前者由宿主提供，后者依赖运行上下文）
