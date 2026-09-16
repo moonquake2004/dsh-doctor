@@ -238,6 +238,18 @@ function setCoverage(n, what) { coverageContext = typeof n === 'number' ? { n, w
 function coverageNow() { return coverageContext; }
 
 function report(section, id, ok, detail, fix, src, examined) {
+  // R6 接口律：参数放错位置必须**立刻抛**，而不是变成一条静默的错误判定。
+  // 来历：我曾在 fix 之后多插了两个参数，结果 'builtin' 落到了 examined 的位置（字符串）→
+  // 回退到上下文 0 → 一条本该 pass 的检查被静默降级。凭记忆拼参数是可以通过机制消灭的。
+  if (typeof examined !== 'number' && examined !== undefined) {
+    throw new Error(`report(${id}): examined 必须是 number 或 undefined，收到 ${typeof examined}（${JSON.stringify(examined)}）——检查参数位置`);
+  }
+  if (typeof src !== 'string' && src !== undefined) {
+    throw new Error(`report(${id}): src 必须是 string 或 undefined，收到 ${typeof src}（${JSON.stringify(src)}）——检查参数位置`);
+  }
+  if (typeof section !== 'string' || typeof id !== 'string' || typeof ok !== 'boolean' || typeof detail !== 'string') {
+    throw new Error(`report(): 前四个参数必须是 (section:string, id:string, ok:boolean, detail:string)`);
+  }
   const zeroCheck = typeof examined === 'number' ? examined : coverageNow()?.n;
   if (ok === true && zeroCheck === 0) {
     results.push({ section, id, ok: true, skip: true, coverage: 'none', detail: `${detail}（无可检查对象，未做任何比较）`, fix, src: src ?? 'builtin' });
@@ -302,6 +314,9 @@ function nodeInSupportedRange(v, range = NODE_RANGE_FALLBACK) {
 }
 function checkEnv() {
   if (!wants('env')) return;
+  // R3 覆盖律：环境段的每个探针各检查**一个**对象（某个二进制/版本/端口）。
+  // 单位不同的检查（如 E1 系列各自查一个可执行文件）如需别的数量应显式传入。
+  setCoverage(1, '环境对象');
   const find = (cmd) => { for (const w of process.platform === 'win32' ? ['where'] : ['which']) { const r = spawnSync(w, [cmd]); if (r.status === 0) { const p = String(r.stdout).split(/\r?\n/)[0].trim(); if (p) return p; } } return null; };
   for (const cmd of ['node', 'pnpm', 'zstd']) {
     const p = find(cmd);
@@ -721,7 +736,7 @@ function checkProfile(name) {
     if (!profManifest || !(profManifest.dsh && profManifest.dsh.profile)) {
       reportSkip('profile', 'P18', '未找到 profile manifest（无 dsh.profile），跳过 version 检查');
     } else if (typeof profManifest.version === 'string' && profManifest.version.length > 0) {
-      report('profile', 'P18', true, `profile manifest 声明了 version（${profManifest.version}），不触发 #6667`, undefined, 'builtin', 1);
+      report('profile', 'P18', true, `profile manifest 声明了 version（${profManifest.version}），不触发 #6667`, undefined, undefined, 1);
     } else {
       report('profile', 'P18', false,
         `profile manifest 有 name（${profManifest.name}）但**没有 version**——与 #6667 的条件一致：package inventory 在解析**游离本地模块**时会把该 manifest 当包处理并抛 "must declare non-empty name and version"（dsh-plugin-package-inventory-deepseek:34；其 allowAnonymous 只容忍缺 name），表现为 DeepSeek 请求 REQUEST_EXTENSION 失败`,
@@ -1306,9 +1321,9 @@ function packageNamedExports(pkgDir) {
       + `**启动硬失败**；而 GBK 控制台会把 BOM 三个字节渲染成乱码，报错里看不出是编码问题`,
       '删除首字符（BOM/U+FEFF）后保存；PowerShell 5.1 的 `Set-Content -Encoding UTF8` **默认会写 BOM**，'
       + '改用 [IO.File]::WriteAllText($p, (Get-Content $p -Raw), (New-Object Text.UTF8Encoding $false))；'
-      + '或 sed -i "" "1s/^\xEF\xBB\xBF//" <file>', undefined, 'builtin', bomTargets.length);
+      + '或 sed -i "" "1s/^\xEF\xBB\xBF//" <file>', undefined, bomTargets.length);
   } else {
-    report('profile', 'P15', true, `关键文件无 BOM 头（检查 ${bomTargets.length} 个）`, undefined, 'builtin', bomTargets.length);
+    report('profile', 'P15', true, `关键文件无 BOM 头（检查 ${bomTargets.length} 个）`, undefined, undefined, bomTargets.length);
   }
 
   /* P16：插件命名导入的导出缺失检测（#5864：一个缺失导出 → 整棵插件树 boot 崩溃循环、

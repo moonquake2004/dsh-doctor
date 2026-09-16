@@ -1852,3 +1852,23 @@ test('B（故障隔离回归）：manifest 无法解析时，其余检查仍须�
   assert.ok(ids.length > 1, `早期失败不得掐断整段检查，实际只剩: ${ids.join(', ')}`);
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- R5/R1：检查清单必须与代码一致（加检查前先查清单，是机制不是自觉） ---------- */
+
+test('R5：docs/check-inventory.md 与代码一致（新增检查必须同步清单 → 一次可见的 diff）', () => {
+  const gen = spawnSync(process.execPath, [join(process.cwd(), 'scripts', 'gen-check-inventory.mjs')], { encoding: 'utf8' });
+  assert.equal(gen.status, 0, `生成器失败: ${gen.stderr}`);
+  const onDisk = readFileSync(join(process.cwd(), 'docs', 'check-inventory.md'), 'utf8');
+  assert.equal(gen.stdout, onDisk, '清单与代码不一致：跑 `node scripts/gen-check-inventory.mjs > docs/check-inventory.md` 并确认新增/改动的检查（这正是"查清单"那一步）');
+});
+
+test('R3（收紧）：空环境下，未报告覆盖量的 pass 必须为 0', () => {
+  const home = tempHome();
+  const p = join(home, 'profiles', 'web');
+  mkdirSync(p, { recursive: true });
+  writeFileSync(join(p, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', version: '0.0.0', dsh: { profile: { bundles: [] } } }));
+  const { raw } = runCli({ home, args: ['--profile', 'web'] });
+  const un = raw.checks.filter((c) => c.ok && !c.skip && c.coverage === 'unreported');
+  assert.equal(un.length, 0, `未报告覆盖量的 pass 必须为 0（R3 硬不变量），实为: ${un.map((c) => c.id).join(', ')}`);
+  rmSync(home, { recursive: true, force: true });
+});
