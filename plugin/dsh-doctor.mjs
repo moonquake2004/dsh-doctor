@@ -235,12 +235,24 @@ function hasDshEnvironment(home = HOME) {
  */
 let coverageContext = null; // 当前检查段"检查了多少同类对象"的默认值（由 setCoverage 设置）
 function setCoverage(n, what) { coverageContext = typeof n === 'number' ? { n, what } : null; }
+/** 段边界重置：覆盖量上下文**绝不允许跨段继承**——否则会伪造出一个看起来可信的数字。
+ *  2026-09 回归审计实测：会话段的 S6/S14 曾号称"检查了 16 个 bundle 条目"，而它们实际展开的是 11352 个事件。 */
+function resetCoverage() { coverageContext = null; }
+/** 求值阶段（env/profile/session/catalog）。覆盖量的**单位属于阶段**，不属于展示用的 section——
+ *  目录提供的检查会带 section:'env'/'profile'，但它们在 catalog 阶段求值（回归审计实测）。 */
+let currentPhase = null;
+function setPhase(p) { currentPhase = p; }
 function coverageNow() { return coverageContext; }
 
 function report(section, id, ok, detail, fix, src, examined) {
   // R6 接口律：参数放错位置必须**立刻抛**，而不是变成一条静默的错误判定。
   // 来历：我曾在 fix 之后多插了两个参数，结果 'builtin' 落到了 examined 的位置（字符串）→
   // 回退到上下文 0 → 一条本该 pass 的检查被静默降级。凭记忆拼参数是可以通过机制消灭的。
+  // R6 扩展（2026-09 回归审计）：**参数个数**守卫。JS 会静默忽略多余参数，而我只校验了类型——
+  // 于是"多传一个 undefined"这类错误（我给 S11 补覆盖量时就犯了）能一路走到运行时。
+  if (arguments.length > 7) {
+    throw new Error(`report(${id}): 最多 7 个参数 (section, id, ok, detail, fix, src, examined)，收到 ${arguments.length} 个 —— 检查参数位置`);
+  }
   if (typeof examined !== 'number' && examined !== undefined) {
     throw new Error(`report(${id}): examined 必须是 number 或 undefined，收到 ${typeof examined}（${JSON.stringify(examined)}）——检查参数位置`);
   }
@@ -255,7 +267,7 @@ function report(section, id, ok, detail, fix, src, examined) {
     results.push({ section, id, ok: true, skip: true, coverage: 'none', detail: `${detail}（无可检查对象，未做任何比较）`, fix, src: src ?? 'builtin' });
     return;
   }
-  const rec = { section, id, ok, detail, fix, src: src ?? 'builtin' };
+  const rec = { section, id, ok, detail, fix, src: src ?? 'builtin', phase: currentPhase };
   if (ok === true) {
     const ctx = coverageNow();
     const n = typeof examined === 'number' ? examined : ctx?.n;
@@ -378,6 +390,8 @@ function nodeInSupportedRange(v, range = NODE_RANGE_FALLBACK) {
   return peerRangeState(String(v).replace(/^v/, ''), range).state === 'satisfied';
 }
 function checkEnv() {
+  setPhase('env');
+  resetCoverage();
   if (!wants('env')) return;
   // R3 覆盖律：环境段的每个探针各检查**一个**对象（某个二进制/版本/端口）。
   // 单位不同的检查（如 E1 系列各自查一个可执行文件）如需别的数量应显式传入。
@@ -667,6 +681,8 @@ function checkProfile(name) {
   }
   const bundles = manifest.dsh?.profile?.bundles ?? [];
   const deps = manifest.dependencies ?? {};
+  setPhase('profile');
+  resetCoverage();               // 段边界：不得继承上一段的覆盖量
   setCoverage(bundles.length, 'bundle 条目');
 
   const installAnchor = (() => {
@@ -1565,6 +1581,9 @@ function latestSessionLog(root = join(HOME, 'sessions')) {
 
 /* ================= session ================= */
 function checkSession(targetPath) {
+  setPhase('session');
+  resetCoverage();
+  setCoverage(1, '会话日志');   // 单位是这一份会话日志；事件数由各检查在 detail 里给出
   if (!wants('session')) return;
   const target = targetPath || latestSessionLog();
   if (!target || !existsSync(target)) { report('session', 'S0', true, '无会话日志，跳过单会话检查（可用 --session <path> 指定）', undefined); return; }
@@ -2073,7 +2092,7 @@ function scanAllSessions() {
   const heapLimit = Number(process.env.DSH_DOCTOR_HEAP_MB || 1024);
   const totalRisk = estHeapMB > heapLimit;
   if (quars.length) {
-    report('session', 'S11', false, `全会话扫描：${corrupt.length} 个损坏会话（#1550：冷打开会拖垮服务器）: ${quars.join(' | ')}`, `隔离：把这些会话目录移出 ${join(HOME, 'sessions')}（如 mv 到备份目录）`);
+    report('session', 'S11', false, `全会话扫描：${corrupt.length} 个损坏会话（#1550：冷打开会拖垮服务器）: ${quars.join(' | ')}`, `隔离：把这些会话目录移出 ${join(HOME, 'sessions')}（如 mv 到备份目录）`, undefined, files.length);
   } else if (oversized.length || totalRisk || unstableReads.length) {
     const parts = [];
     // 间歇性读取失败：**不是文件损坏**（重试即成功、失败帧位置每次不同，见 #6739），
@@ -2085,9 +2104,9 @@ function scanAllSessions() {
     report('session', 'S11', true, `⚠ 全会话扫描：${parts.join('；')}（未损坏，可接受或归档）`,
       unstableReads.length
         ? '间歇性读取失败不是日志问题：先重试读取；持续出现则排查存储健康（SMART）、内存与磁盘驱动（#6739 的证据是失败帧位置每次不同）'
-        : '冷启动会明显变慢；必要时压缩/归档历史会话');
+        : '冷启动会明显变慢；必要时压缩/归档历史会话', undefined, files.length);
   } else {
-    report('session', 'S11', true, `全会话扫描：${clean.length} 个会话均健康（损坏 0 / 超大 0 / 估算物化堆 ${estHeapMB}MB）`, undefined);
+    report('session', 'S11', true, `全会话扫描：${clean.length} 个会话均健康（损坏 0 / 超大 0 / 估算物化堆 ${estHeapMB}MB）`, undefined, undefined, files.length);
   }
 }
 
@@ -2318,6 +2337,11 @@ export function runCatalogCheck(check, ctx) {
 
 /** 逐条执行目录检查，汇入统一 results 管线（src='catalog'）。尊重 --profile/--env/--session 收窄。 */
 function checkCatalog(ctx, catalog) {
+  setPhase('catalog');
+  // 段边界：目录检查在会话段之后求值，若不清空上下文会**继承会话的单位**——
+  // 回归审计实测到 `P6-patch-name-space`(profile) 声称"检查了会话日志"。目录检查各查一个目标，单位独立。
+  resetCoverage();
+  setCoverage(1, '目录检查项');
   const platform = process.platform;
   for (const check of catalog.checks ?? []) {
     if (!wants(check.section)) continue; // 与内置检查一致的 section 收窄

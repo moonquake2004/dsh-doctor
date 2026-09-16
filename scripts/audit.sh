@@ -42,7 +42,10 @@ n=$(DSH_HOME=$H node $CLI --json --no-catalog --profile web 2>/dev/null | grep -
 [ "$n" -gt 1 ] && chk "manifest 无法解析时其余检查仍运行（$n 项）" 0 || chk "manifest 无法解析时其余检查仍运行" 1
 rm -rf "$H"
 
-echo "== 审计 4：清单与闭集 =="
+echo "== 审计 4：论坛病例语料（R2 样本律：真实报告 → 回归用例，含健康对照） =="
+node --test plugin/test/forum-cases.test.mjs >/dev/null 2>&1 && chk "论坛病例 12/12（含 4 条防误报对照、1 条已知边界）" 0 || chk "论坛病例全部通过" 1
+
+echo "== 审计 5：清单与闭集 =="
 node scripts/gen-check-inventory.mjs | diff -q - docs/check-inventory.md >/dev/null && chk "检查清单与代码一致" 0 || chk "检查清单与代码一致" 1
 node --test plugin/test/fixtures.mjs >/dev/null 2>&1 && chk "全套测试（含闭集断言）通过" 0 || chk "全套测试通过" 1
 

@@ -1813,7 +1813,7 @@ test('A：examined === 0 的 pass 自动降为 skip（没看 ≠ 通过）', () 
   assert.ok(m, '未找到 report');
   const results = [];
   // 抽取实现时要一并提供 coverageNow（report 依赖它做上下文回退）
-  const fn = new Function('results', 'coverageNow', `${m[0]}\nreturn report;`)(results, () => null);
+  const fn = new Function('results', 'coverageNow', 'currentPhase', `${m[0]}\nreturn report;`)(results, () => null, null);
   fn('profile', 'X1', true, '全部正常', undefined, 'builtin', 0);
   assert.equal(results[0].skip, true, '零检查对象时不得报通过');
   assert.equal(results[0].coverage, 'none');
@@ -1956,4 +1956,31 @@ test('R3 聚合：全部跳过时不得说"全部通过"（顶层假绿灯）', 
   const clean = fn([{ ok: true, examined: 3 }, { ok: true, examined: 1 }]);
   assert.equal(clean.state, 'pass');
   assert.equal(fn([{ ok: false }, { ok: true, examined: 1 }]).state, 'fail');
+});
+
+/* ---------- 回归审计：覆盖量上下文不得跨段泄漏（0.8.0 引入、同轮发现并修复） ---------- */
+
+test('回归：会话检查不得继承 profile 段的覆盖量单位（"16 个 bundle 条目"式的伪造数字）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', { manifest: { name: 'web', version: '0.0.0', dsh: { profile: { bundles: [] } } }, patch: '' });
+  sessionFixture(home, 'sess-1', [{ type: 'assistant/message', seq: 0, data: { turn: 1, step: 1, message: { content: [] } } }]);
+  const { raw } = runCli({ home, args: ['--profile', 'web', '--session'] });
+  const leaked = raw.checks.filter((c) => c.section === 'session' && c.examinedWhat === 'bundle 条目');
+  assert.equal(leaked.length, 0, `会话检查继承了 profile 的覆盖量单位（伪造数字比没有数字更危险）: ${leaked.map((c) => c.id).join(', ')}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('回归：每个段的覆盖量单位必须属于该段（env/profile/session 不得互相串台）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', { manifest: { name: 'web', version: '0.0.0', dsh: { profile: { bundles: [] } } }, patch: '' });
+  sessionFixture(home, 'sess-1', [{ type: 'assistant/message', seq: 0, data: { turn: 1, step: 1, message: { content: [] } } }]);
+  const { raw } = runCli({ home, args: ['--profile', 'web', '--session'] });
+  // 单位属于**求值阶段**（phase），不属于展示用的 section：目录提供的检查带 section:'env'/'profile'，
+  // 但它们在 catalog 阶段求值。这是 2026-09 回归审计发现的模型错误。
+  const units = { env: new Set(['环境对象']), profile: new Set(['bundle 条目']), session: new Set(['会话日志']), catalog: new Set(['目录检查项']) };
+  const bad = raw.checks
+    .filter((c) => c.examinedWhat && units[c.phase] && !units[c.phase].has(c.examinedWhat))
+    .map((c) => `${c.id}(phase=${c.phase}) 声称检查了「${c.examinedWhat}」`);
+  assert.equal(bad.length, 0, `覆盖量单位串台: ${bad.join('; ')}`);
+  rmSync(home, { recursive: true, force: true });
 });
