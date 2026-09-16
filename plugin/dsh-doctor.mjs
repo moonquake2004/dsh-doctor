@@ -233,16 +233,21 @@ function hasDshEnvironment(home = HOME) {
  *   · `examined === 0` → **不得 pass**，自动降为 skip（"无可检查对象"）——硬不变量，CI 有测试盯着；
  *   · `examined` 未报告 → 结果带 `coverage: 'unreported'`（机器可读的欠账标记），可被测试度量并逐项清零。
  */
-let coverageContext = null; // 当前检查段"检查了多少同类对象"的默认值（由 setCoverage 设置）
-function setCoverage(n, what) { coverageContext = typeof n === 'number' ? { n, what } : null; }
+let coverageContext = null; // 当前检查段"检查了多少同类对象"的默认值（由 setCoverage 设置，且**绑定阶段**）
+let currentPhase = null;    // 求值阶段：env / profile / session / catalog
+function setCoverage(n, what) { coverageContext = typeof n === 'number' ? { n, what, phase: currentPhase } : null; }
 /** 段边界重置：覆盖量上下文**绝不允许跨段继承**——否则会伪造出一个看起来可信的数字。
  *  2026-09 回归审计实测：会话段的 S6/S14 曾号称"检查了 16 个 bundle 条目"，而它们实际展开的是 11352 个事件。 */
 function resetCoverage() { coverageContext = null; }
 /** 求值阶段（env/profile/session/catalog）。覆盖量的**单位属于阶段**，不属于展示用的 section——
  *  目录提供的检查会带 section:'env'/'profile'，但它们在 catalog 阶段求值（回归审计实测）。 */
-let currentPhase = null;
 function setPhase(p) { currentPhase = p; }
-function coverageNow() { return coverageContext; }
+function coverageNow() {
+  // 只接受**属于当前阶段**的上下文：这样"忘记在段边界重置"不可能再伪造出跨段的数字
+  // （变异测试发现：只靠 resetCoverage 的版本里，去掉重置后没有任何测试变红——守卫是冗余的；
+  //  绑定阶段后，守卫才有牙齿。）
+  return coverageContext && coverageContext.phase === currentPhase ? coverageContext : null;
+}
 
 function report(section, id, ok, detail, fix, src, examined) {
   // R6 接口律：参数放错位置必须**立刻抛**，而不是变成一条静默的错误判定。
@@ -250,8 +255,8 @@ function report(section, id, ok, detail, fix, src, examined) {
   // 回退到上下文 0 → 一条本该 pass 的检查被静默降级。凭记忆拼参数是可以通过机制消灭的。
   // R6 扩展（2026-09 回归审计）：**参数个数**守卫。JS 会静默忽略多余参数，而我只校验了类型——
   // 于是"多传一个 undefined"这类错误（我给 S11 补覆盖量时就犯了）能一路走到运行时。
-  if (arguments.length > 7) {
-    throw new Error(`report(${id}): 最多 7 个参数 (section, id, ok, detail, fix, src, examined)，收到 ${arguments.length} 个 —— 检查参数位置`);
+  if (arguments.length > 8) {
+    throw new Error(`report(${id}): 最多 8 个参数 (section, id, ok, detail, fix, src, examined, examinedWhat)，收到 ${arguments.length} 个 —— 检查参数位置`);
   }
   if (typeof examined !== 'number' && examined !== undefined) {
     throw new Error(`report(${id}): examined 必须是 number 或 undefined，收到 ${typeof examined}（${JSON.stringify(examined)}）——检查参数位置`);
@@ -262,7 +267,11 @@ function report(section, id, ok, detail, fix, src, examined) {
   if (typeof section !== 'string' || typeof id !== 'string' || typeof ok !== 'boolean' || typeof detail !== 'string') {
     throw new Error(`report(): 前四个参数必须是 (section:string, id:string, ok:boolean, detail:string)`);
   }
-  const zeroCheck = typeof examined === 'number' ? examined : coverageNow()?.n;
+  // 红队 F1（2026-09-16）：**不得**用阶段占位值顶替真实数量。
+  // 实测反例：3 个「幽灵 bundle」（一个都没装）时，15 条通过项带上 `examined=3, examinedWhat="bundle 条目"`，
+  // 其中 P21 的文案是"扫描 0 个 host 入口与 0 个 client 产物"——**文案与覆盖量自相矛盾**，
+  // 而 verified=16 让聚合层宣称"16 项通过"。占位值把"零对象不变量"整个架空了。
+  const zeroCheck = typeof examined === 'number' ? examined : undefined;
   if (ok === true && zeroCheck === 0) {
     // 2026-09 语料发现的措辞缺陷：原实现把原判定文案原样留下 → 出现"结构正常（无可检查对象，未做任何比较）"
     // 这种**自相矛盾**的句子（既宣称正常、又说没比较）。原文案改放 note（机器可读），人读文案只陈述事实。
@@ -278,9 +287,14 @@ function report(section, id, ok, detail, fix, src, examined) {
   const safeDetail = String(detail).replace(VERDICT_GLYPH_RE, '·');
   const rec = { section, id, ok, detail: safeDetail, fix, src: src ?? 'builtin', phase: currentPhase };
   if (ok === true) {
-    const ctx = coverageNow();
-    const n = typeof examined === 'number' ? examined : ctx?.n;
-    if (typeof n === 'number') { rec.examined = n; if (ctx?.what) rec.examinedWhat = ctx.what; }
+    // 只有显式申报才算数；`examinedWhat` 也必须与**同一处**申报配套（由调用点传 what）
+    if (typeof examined === 'number') {
+      rec.examined = examined;
+      // 第 8 个参数是**覆盖量单位**（与 examined 配套申报，避免"数量对不上单位"的旧问题）
+      // 单位**只能**由第 8 个参数显式申报。绝不按"数量恰好相等"去继承——
+      // 那会让"检查了 3 个文件"的 P15 被贴上"3 个 bundle 条目"的标签（我第一版就这么错了）。
+      if (typeof arguments[7] === 'string') rec.examinedWhat = arguments[7];
+    }
     else rec.coverage = 'unreported';
   }
   results.push(rec);
@@ -350,15 +364,19 @@ function aggregateVerdict(records) {
   const failed = records.filter((r) => !r.skip && !r.ok);
   const verified = records.filter((r) => !r.skip && r.ok && (r.examined ?? 0) > 0).length;
   const skipped = records.filter((r) => r.skip).length;
-  const totals = { verified, skipped, failed: failed.length };
+  // 红队 F1：**未申报覆盖量的通过**既不算"已验证"，也不能隐形——单独计数并进汇总
+  const unreported = records.filter((r) => !r.skip && r.ok && r.coverage === 'unreported').length;
+  const totals = { verified, skipped, failed: failed.length, unreported };
   if (failed.length) return makeVerdict('fail', { totals, detail: `${failed.length} 个问题` });
   if (verified === 0) {
     return makeVerdict('skip', { totals, reason: `没有任何检查实际验证过（${skipped} 项全部跳过）` });
   }
   if (skipped > 0) {
-    return makeVerdict('pass', { checked: verified, totals, detail: `${verified} 项通过、${skipped} 项未检查（skip）——**未检查的部分不代表通过**` });
+    const unrep = unreported > 0 ? `；另有 ${unreported} 项通过但**未申报检查了多少**（不算已验证）` : '';
+  return makeVerdict('pass', { checked: verified, totals, detail: `${verified} 项通过、${skipped} 项未检查（skip）${unrep}` });
   }
-  return makeVerdict('pass', { checked: verified, totals, detail: `全部通过（${verified} 项，均已验证）` });
+  const unrep2 = unreported > 0 ? `（其中 ${unreported} 项未申报覆盖量）` : '';
+  return makeVerdict('pass', { checked: verified, totals, detail: `全部通过（${verified} 项已验证${unrep2}）` });
 }
 
 /** 解析 --profile 参数：名字（如 web）→ $DSH_HOME/profiles/<name>；含路径分隔符/~/开头 → 直接当 profile 目录（契约 harness 传绝对路径）。 */
@@ -885,7 +903,7 @@ function checkProfile(name) {
         + `systemd 健康、端口在听、页面永远空白（#6693 实测：整份 journal 里该错误计数为 0）`,
         '把 client 半边改成 `__ModuleLoader__.load({ id, factory })` 的 CJS 工厂形态（参照 dsh-better-sidebar / dsh-dream-skin）');
     } else {
-      report('profile', 'P20', true, `client 产物均为 CJS 工厂形态（${p20scanned} 个）`);
+      report('profile', 'P20', true, `client 产物均为 CJS 工厂形态（${p20scanned} 个）`, undefined, undefined, p20scanned, 'client 产物');
     }
 
     // P21：**沙箱专属符号在普通插件里不存在**（host 与 client 两侧一律如此，同一根因两个面）
@@ -937,7 +955,7 @@ function checkProfile(name) {
         + `\n  host 侧表现为 \`ReferenceError: harness is not defined\`（在 \`apply()\` 内同步抛出 → cordis 中断装载链 → Web UI 整体不可用）`,
         '移除这些引用或用宿主提供的等价能力；若确需守卫，必须写成 `typeof X !== \"undefined\"` **放在最前**——`X.foo && …` 挡不住（裸标识符先被解析）');
     } else if (notes21.length) {
-      report('profile', 'P21', true, `未见裸引用沙箱专属符号（${notes21.length} 处有 typeof 守卫，未计入）`);
+      report('profile', 'P21', true, `未见裸引用沙箱专属符号（${notes21.length} 处有 typeof 守卫，未计入）`, undefined, undefined, hostFiles.length + clientFiles.length, 'host/client 文件');
     } else {
       report('profile', 'P21', true, `扫描 ${hostFiles.length} 个 host 入口与 ${clientFiles.length} 个 client 产物，未见沙箱专属符号引用`);
     }
@@ -997,7 +1015,7 @@ function checkProfile(name) {
       report('profile', 'P19', true,
         `核对 ${checked19} 条 host peer 声明，均可接受当前核心版本`
         + (unknown19 ? `（${unknown19} 条无法判定，按未知处理未计入）` : '')
-        + undeclaredNote.replace(/\n\s*/g, ' '));
+        + undeclaredNote.replace(/\n\s*/g, ' '), undefined, undefined, checked19, 'host peer 声明');
     }
   }
 
@@ -1227,7 +1245,7 @@ function packageNamedExports(pkgDir) {
     }
   }
   if (entryIssues.length) report('profile', 'P11', false, `已装 bundle 的 main 入口缺失（#1965：市场装源码不跑构建 → ERR_MODULE_NOT_FOUND → dsh web boot 崩溃）: ${entryIssues.join('; ')}`, '在插件目录跑构建（pnpm install && pnpm run build 产出 main 指向的文件），或改用打包好的 npm 包安装；monorepo 插件需装子包（dsh-market #18 同族）');
-  else report('profile', 'P11', true, '已装 bundle 的 main 入口产物均在', undefined);
+  else report('profile', 'P11', true, '已装 bundle 的 main 入口产物均在', undefined, undefined, bundleDirs.size, '已装 bundle');
 
   // P13：client 端服务名抢注核心客户端服务（#2752：ctx.provide("chatFileMentions") 撞核心 dsh-client-ui-deliverables
   // → 浏览器端 service already registered → Web UI 白屏，服务端日志无感知、报错无冲突来源）
@@ -1418,7 +1436,7 @@ function packageNamedExports(pkgDir) {
       + '改用 [IO.File]::WriteAllText($p, (Get-Content $p -Raw), (New-Object Text.UTF8Encoding $false))；'
       + '或 sed -i "" "1s/^\xEF\xBB\xBF//" <file>', undefined, bomTargets.length);
   } else {
-    report('profile', 'P15', true, `关键文件无 BOM 头（检查 ${bomTargets.length} 个）`, undefined, undefined, bomTargets.length);
+    report('profile', 'P15', true, `关键文件无 BOM 头（检查 ${bomTargets.length} 个）`, undefined, undefined, bomTargets.length, '关键文件');
   }
 
   /* P16：插件命名导入的导出缺失检测（#5864：一个缺失导出 → 整棵插件树 boot 崩溃循环、
@@ -1522,7 +1540,7 @@ function packageNamedExports(pkgDir) {
   if (p17Issues.length) {
     report('profile', 'P17', false, `client 端 require 的模块不在宿主模块表（#5719：makeRequire 硬 throw → 浏览器白屏且服务端无感知）: ${p17Issues.join('; ')}`, `改用宿主提供的模块名；若确由宿主提供，在本包 package.json 的 dsh.client.external/inject 里声明；平台种子当前 ${CLIENT_SEEDS.size} 项、已装图行 ${composedRows.size} 项`);
   } else {
-    report('profile', 'P17', true, `client 端 require 的 specifier 均可服务（平台种子 ${CLIENT_SEEDS.size} 项 + 已装图行 ${composedRows.size} 项）`, undefined);
+    report('profile', 'P17', true, `client 端 require 的 specifier 均可服务（平台种子 ${CLIENT_SEEDS.size} 项 + 已装图行 ${composedRows.size} 项）`, undefined, undefined, CLIENT_SEEDS.size + composedRows.size, 'client specifier 来源');
   }
 }
 
@@ -2164,6 +2182,8 @@ function validCatalog(data) {
 
 /** 拉取目录：新鲜缓存(≤TTL) → 远程(raw.githubusercontent，3s 超时) → 旧缓存(last-known-good) → 内置副本；末尾合并本地覆盖层。 */
 async function loadCatalog({ noRemote = false, fetchImpl, home = HOME, localPath } = {}) {
+  // 离线开关（红队 F5：目录用例曾因取到远程目录而结果不可复现）——DSH_DOCTOR_OFFLINE=1 等价于 noRemote
+  if (process.env.DSH_DOCTOR_OFFLINE === '1') noRemote = true;
   const bundled = bundledCatalog();
   let base;
   if (noRemote || typeof fetchImpl !== 'function') {
@@ -3355,6 +3375,8 @@ async function run() {
       verified: aggJson.totals.verified,
       skipped: aggJson.totals.skipped,
       failed: aggJson.totals.failed,
+      // 红队 F1：未申报覆盖量的通过**单独暴露**（既不算已验证，也不隐形）
+      unreported: aggJson.totals.unreported,
       checks: checksWithStatus, catalog: catalogMeta, update: updateInfo, ...(securityMeta.enabled ? { security: securityMeta } : {}),
     }, null, 2));
   } else {

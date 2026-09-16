@@ -36,3 +36,10 @@ jobs:
       - name: Run the test suite
         shell: bash
         run: node --test plugin/test/*.mjs
+
+      # 2026-09-16：把自造的对抗者变成默认动作（不靠人记得）——
+      # 变异测试（守卫是否真的在守）+ 红队档案存在性 + 环境泛化审计 + 全套测试。
+      - name: Release gate (audit + mutation + red-team artifact)
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24.x'
+        shell: bash
+        run: bash scripts/release-check.sh

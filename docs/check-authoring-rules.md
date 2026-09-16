@@ -184,6 +184,8 @@
 | **D2** | **故障隔离（R4）未落地**：profile 清单畸形时，profile 段只剩 2 条记录（其余 17 项消失） | `printf '\xEF\xBB\xBF{ "name": "web", "dsh": { "profile": { "bundles": [ }' > …/package.json` | 需要**逐项隔离**（每项检查各自 try/catch），是结构性重构；已在 §2 标注 R4"部分落地"。`scripts/audit.sh` 的断言此前只有 `n > 1`（**自证太弱**，2 条即可过）——**已改为按段断言** |
 | **D3** | **覆盖量单位标签**：显式传 `examined` 时，`examinedWhat` 仍来自段上下文 → 出现"0 个 bundle 条目的环境里说检查了 1 个 bundle 条目"（P18） | 空 profile 跑 `--json`，看 P18 的 `examined/examinedWhat` | 需要让"显式数量"同时携带自己的单位（改 `report()` 的调用约定，影响面广） |
 | **D4** | **`--quarantine` 缺值时吞掉下一个 flag**：`--quarantine --profile web` → 报"`--profile` 不在 bundles 里" | 直接运行 | argv 解析需区分"缺值"与"值是另一个 flag"；属独立小改动 |
+| **D6** | **闭集只是"文本律"**：`String.fromCharCode(0x2713)` 拼接可绕过；`plugin/client/client.js:109` 裸写 `c.ok ? '✓' : '✗'` 而闭集只扫主程序；GUI 会把 `{ok:true,skip:true}` 渲染成绿色 ✓ | 副本内注入 `console.log(String.fromCharCode(0x2713)+'…')` → 闭集测试 PASS 而 CLI 打印 ✓ | 真正的修法是把闭集升级为**运行时拦截 stdout**（任何非收口点输出的判定符号即失败）并覆盖全部输出模块；属结构性改动 |
+| **D7** | **本地覆盖层可信度**：`--no-catalog` 只是 `noRemote`，`plugin/checks.local.json` 仍会被合并，而它被 `.gitignore` 忽略 → 能写该文件者即可改判定，CI 关不掉 | 读 `loadCatalog` 末尾合并逻辑 | 需要决定：是否要求覆盖层显式声明来源、在报告里标注"含本地覆盖"，或干脆用开关隔离 |
 | **D5** | **`ok` 语义在两种 JSON 形态下不同**：`--json` 的 `ok` 要求 `verified>0`；`--envelope` 的 `ok = exitCode===0` | 全跳过环境对比两者 | envelope 是**冻结的 v1 契约**，改它同样属契约级决策 |
 
 **红队审计的价值本身就是结论**：它在一次"已经三轮自审"的版本里找出 **6 个真漏洞**，

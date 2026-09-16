@@ -1862,14 +1862,22 @@ test('R5：docs/check-inventory.md 与代码一致（新增检查必须同步清
   assert.equal(gen.stdout, onDisk, '清单与代码不一致：跑 `node scripts/gen-check-inventory.mjs > docs/check-inventory.md` 并确认新增/改动的检查（这正是"查清单"那一步）');
 });
 
-test('R3（收紧）：空环境下，未报告覆盖量的 pass 必须为 0', () => {
+test('R3（红队 F1 后）：通过项要么申报覆盖量、要么被标为 unreported —— 且必须在汇总里可见（不许伪造、不许隐形）', () => {
   const home = tempHome();
   const p = join(home, 'profiles', 'web');
   mkdirSync(p, { recursive: true });
-  writeFileSync(join(p, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', version: '0.0.0', dsh: { profile: { bundles: [] } } }));
+  writeFileSync(join(p, 'package.json'), JSON.stringify({ name: 'web', version: '0.0.0', dsh: { profile: { bundles: [] } } }));
   const { raw } = runCli({ home, args: ['--profile', 'web'] });
+  // ① 不许伪造：**取消**占位回退后，没有显式申报的通过项不得携带任何数字
+  const fabricated = raw.checks.filter((c) => c.ok && !c.skip && c.examined !== undefined && c.coverage === 'unreported');
+  assert.equal(fabricated.length, 0, '通过项的 examined 只能来自显式申报');
+  // ② 不许隐形：未申报的必须被单独计数并暴露在 JSON 里
   const un = raw.checks.filter((c) => c.ok && !c.skip && c.coverage === 'unreported');
-  assert.equal(un.length, 0, `未报告覆盖量的 pass 必须为 0（R3 硬不变量），实为: ${un.map((c) => c.id).join(', ')}`);
+  assert.equal(raw.unreported, un.length, `unreported 必须如实暴露（记录 ${un.length} 条 vs JSON ${raw.unreported}）`);
+  // ③ 预算：这个数字只许下降。它是"占位值此前替我掩盖的工作量"的真实规模。
+  const BUDGET = 12;   // 2026-09-16：补齐 5 项显式覆盖量后由 17 收紧到 12（只许下降）
+  assert.ok(un.length <= BUDGET, `未申报覆盖量的通过项不得增长（当前 ${un.length} > 预算 ${BUDGET}）——新增检查必须申报覆盖量`);
+  console.log(`      ↳ 未申报覆盖量：${un.length} 项（预算 ${BUDGET}${un.length < BUDGET ? '，已下降，请把预算调小' : ''}）`);
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -1977,10 +1985,13 @@ test('回归：每个段的覆盖量单位必须属于该段（env/profile/sessi
   const { raw } = runCli({ home, args: ['--profile', 'web', '--session'] });
   // 单位属于**求值阶段**（phase），不属于展示用的 section：目录提供的检查带 section:'env'/'profile'，
   // 但它们在 catalog 阶段求值。这是 2026-09 回归审计发现的模型错误。
-  const units = { env: new Set(['环境对象']), profile: new Set(['bundle 条目']), session: new Set(['会话日志']), catalog: new Set(['目录检查项']) };
+  // 语义变化（红队 F1）：单位现在由**各检查自己申报**（占位值已废除），所以不再要求"必须等于本阶段的规范单位"。
+  // 仍然要拦的是：某个检查携带了**别的阶段**的规范单位（那才是"串台/继承"的信号）。
+  const canonical = { env: '环境对象', profile: 'bundle 条目', session: '会话日志', catalog: '目录检查项' };
   const bad = raw.checks
-    .filter((c) => c.examinedWhat && units[c.phase] && !units[c.phase].has(c.examinedWhat))
-    .map((c) => `${c.id}(phase=${c.phase}) 声称检查了「${c.examinedWhat}」`);
+    .filter((c) => c.examinedWhat && canonical[c.phase] && c.examinedWhat !== canonical[c.phase]
+      && Object.values(canonical).includes(c.examinedWhat))
+    .map((c) => `${c.id}(phase=${c.phase}) 携带了别的阶段的单位「${c.examinedWhat}」`);
   assert.equal(bad.length, 0, `覆盖量单位串台: ${bad.join('; ')}`);
   rmSync(home, { recursive: true, force: true });
 });
@@ -2036,5 +2047,70 @@ test('红队R3（**已知分歧**，待决策）：主路径（--json / 文本�
   const diverges = json.status !== env.status;
   console.log(`      ↳ 同一输入：--json 退出码 ${json.status} / --envelope 退出码 ${env.status}${diverges ? '（**分歧仍在**，见 docs/check-authoring-rules.md §5）' : '（已一致）'}`);
   assert.ok(true, '记录型用例：分歧本身已文档化，不在此处擅自改变契约行为');
+  rmSync(home, { recursive: true, force: true });
+});
+
+/* ---------- 变异测试逼出来的两条测试（此前那些守卫无人看守） ---------- */
+
+test('R6 arity：report() 参数个数超过 7 必须立即抛错（变异测试发现此前无测试）', () => {
+  const src = readFileSync(CLI, 'utf8');
+  const m = src.match(/function report\([\s\S]*?\n}/);
+  assert.ok(m, '未找到 report');
+  const results = [];
+  const fn = new Function('results', 'coverageNow', 'currentPhase', 'VERDICT_GLYPH_RE', `${m[0]}\nreturn report;`)(
+    results, () => null, null, /[✓✔⊖✗✘⚠]/g,
+  );
+  assert.throws(() => fn('env', 'X', true, 'd', undefined, undefined, 1, 'what', '第九个'),
+    /最多 8 个参数/, '多传参数会被 JS 静默忽略 → 必须由守卫抛错（我曾因此把 examined 放错位置）');
+  assert.doesNotThrow(() => fn('env', 'X', true, 'd', undefined, undefined, 1, '单位'));
+});
+
+test('红队R1：目录检查"目标不存在"必须是 skip，不得是 pass（用**内置目录**跑，不用 --no-catalog）', () => {
+  const home = tempHome();
+  const p = join(home, 'profiles', 'web');
+  mkdirSync(p, { recursive: true });
+  writeFileSync(join(p, 'package.json'), JSON.stringify({ name: 'web', version: '0.0.0', dsh: { profile: { bundles: [] } } }));
+  // 关键：**不加 --no-catalog** —— 此前的用例全用 --no-catalog，于是目录路径的 skip 语义无人看守
+  // 两个环境要点（都是第一版踩过的坑）：
+  //   ① **不收窄**（不传 --profile）：否则 env 段的目录检查（E7/E9/E11）根本不跑，断言吃不到东西；
+  //   ② **PATH 收窄到只有 node**（无 dsh）：E7 才会确定性地走"跳过"分支——否则在有 dsh 的机器上
+  //      它合法地 pass，测试就变成了对环境的断言（这是 R13 环境泛化律的实例）。
+  const r = spawnSync(process.execPath, [CLI, '--json'], {
+    encoding: 'utf8',
+    // 红队 F5：必须**离线**运行，否则新 HOME + 网络可用时会取到远程目录，结果不可复现
+    env: { ...process.env, DSH_HOME: home, PATH: dirname(process.execPath), DSH_DOCTOR_OFFLINE: '1' },
+    timeout: 60000,
+  });
+  const data = JSON.parse(r.stdout);
+  const cat = data.checks.filter((c) => c.src === 'catalog');
+  assert.ok(cat.length > 0, '内置目录应当提供检查（否则本用例测不到目录路径）');
+  // E7（无 DSH 环境）在空 HOME 下必然"跳过"；若被记成 pass，就是红队 R1 回归
+  const e7 = data.checks.find((c) => c.id === 'E7-dsh-in-path');
+  if (e7) assert.equal(e7.status, 'skip', `目录检查跳过必须记为 skip，实际 ${e7.status}：${e7.detail}`);
+  const forged = cat.filter((c) => c.status === 'pass' && /跳过|不适用/.test(String(c.detail)));
+  assert.equal(forged.length, 0, `自述跳过的目录检查不得为 pass: ${forged.map((c) => c.id).join(', ')}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+
+test('红队F1（回归）：3 个"幽灵 bundle"（一个都没装）时，不得伪造覆盖量、也不得给出通过式断言', () => {
+  const home = tempHome();
+  const p = join(home, 'profiles', 'web');
+  mkdirSync(p, { recursive: true });
+  writeFileSync(join(p, 'package.json'), JSON.stringify({ name: 'web', version: '0.0.0', dsh: { profile: { bundles: ['ghost-a', 'ghost-b', 'ghost-c'] } } }));
+  const { raw } = runCli({ home, args: ['--profile', 'web'] });
+  // 断言必须**确定性**（第一版用 raw.ok / P21 状态，而它们依赖 installAnchor 是否存在 → 环境相关）。
+  // 红队的真实危害是：15 条通过项带着「examined=3 / examinedWhat=bundle 条目」——由**阶段占位值**冒充实测数量。
+  // 占位回退已删除，因此这些标签应当**全部消失**（没有任何检查显式申报过"bundle 条目"这个单位）。
+  const phantom = raw.checks.filter((c) => c.examinedWhat === 'bundle 条目');
+  assert.equal(phantom.length, 0,
+    `不得再有阶段占位值冒充实测数量（红队实测曾有 15 条）: ${phantom.map((c) => c.id).join(', ')}`);
+  // 通过项要么显式申报覆盖量、要么被标为 unreported（不许伪造数字，也不许隐形）
+  for (const c of raw.checks.filter((x) => x.status === 'pass')) {
+    assert.ok(c.examined === undefined || c.coverage === undefined || c.examined > 0,
+      `${c.id} 的覆盖量既未申报又带数字，自相矛盾`);
+  }
+  const unrep = raw.checks.filter((c) => c.ok && !c.skip && c.coverage === 'unreported').length;
+  assert.equal(raw.unreported, unrep, `unreported 必须如实暴露（记录 ${unrep} vs JSON ${raw.unreported}）`);
   rmSync(home, { recursive: true, force: true });
 });
