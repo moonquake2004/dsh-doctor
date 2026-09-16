@@ -264,10 +264,19 @@ function report(section, id, ok, detail, fix, src, examined) {
   }
   const zeroCheck = typeof examined === 'number' ? examined : coverageNow()?.n;
   if (ok === true && zeroCheck === 0) {
-    results.push({ section, id, ok: true, skip: true, coverage: 'none', detail: `${detail}（无可检查对象，未做任何比较）`, fix, src: src ?? 'builtin' });
+    // 2026-09 语料发现的措辞缺陷：原实现把原判定文案原样留下 → 出现"结构正常（无可检查对象，未做任何比较）"
+    // 这种**自相矛盾**的句子（既宣称正常、又说没比较）。原文案改放 note（机器可读），人读文案只陈述事实。
+    results.push({ section, id, ok: true, skip: true, coverage: 'none',
+      // 措辞要求：**不得自相矛盾**（2026-09 语料曾产出"结构正常（无可检查对象，未做任何比较）"），
+      // 同时保留具体原因（否则用户与测试都只能看到一句通用话）。
+      detail: `无可检查对象、未做任何比较——不作为「通过」；原判定：${String(detail).replace(VERDICT_GLYPH_RE, '·')}`,
+      fix, src: src ?? 'builtin' });
     return;
   }
-  const rec = { section, id, ok, detail, fix, src: src ?? 'builtin', phase: currentPhase };
+  // R6（红队）：detail 可来自远程目录/checks.local.json，**数据不得能伪造判定符号**上屏——
+  // 源码里没有 ✓ 也能让 stdout 出现 ✓。故在收口处剥掉数据里的判定符号（含 ⚠）。
+  const safeDetail = String(detail).replace(VERDICT_GLYPH_RE, '·');
+  const rec = { section, id, ok, detail: safeDetail, fix, src: src ?? 'builtin', phase: currentPhase };
   if (ok === true) {
     const ctx = coverageNow();
     const n = typeof examined === 'number' ? examined : ctx?.n;
@@ -279,7 +288,8 @@ function report(section, id, ok, detail, fix, src, examined) {
 
 /** skip 状态（v1 词汇表 r5：#1719）——"不适用"而非"通过"，必须带 reason（detail）。不计入 pass/fail，不翻退出码。 */
 function reportSkip(section, id, detail, src) {
-  results.push({ section, id, ok: true, skip: true, detail, src: src ?? 'builtin' });
+  // R2（红队）：skip 记录此前**没有 phase 字段**，于是"单位属于求值阶段"这条断言在 skip 上无法核对。
+  results.push({ section, id, ok: true, skip: true, detail, src: src ?? 'builtin', phase: currentPhase });
 }
 
 
@@ -298,6 +308,7 @@ function reportSkip(section, id, detail, src) {
  * @param {{checked?: number, detail?: string, reason?: string, totals?: {verified:number, skipped:number, failed:number}}} opts
  */
 function makeVerdict(state, opts = {}) {
+  if (!['pass', 'fail', 'skip', 'warn', 'action'].includes(state)) throw new Error(`makeVerdict: 未知状态 ${state}`);
   if (state === 'pass') {
     const n = opts.checked;
     if (typeof n !== 'number' || n <= 0) {
@@ -313,6 +324,9 @@ function makeVerdict(state, opts = {}) {
  * 两者构成本工具的**闭集**——闭集测试断言：源码里任何 ✓/⊖/✗ 都必须落在这两个函数体内。
  */
 const VERDICT_MARKS = { pass: '✓', fail: '✗', skip: '⊖', warn: '⚠', action: '✓' };
+/** 判定符号集合（含 ⚠）——**唯一**用于"从数据里剥掉符号"的正则。
+ *  红队 R6：数据（远程目录/checks.local.json）不得能伪造判定符号上屏；符号只许收口点产出。 */
+const VERDICT_GLYPH_RE = /[✓✔⊖✗✘⚠]/g;
 
 function printItem(state, text, indent = 2) {
   console.log(`${' '.repeat(indent)}${VERDICT_MARKS[state] ?? '?'} ${text}`);
@@ -655,7 +669,7 @@ function checkPort3080() {
             `端口 ${port} 被 dsh web 实例占用（PID ${info.pid}）${httpAlive === true ? '且 HTTP 有应答' : ''}——宿主自身或另一实例，正常`, undefined);
         }
         else if (info) report('env', 'E10-port-3080', false, `端口 ${port} 被其他程序占用（PID ${info.pid}: ${info.cmd}），dsh web 启动会 address in use（#1719）`, `关掉占用进程，或让 dsh web 用别的端口`);
-        else report('env', 'E10-port-3080', true, `⚠ 端口 ${port} 被占用但无法识别占用者`, undefined);
+        else report('env', 'E10-port-3080', true, `端口 ${port} 被占用但无法识别占用者`, undefined);
       } else {
         report('env', 'E10-port-3080', false, `端口 ${port} 探测异常: ${e.message.slice(0, 60)}`, undefined);
       }
@@ -2101,7 +2115,7 @@ function scanAllSessions() {
     if (unstableReads.length) parts.push(`${unstableReads.length} 个会话**读取间歇性失败**（重试即成功 → 非损坏，指向存储/内存/驱动的偶发读错误，社区 #6739）: ${unstableReads.slice(0, 3).map((u) => `${u.id}(${u.attempts} 次尝试)`).join(' | ')}`);
     if (oversized.length) parts.push(`${oversized.length} 个超大会话: ${oversized.map((o) => `${o.id}(${o.dsMB}MB/${o.events}事件)`).join(' | ')}`);
     if (totalRisk) parts.push(`工作区估算物化堆 ~${estHeapMB}MB（估算= max(${totalEvents}事件×600B, ${totalMB}MB×6)，跨 ${files.length} 会话累积，#1550 场景；阈值 ${heapLimit}MB，可设 DSH_DOCTOR_HEAP_MB）`);
-    report('session', 'S11', true, `⚠ 全会话扫描：${parts.join('；')}（未损坏，可接受或归档）`,
+    report('session', 'S11', true, `全会话扫描：${parts.join('；')}（未损坏，可接受或归档）`,
       unstableReads.length
         ? '间歇性读取失败不是日志问题：先重试读取；持续出现则排查存储健康（SMART）、内存与磁盘驱动（#6739 的证据是失败帧位置每次不同）'
         : '冷启动会明显变慢；必要时压缩/归档历史会话', undefined, files.length);
@@ -2274,13 +2288,13 @@ export function runCatalogCheck(check, ctx) {
       let ok = existsSync(fp);
       if (ok && probe.type === 'path-is-dir') ok = lstatSync(fp).isDirectory();
       if (ok && probe.type === 'path-is-file') ok = lstatSync(fp).isFile();
-      return ok ? { ok: true, detail: check.detailOk ?? `${fp} 存在` }
+      return ok ? { ok: true, checked: 1, detail: check.detailOk ?? `${fp} 存在` }
                 : { ok: false, detail: check.detailFail ?? `${fp} 不存在/类型不符` };
     }
     case 'json-valid': {
       const fp = p(probe.path);
       if (!existsSync(fp)) return probe.required === false
-        ? { ok: true, detail: check.detailOk ?? `${fp} 不存在（跳过）` }
+        ? { ok: true, skipped: true, detail: check.detailOk ?? `${fp} 不存在（跳过）` }
         : { ok: false, detail: check.detailFail ?? `${fp} 缺失` };
       let utf8ok = true, jsonok = false;
       try { new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(fp)); } catch { utf8ok = false; }
@@ -2292,7 +2306,7 @@ export function runCatalogCheck(check, ctx) {
     case 'text-not-contains': {
       const fp = p(probe.path);
       if (!existsSync(fp)) return probe.required === false
-        ? { ok: true, detail: check.detailOk ?? `${fp} 不存在（跳过）` }
+        ? { ok: true, skipped: true, detail: check.detailOk ?? `${fp} 不存在（跳过）` }
         : { ok: false, detail: check.detailFail ?? `${fp} 缺失` };
       let re;
       try { re = new RegExp(probe.pattern, probe.flags ?? ''); } catch (e) { return { ok: false, detail: `目录规则正则非法: ${e.message.slice(0, 60)}` }; }
@@ -2323,7 +2337,7 @@ export function runCatalogCheck(check, ctx) {
     case 'file-writable': {
       const fp = p(probe.path);
       if (!existsSync(fp)) return probe.required === false
-        ? { ok: true, detail: check.detailOk ?? `${fp} 不存在（跳过）` }
+        ? { ok: true, skipped: true, detail: check.detailOk ?? `${fp} 不存在（跳过）` }
         : { ok: false, detail: check.detailFail ?? `${fp} 缺失` };
       let writable = false;
       try { const fd = openSync(fp, 'a'); closeSync(fd); writable = true; } catch { /* 只读/属主问题 */ }
@@ -2350,7 +2364,14 @@ function checkCatalog(ctx, catalog) {
     if (check.section === 'profile' && !ctx.profileDir) continue; // profile 无效时跳过 profile 段
     let r;
     try { r = runCatalogCheck(check, ctx); } catch (e) { r = { ok: false, detail: `catalog 检查异常: ${e.message.slice(0, 80)}` }; }
-    if (r.skipped) { report(check.section, check.id, true, r.detail, undefined, 'catalog'); continue; }
+    // 红队 R1（2026-09-16）：`runCatalogCheck` 自报 `skipped`（原语不支持 / 无 DSH 环境 / 目标文件不存在）
+    // 曾被当成 `ok:true`（pass）—— 于是出现"✓ 未发现 DSH 环境…跳过 dsh 的 PATH 检查"这种自相矛盾的行，
+    // 而且它继承目录段的占位覆盖量 1，零对象永不降级。自报 skipped 就是 skip，覆盖量为 0。
+    // 归一化（红队 R1 的第二半）：探测原语里有多处文案写着"…不存在（跳过）"却返回 `ok: true`，
+    // 于是"没有目标可查"被记成**通过**（实测：无 profile 目录时 P6 仍 pass）。判据用探测自己的话：
+    // **凡自述跳过的一律是 skip** —— 这类"文案与状态不一致"只能从结构上消灭，不能靠逐个改分支。
+    if (!r.skipped && r.ok === true && /跳过|不适用/.test(String(r.detail))) r.skipped = true;
+    if (r.skipped) { reportSkip(check.section, check.id, r.detail, 'catalog'); continue; }
     const severity = check.severity ?? 'error';
     catalogSeverity.set(check.id, severity);
     report(check.section, check.id, r.ok, r.detail, r.ok ? undefined : check.fix, 'catalog');
@@ -3039,7 +3060,7 @@ async function run() {
     if (jsonOut) console.log(JSON.stringify(r, null, 2));
     else if (r.ok && r.stage === 'verified') printVerdict(makeVerdict('pass', { checked: r.checked, detail: `已安装并预检通过（${r.checked} 条 entry 均可导入）——重启 dsh 即可` }));
     else if (r.ok && r.stage === 'quarantined') {
-      console.log(`⚠ 已安装，但该插件的 entry 导入失败，已自动隔离以避免 dsh 起不来：`);
+      printVerdict(makeVerdict('warn', { detail: '已安装，但该插件的 entry 导入失败，已自动隔离以避免 dsh 起不来：' }));
       for (const f of r.failures || []) console.log(`    ${f}`);
       console.log(`  隔离项：${r.quarantined.join(', ')}（用 --unquarantine <包名> 放回，修好版本后再重试）`);
       console.log(`  dsh 现在可以正常启动。`);
@@ -3155,6 +3176,13 @@ async function run() {
     try { await checkPort3080(); } catch (e) { report('env', 'E10-port-3080', false, `端口检查异常: ${e.message.slice(0, 60)}`); }
     try { checkProfile(profileArg); } catch (e) { report('profile', 'P0', false, `profile 检查异常: ${e.message.slice(0, 100)}`); }
     try { checkSession(sessionArg); } catch (e) { report('session', 'S0', false, `session 检查异常: ${e.message.slice(0, 100)}`); }
+    // 段级覆盖（2026-09 语料发现）：整段没有产出任何检查时，报告里会出现"整段消失"——
+    // 用户看不出"会话检查根本没跑"。R3 的精神在**段**这一级同样成立：没看就必须说出来。
+    for (const [sec, why] of [['session', '未选中任何会话（活跃会话在保护窗口内，或被 --session 过滤）']]) {
+      if (wants(sec) && !results.some((r) => r.section === sec)) {
+        reportSkip(sec, 'S0', `${why}——本段检查未运行，**这不代表通过**`);
+      }
+    }
     try { scanAllSessions(); } catch (e) { report('session', 'S11', false, `全会话扫描异常: ${e.message.slice(0, 100)}`); }
     try { scanMigrationRefusals(); } catch (e) { report('session', 'S12', false, `迁移拒载预检异常: ${e.message.slice(0, 100)}`); }
   }
@@ -3286,6 +3314,9 @@ async function run() {
       if (s === 'fail') baseFail++;
       else if (s === 'warn') baseWarn++;
     }
+    // 契约（docs/doctor-contract.md:32）：0 = 全通过 · **1 = 任何 WARN** · **2 = 任何 FAIL**。
+    // 红队 R3 指出 envelope 与 json/文本路径退出码不一致——**方向是 json/文本错**，不是这里错。
+    // 我一度把它改成 1，等于把一致性统一到违反契约的一边；已回滚。见 §"待决策"。
     const baseExit = baseFail > 0 ? 2 : baseWarn > 0 ? 1 : 0;
     const exitCode = Math.max(baseExit, secExit);
     // v1.1 remediation（#1719 ADOPTED：ciceroyang 提名、两位 reviewer +1）：opt-in --remediation，
@@ -3342,7 +3373,7 @@ async function run() {
       if (!r.ok && r.fix) console.log(`     ↳ 修复: ${r.fix}`);
     }
     if (updateInfo.available && !updateInfo.applied) {
-      console.log(`\n⚠ 新版本 ${updateInfo.latest} 可用（当前 ${updateInfo.current}）→ 运行 \`dsh-doctor --update\` 或 \`dsh plugin update\``);
+      console.log(''); printVerdict(makeVerdict('warn', { detail: `新版本 ${updateInfo.latest} 可用（当前 ${updateInfo.current}）→ 运行 \`dsh-doctor --update\` 或 \`dsh plugin update\`` }));
     } else if (updateInfo.applied) {
       console.log(''); printVerdict(makeVerdict('action', { detail: updateInfo.applied }));
     }

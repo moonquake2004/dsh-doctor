@@ -1,0 +1,312 @@
+{
+  "_comment": "畸形与边界输入语料（R2 样本律 / R13 环境泛化律）。每条都必须给出**确定判定**：不崩、不静默通过、目标检查给出预期状态。来源标注：forum=社区报告、upstream=上游错误路径、boundary=边界枚举（0/1/巨大/缺失/重复/陈旧）。",
+  "cases": [
+    {
+      "id": "bom-manifest",
+      "source": "forum#6758",
+      "desc": "profile 清单带 UTF-8 BOM（PowerShell 5.1 的 Set-Content -Encoding UTF8 默认写）",
+      "setup": {
+        "manifestRaw": "﻿{\"name\":\"web\",\"version\":\"0.0.0\",\"dsh\":{\"profile\":{\"bundles\":[]}}}"
+      },
+      "expect": {
+        "P15": "fail",
+        "othersStillRun": 3
+      }
+    },
+    {
+      "id": "truncated-manifest",
+      "source": "boundary",
+      "desc": "profile 清单被截断（JSON 不合法）——早期失败不得掐断整段",
+      "setup": {
+        "manifestRaw": "{ \"name\": \"web\", \"dsh\": { \"profile\": { \"bundles\": [ }"
+      },
+      "expect": {
+        "P0": "fail"
+      },
+      "knownGap": "D2：R4 隔离律未落地——profile 段仍会被早期失败掐断（实测只剩 2 条记录）"
+    },
+    {
+      "id": "manifest-is-directory",
+      "source": "boundary",
+      "desc": "package.json 居然是目录（拷贝事故）",
+      "setup": {
+        "manifestIsDir": true
+      },
+      "expect": {
+        "mustNotCrash": true,
+        "exitIn": [
+          0,
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "id": "patch-with-tab",
+      "source": "upstream#1724",
+      "desc": "cordis.patch.yml 用 tab 缩进（YAML 非法）",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": []
+            }
+          }
+        },
+        "patchRaw": "- insert:\n\t- id: x\n\t  name: x\n"
+      },
+      "expect": {
+        "P7": "fail"
+      }
+    },
+    {
+      "id": "patch-null",
+      "source": "upstream",
+      "desc": "cordis.patch.yml 内容是 YAML null（~）——无条目可比较，应为 skip（而非\"结构正常\"式通过）",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": []
+            }
+          }
+        },
+        "patchRaw": "~\n"
+      },
+      "expect": {
+        "P7": "skip"
+      }
+    },
+    {
+      "id": "bundle-without-manifest-field",
+      "source": "forum#6788",
+      "desc": "bundle 在启动列表里却未声明 dsh.bundle（0.1.6-alpha.1 起 loader 拒绝整个 profile）",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "cuse"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: cuse\n      name: cuse\n",
+        "nodeModules": {
+          "cuse/package.json": "{\"name\":\"cuse\",\"version\":\"1.0.0\",\"main\":\"index.js\"}",
+          "cuse/index.js": "export default {};\n"
+        }
+      },
+      "expect": {
+        "bootCheckFails": true,
+        "notGreened": true
+      }
+    },
+    {
+      "id": "session-first-frame-multi-line",
+      "source": "forum#6651",
+      "desc": "会话日志第一个 zstd 帧不止一行（harness 会拒绝加载）",
+      "setup": {
+        "sessionRows": [
+          {
+            "type": "session",
+            "version": 3,
+            "id": "s",
+            "createdAt": 1,
+            "cwd": "/tmp"
+          },
+          {
+            "type": "assistant/message",
+            "seq": 1,
+            "data": {
+              "turn": 1,
+              "step": 1,
+              "message": {
+                "content": []
+              }
+            }
+          }
+        ],
+        "sessionName": "s1",
+        "depth": 3
+      },
+      "expect": {
+        "mustNotCrash": true,
+        "exitIn": [
+          0,
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "id": "session-missing-data-message",
+      "source": "forum#6686",
+      "desc": "迁移后事件缺 data.message（打开时会 project 抛错）",
+      "setup": {
+        "sessionRows": [
+          {
+            "type": "assistant/message",
+            "seq": 1,
+            "data": {
+              "turn": 1,
+              "step": 1
+            }
+          }
+        ],
+        "sessionName": "s2",
+        "depth": 3,
+        "unNarrowed": true
+      },
+      "expect": {
+        "S14": "fail"
+      }
+    },
+    {
+      "id": "session-not-zstd",
+      "source": "forum#6739",
+      "desc": ".zstd 文件里其实不是 zstd（确定性损坏，应与「读取不稳」区分）",
+      "setup": {
+        "sessionName": "s3",
+        "depth": 3,
+        "rawZstd": "not a zstd frame at all\n",
+        "unNarrowed": true
+      },
+      "expect": {
+        "S11": "fail",
+        "S11DetailHas": "损坏"
+      }
+    },
+    {
+      "id": "session-two-level-layout",
+      "source": "boundary",
+      "desc": "会话目录只有两层（sessions/<名>/<文件>）——真实布局是三层，定位器应当找不到而不是崩",
+      "setup": {
+        "sessionRows": [
+          {
+            "type": "assistant/message",
+            "seq": 1,
+            "data": {
+              "turn": 1,
+              "step": 1,
+              "message": {
+                "content": []
+              }
+            }
+          }
+        ],
+        "sessionName": "s4",
+        "depth": 2
+      },
+      "expect": {
+        "mustNotCrash": true,
+        "exitIn": [
+          0,
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "id": "session-empty-file",
+      "source": "boundary",
+      "desc": "会话日志为空文件",
+      "setup": {
+        "sessionName": "s5",
+        "depth": 3,
+        "rawPlain": ""
+      },
+      "expect": {
+        "mustNotCrash": true,
+        "exitIn": [
+          0,
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "id": "client-bare-esm",
+      "source": "forum#6693-r3",
+      "desc": "client 产物写成裸 ESM（浏览器工厂加载会抛 Unexpected token 'export'）",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "esm"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: esm\n      name: esm\n",
+        "nodeModules": {
+          "esm/package.json": "{\"name\":\"esm\",\"version\":\"1.0.0\",\"type\":\"module\",\"main\":\"lib/index.js\",\"dsh\":{\"bundle\":{\"patch\":\"./cordis.patch.yml\"}}}",
+          "esm/cordis.patch.yml": "- insert:\n    - id: esm\n      name: esm\n",
+          "esm/lib/index.js": "export default {};\n",
+          "esm/client/index.js": "export default function () { return 1; }\n"
+        }
+      },
+      "expect": {
+        "P20": "notPass"
+      }
+    },
+    {
+      "id": "sandbox-symbol-bare",
+      "source": "forum#6693-r2",
+      "desc": "插件 host 侧裸引用沙箱专属符号 harness（apply() 内同步抛出 → 整棵树死）",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "sandboxy"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: sandboxy\n      name: sandboxy\n",
+        "nodeModules": {
+          "sandboxy/package.json": "{\"name\":\"sandboxy\",\"version\":\"1.0.0\",\"type\":\"module\",\"main\":\"lib/index.js\",\"dsh\":{\"bundle\":{\"patch\":\"./cordis.patch.yml\"}}}",
+          "sandboxy/cordis.patch.yml": "- insert:\n    - id: sandboxy\n      name: sandboxy\n",
+          "sandboxy/lib/index.js": "//#region styles\nconst s = \"deepseek-harness\";\nexport function apply(ctx) { return harness.handle; }\n"
+        }
+      },
+      "expect": {
+        "P21": "fail"
+      }
+    },
+    {
+      "id": "zero-bundles",
+      "source": "boundary",
+      "desc": "启动列表为空（零检查对象）——任何路径都不得宣称通过",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": []
+            }
+          }
+        },
+        "patchRaw": ""
+      },
+      "expect": {
+        "bootCheckNotGreened": true,
+        "jsonOkImpliesVerified": true,
+        "aggregateNotAllPass": true
+      }
+    }
+  ]
+}

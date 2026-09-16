@@ -1813,7 +1813,7 @@ test('A：examined === 0 的 pass 自动降为 skip（没看 ≠ 通过）', () 
   assert.ok(m, '未找到 report');
   const results = [];
   // 抽取实现时要一并提供 coverageNow（report 依赖它做上下文回退）
-  const fn = new Function('results', 'coverageNow', 'currentPhase', `${m[0]}\nreturn report;`)(results, () => null, null);
+  const fn = new Function('results', 'coverageNow', 'currentPhase', 'VERDICT_GLYPH_RE', `${m[0]}\nreturn report;`)(results, () => null, null, /[✓✔⊖✗✘⚠]/g);
   fn('profile', 'X1', true, '全部正常', undefined, 'builtin', 0);
   assert.equal(results[0].skip, true, '零检查对象时不得报通过');
   assert.equal(results[0].coverage, 'none');
@@ -1918,13 +1918,13 @@ test('R11 闭集律：源码里任何 ✓/⊖/✗ 都必须落在 printVerdict /
   const ranges = [
     bodyRange(/^function printVerdict\(/),
     bodyRange(/^function printItem\(/),
-    (() => { const i = lines.findIndex((l) => l.startsWith('const VERDICT_MARKS')); return i < 0 ? null : [i, i]; })(),
+    (() => { const i = lines.findIndex((l) => l.startsWith('const VERDICT_MARKS')); const j = lines.findIndex((l) => l.startsWith('const VERDICT_GLYPH_RE')); return i < 0 ? null : [i, j < 0 ? i : j]; })(),  // 含 VERDICT_GLYPH_RE（剥符号正则本身）
   ].filter(Boolean);
   assert.equal(ranges.length, 3, '三个收口点必须都存在');
   const isComment = (l) => l.trim().startsWith('//') || l.trim().startsWith('/*') || l.trim().startsWith('*');
   const outside = [];
   lines.forEach((l, i) => {
-    if (!/[✓⊖✗]/.test(l) || isComment(l)) return;
+    if (!/[✓⊖✗⚠]/.test(l) || isComment(l)) return;  // 红队 R6：⚠ 也是判定符号
     if (!ranges.some(([a, b]) => i >= a && i <= b)) outside.push(`${i + 1}: ${l.trim().slice(0, 80)}`);
   });
   assert.equal(outside.length, 0,
@@ -1982,5 +1982,59 @@ test('回归：每个段的覆盖量单位必须属于该段（env/profile/sessi
     .filter((c) => c.examinedWhat && units[c.phase] && !units[c.phase].has(c.examinedWhat))
     .map((c) => `${c.id}(phase=${c.phase}) 声称检查了「${c.examinedWhat}」`);
   assert.equal(bad.length, 0, `覆盖量单位串台: ${bad.join('; ')}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+/* ---------- 红队 R3：退出码不得随输出格式分叉 ---------- */
+
+test('红队R3（记录型）：三格式退出码当前仍分叉 —— 分歧已文档化，修它属于契约级决策', () => {
+  const home = tempHome();
+  const p = join(home, 'profiles', 'web');
+  mkdirSync(p, { recursive: true });
+  const args = ['--no-catalog', '--profile', 'web'];
+  const codes = [
+    ['--json', ...args],
+    ['--json', '--envelope', ...args],
+    args,
+  ].map((a) => spawnSync(process.execPath, [CLI, ...a], { encoding: 'utf8', env: { ...process.env, DSH_HOME: home } }).status);
+  const unique = [...new Set(codes)];
+  if (unique.length > 1) {
+    console.log(`      ↳ 同一输入退出码：json=${codes[0]} envelope=${codes[1]} text=${codes[2]}（分歧见 docs/check-authoring-rules.md §5；契约要求 0/1/2，主路径是 max(bad>0?1:0, secExit)）`);
+  }
+  assert.ok(codes.every((c) => [0, 1, 2].includes(c)), `退出码必须在 0/1/2 之内，实际 ${JSON.stringify(codes)}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+
+/* ---------- 红队 R3：退出码口径冲突（契约 vs 主路径）——先把契约钉住，再记录分歧 ---------- */
+
+test('红队R3（契约钉住）：--envelope 的退出码必须遵守 docs/doctor-contract.md:32（0 全通过 / 1 有 WARN / 2 有 FAIL）', () => {
+  const home = tempHome();
+  const p = join(home, 'profiles', 'web');
+  mkdirSync(p, { recursive: true }); // profile 清单缺失 → P0 fail → 契约要求 exit 2
+  const r = spawnSync(process.execPath, [CLI, '--json', '--envelope', '--no-catalog', '--profile', 'web'], {
+    encoding: 'utf8', env: { ...process.env, DSH_HOME: home },
+  });
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.exitCode, 2, '有 FAIL 时契约要求 2');
+  assert.equal(r.status, 2, '进程退出码必须与 envelope 的 exitCode 一致');
+  assert.equal(out.ok, false);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('红队R3（**已知分歧**，待决策）：主路径（--json / 文本）的退出码与契约不一致', () => {
+  // 契约说 1 = 任何 WARN、2 = 任何 FAIL；而主路径是 `max(bad>0 ? 1 : 0, secExit)`：
+  //   · 非安全 FAIL → 1（契约要求 2）
+  //   · 仅 WARN → 0（契约要求 1）
+  // 这是**契约级决策**（契约自己写明：改用 0/1/2 对消费者是破坏性变更，须走 MINOR），
+  // 所以此处不擅自改行为，而是把分歧钉成可复现的记录，并在 docs 里列为待决策。
+  const home = tempHome();
+  const p = join(home, 'profiles', 'web');
+  mkdirSync(p, { recursive: true });
+  const json = spawnSync(process.execPath, [CLI, '--json', '--no-catalog', '--profile', 'web'], { encoding: 'utf8', env: { ...process.env, DSH_HOME: home } });
+  const env = spawnSync(process.execPath, [CLI, '--json', '--envelope', '--no-catalog', '--profile', 'web'], { encoding: 'utf8', env: { ...process.env, DSH_HOME: home } });
+  const diverges = json.status !== env.status;
+  console.log(`      ↳ 同一输入：--json 退出码 ${json.status} / --envelope 退出码 ${env.status}${diverges ? '（**分歧仍在**，见 docs/check-authoring-rules.md §5）' : '（已一致）'}`);
+  assert.ok(true, '记录型用例：分歧本身已文档化，不在此处擅自改变契约行为');
   rmSync(home, { recursive: true, force: true });
 });

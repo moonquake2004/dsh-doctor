@@ -6,7 +6,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 CLI=plugin/dsh-doctor.mjs
-PASS=0; FAIL=0
+PASS=0; FAIL=0; GAPS=0
 chk() { # chk <名称> <条件成立则 0>
   if [ "$2" -eq 0 ]; then printf '  ✓ %s\n' "$1"; PASS=$((PASS+1)); else printf '  ✗ %s\n' "$1"; FAIL=$((FAIL+1)); fi
 }
@@ -38,8 +38,12 @@ H=$(tmp); mkdir -p "$H/profiles/web"; printf '\xEF\xBB\xBF{"name":"web","version
 out=$(DSH_HOME=$H node $CLI --json --no-catalog --profile web 2>/dev/null)
 echo "$out" | grep -q '"P15"' && chk "带 BOM 时 P15 仍报出（故障隔离）" 0 || chk "带 BOM 时 P15 仍报出" 1
 printf '{ "name": "web", "dsh": { "profile": { "bundles": [ }' > "$H/profiles/web/package.json"
+# 红队 R4：此前断言只有 n>1（2 条即可过）——**自证太弱**。真实期望是 profile 段其余检查也跑起来。
+# 当前实际只有 2 条（R4 隔离律未落地，见 docs/check-authoring-rules.md §5 D2），故这里如实记为**已知缺口**，
+# 而不是用一个宽松断言把它掩盖过去。
 n=$(DSH_HOME=$H node $CLI --json --no-catalog --profile web 2>/dev/null | grep -o '"id"' | wc -l | tr -d ' ')
-[ "$n" -gt 1 ] && chk "manifest 无法解析时其余检查仍运行（$n 项）" 0 || chk "manifest 无法解析时其余检查仍运行" 1
+if [ "$n" -ge 15 ]; then chk "manifest 无法解析时 profile 段其余检查仍运行（$n 项）" 0
+else printf '  ⊘ manifest 无法解析时 profile 段只剩 %s 条（**已知缺口 D2：R4 隔离律未落地**）\n' "$n"; GAPS=$((GAPS+1)); fi
 rm -rf "$H"
 
 echo "== 审计 4：论坛病例语料（R2 样本律：真实报告 → 回归用例，含健康对照） =="
@@ -47,8 +51,8 @@ node --test plugin/test/forum-cases.test.mjs >/dev/null 2>&1 && chk "论坛病�
 
 echo "== 审计 5：清单与闭集 =="
 node scripts/gen-check-inventory.mjs | diff -q - docs/check-inventory.md >/dev/null && chk "检查清单与代码一致" 0 || chk "检查清单与代码一致" 1
-node --test plugin/test/fixtures.mjs >/dev/null 2>&1 && chk "全套测试（含闭集断言）通过" 0 || chk "全套测试通过" 1
+node --test plugin/test/ >/dev/null 2>&1 && chk "全套测试（五套，含闭集/语料/论坛病例）通过" 0 || chk "全套测试通过" 1
 
 echo
-echo "审计结果：通过 $PASS 项，失败 $FAIL 项"
+echo "审计结果：通过 $PASS 项，失败 $FAIL 项，已知缺口 $GAPS 项"
 [ "$FAIL" -eq 0 ] || exit 1
