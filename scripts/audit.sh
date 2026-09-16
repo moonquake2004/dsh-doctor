@@ -51,7 +51,7 @@ node --test plugin/test/forum-cases.test.mjs >/dev/null 2>&1 && chk "论坛病�
 
 echo "== 审计 5：清单与闭集 =="
 node scripts/gen-check-inventory.mjs | diff -q - docs/check-inventory.md >/dev/null && chk "检查清单与代码一致" 0 || chk "检查清单与代码一致" 1
-node --test plugin/test/ >/dev/null 2>&1 && chk "全套测试（五套，含闭集/语料/论坛病例）通过" 0 || chk "全套测试通过" 1
+node --test plugin/test/*.mjs >/dev/null 2>&1 && chk "全套测试（五套，含闭集/语料/论坛病例）通过" 0 || chk "全套测试通过" 1
 
 echo
 echo "审计结果：通过 $PASS 项，失败 $FAIL 项，已知缺口 $GAPS 项"
