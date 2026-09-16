@@ -309,34 +309,6 @@
       }
     },
     {
-      "id": "host-dep-as-dependency",
-      "source": "forum#6789",
-      "desc": "插件把宿主机包 @deepseek-ai/dsh-scope 声明为普通 dependency → 自带第二份副本（未 hoist 时 P5 看不到）",
-      "setup": {
-        "manifest": {
-          "name": "web",
-          "version": "0.0.0",
-          "dsh": {
-            "profile": {
-              "bundles": [
-                "browser-runtime"
-              ]
-            }
-          }
-        },
-        "patchRaw": "- insert:\n    - id: br\n      name: browser-runtime\n",
-        "nodeModules": {
-          "browser-runtime/package.json": "{\"name\":\"browser-runtime\",\"version\":\"0.1.6-alpha.1\",\"main\":\"i.js\",\"dsh\":{\"bundle\":{\"patch\":\"./cordis.patch.yml\"}},\"dependencies\":{\"@deepseek-ai/dsh-scope\":\"0.1.6-alpha.1\"}}",
-          "browser-runtime/cordis.patch.yml": "- insert:\n    - id: br\n      name: browser-runtime\n",
-          "browser-runtime/i.js": "export default {};\n",
-          "browser-runtime/node_modules/@deepseek-ai/dsh-scope/package.json": "{\"name\":\"@deepseek-ai/dsh-scope\",\"version\":\"0.1.6-alpha.1\"}"
-        }
-      },
-      "expect": {
-        "P23": "fail"
-      }
-    },
-    {
       "id": "host-dep-as-peer-control",
       "source": "forum#6789 对照",
       "desc": "同一插件改用 peerDependencies 声明宿主机包 → 不得报错（防误报）",
@@ -361,90 +333,6 @@
       },
       "expect": {
         "P23": "pass"
-      }
-    },
-    {
-      "id": "host-copy-on-disk-without-manifest-key",
-      "source": "forum#6789 红队 F1",
-      "desc": "嵌套副本真在盘上但 manifest 不写 dependencies（旧判据只看键名 → 完全失明）",
-      "setup": {
-        "manifest": {
-          "name": "web",
-          "version": "0.0.0",
-          "dsh": {
-            "profile": {
-              "bundles": [
-                "rt"
-              ]
-            }
-          }
-        },
-        "patchRaw": "- insert:\n    - id: rt\n      name: rt\n",
-        "nodeModules": {
-          "rt/package.json": "{\"name\": \"rt\", \"version\": \"1.0.0\", \"main\": \"i.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}}",
-          "rt/cordis.patch.yml": "- insert:\n    - id: rt\n      name: rt\n",
-          "rt/i.js": "export default {};\n",
-          "rt/node_modules/@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
-        }
-      },
-      "expect": {
-        "P23": "fail"
-      }
-    },
-    {
-      "id": "host-dep-in-optionalDependencies",
-      "source": "forum#6789 红队 F2",
-      "desc": "宿主机包写在 optionalDependencies（默认也会安装 → 同样产生第二份副本）",
-      "setup": {
-        "manifest": {
-          "name": "web",
-          "version": "0.0.0",
-          "dsh": {
-            "profile": {
-              "bundles": [
-                "rt"
-              ]
-            }
-          }
-        },
-        "patchRaw": "- insert:\n    - id: rt\n      name: rt\n",
-        "nodeModules": {
-          "rt/package.json": "{\"name\": \"rt\", \"version\": \"1.0.0\", \"main\": \"i.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}, \"optionalDependencies\": {\"@deepseek-ai/dsh-scope\": \"0.1.6-alpha.1\"}}",
-          "rt/cordis.patch.yml": "- insert:\n    - id: rt\n      name: rt\n",
-          "rt/i.js": "export default {};\n",
-          "rt/node_modules/@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
-        }
-      },
-      "expect": {
-        "P23": "fail"
-      }
-    },
-    {
-      "id": "host-dep-via-npm-alias",
-      "source": "forum#6789 红队 F3",
-      "desc": "用 npm: 别名引入宿主包（键名不含 @deepseek-ai/ → 旧判据直接放行）",
-      "setup": {
-        "manifest": {
-          "name": "web",
-          "version": "0.0.0",
-          "dsh": {
-            "profile": {
-              "bundles": [
-                "rt"
-              ]
-            }
-          }
-        },
-        "patchRaw": "- insert:\n    - id: rt\n      name: rt\n",
-        "nodeModules": {
-          "rt/package.json": "{\"name\": \"rt\", \"version\": \"1.0.0\", \"main\": \"i.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}, \"dependencies\": {\"scope-copy\": \"npm:@deepseek-ai/dsh-scope@0.1.6-alpha.1\"}}",
-          "rt/cordis.patch.yml": "- insert:\n    - id: rt\n      name: rt\n",
-          "rt/i.js": "export default {};\n",
-          "rt/node_modules/@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
-        }
-      },
-      "expect": {
-        "P23": "fail"
       }
     },
     {
@@ -473,6 +361,255 @@
       },
       "expect": {
         "P23": "pass"
+      }
+    },
+    {
+      "id": "first-party-bundle-declares-host-deps-control",
+      "source": "2026-09-16 实测误报（P23 判据②）",
+      "desc": "厂商**自己的**核心 bundle 把宿主依赖写成 dependencies（正确写法，且盘上没有副本）→ 不得误报（实测：旧判据在真实 profile 上报出 109 处假警报）",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "first-party-bundle"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: fp\n      name: first-party-bundle\n",
+        "nodeModules": {
+          "first-party-bundle/package.json": "{\"name\": \"first-party-bundle\", \"version\": \"0.1.6-alpha.1\", \"main\": \"i.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}, \"dependencies\": {\"@deepseek-ai/dsh-agent\": \"0.1.6-alpha.1\", \"@deepseek-ai/dsh-tools\": \"0.1.6-alpha.1\"}}",
+          "first-party-bundle/cordis.patch.yml": "- insert:\n    - id: fp\n      name: first-party-bundle\n",
+          "first-party-bundle/i.js": "export default {};\n"
+        }
+      },
+      "expect": {
+        "P23": "pass"
+      }
+    },
+    {
+      "id": "host-copy-nested-real-layout",
+      "source": "forum#6789",
+      "desc": "真实布局：宿主层提供 dsh-scope，且 bundle 自带一份（未 hoist 到顶层）→ 两个实例",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "rt"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: rt\n      name: rt\n",
+        "nodeModules": {
+          "rt/package.json": "{\"name\": \"rt\", \"version\": \"1.0.0\", \"main\": \"i.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}}",
+          "rt/cordis.patch.yml": "- insert:\n    - id: rt\n      name: rt\n",
+          "rt/i.js": "export default {};\n",
+          "rt/node_modules/@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
+        },
+        "hostLayer": {
+          "@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
+        }
+      },
+      "expect": {
+        "P23": "fail"
+      }
+    },
+    {
+      "id": "host-copy-on-disk-without-manifest-key",
+      "source": "forum#6789 红队 F1",
+      "desc": "副本真在解析路径上，但 manifest 不写 dependencies（旧判据只看键名 → 完全失明）",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "rt"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: rt\n      name: rt\n",
+        "nodeModules": {
+          "rt/package.json": "{\"name\": \"rt\", \"version\": \"1.0.0\", \"main\": \"i.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}}",
+          "rt/cordis.patch.yml": "- insert:\n    - id: rt\n      name: rt\n",
+          "rt/i.js": "export default {};\n",
+          "rt/node_modules/@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
+        },
+        "hostLayer": {
+          "@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
+        }
+      },
+      "expect": {
+        "P23": "fail"
+      }
+    },
+    {
+      "id": "host-dep-in-optionalDependencies",
+      "source": "forum#6789 红队 F2",
+      "desc": "宿主包写在 optionalDependencies（默认也会安装 → 同样产生第二份副本）",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "rt"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: rt\n      name: rt\n",
+        "nodeModules": {
+          "rt/package.json": "{\"name\": \"rt\", \"version\": \"1.0.0\", \"main\": \"i.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}, \"optionalDependencies\": {\"@deepseek-ai/dsh-scope\": \"0.1.6-alpha.1\"}}",
+          "rt/cordis.patch.yml": "- insert:\n    - id: rt\n      name: rt\n",
+          "rt/i.js": "export default {};\n",
+          "rt/node_modules/@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
+        },
+        "hostLayer": {
+          "@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
+        }
+      },
+      "expect": {
+        "P23": "fail"
+      }
+    },
+    {
+      "id": "host-dep-via-npm-alias",
+      "source": "forum#6789 红队 F3",
+      "desc": "npm: 别名：装在 `node_modules/scope-copy`，**真身在 manifest 的 name** 里 → 靠读 manifest 名字才能识别",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "rt"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: rt\n      name: rt\n",
+        "nodeModules": {
+          "rt/package.json": "{\"name\": \"rt\", \"version\": \"1.0.0\", \"main\": \"i.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}, \"dependencies\": {\"scope-copy\": \"npm:@deepseek-ai/dsh-scope@0.1.6-alpha.1\"}}",
+          "rt/cordis.patch.yml": "- insert:\n    - id: rt\n      name: rt\n",
+          "rt/i.js": "export default {};\n",
+          "rt/node_modules/scope-copy/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
+        },
+        "hostLayer": {
+          "@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
+        }
+      },
+      "expect": {
+        "P23": "fail"
+      }
+    },
+    {
+      "id": "host-core-bundle-duplicate",
+      "source": "forum#6789 红队 A",
+      "desc": "**宿主自己的核心 bundle**（带 dsh.bundle 字段）出现第二份实例——比 #6789 更致命，且不得因类型标签被豁免",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "rt"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: rt\n      name: rt\n",
+        "nodeModules": {
+          "rt/package.json": "{\"name\": \"rt\", \"version\": \"1.0.0\", \"main\": \"i.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}}",
+          "rt/cordis.patch.yml": "- insert:\n    - id: rt\n      name: rt\n",
+          "rt/i.js": "export default {};\n",
+          "rt/node_modules/@deepseek-ai/dsh-base/package.json": "{\"name\": \"@deepseek-ai/dsh-base\", \"version\": \"0.1.6-alpha.1\", \"dsh\": {\"bundle\": {\"patch\": \"./p.yml\"}}}"
+        },
+        "hostLayer": {
+          "@deepseek-ai/dsh-base/package.json": "{\"name\": \"@deepseek-ai/dsh-base\", \"version\": \"0.1.6-alpha.1\", \"dsh\": {\"bundle\": {\"patch\": \"./p.yml\"}}}"
+        }
+      },
+      "expect": {
+        "P23": "fail"
+      }
+    },
+    {
+      "id": "residual-empty-dir-is-not-a-copy",
+      "source": "forum#6789 红队 B",
+      "desc": "中断安装留下的空目录（无 manifest）→ 不得报「宿主包副本」（应作残留提示）",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "rt"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: rt\n      name: rt\n",
+        "nodeModules": {
+          "rt/package.json": "{\"name\": \"rt\", \"version\": \"1.0.0\", \"main\": \"i.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}}",
+          "rt/cordis.patch.yml": "- insert:\n    - id: rt\n      name: rt\n",
+          "rt/i.js": "export default {};\n",
+          "rt/node_modules/@deepseek-ai/dsh-scope": "__EMPTY_DIR__"
+        },
+        "hostLayer": {
+          "@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
+        }
+      },
+      "expect": {
+        "P23": "pass"
+      }
+    },
+    {
+      "id": "quarantined-bundle-skipped",
+      "source": "forum#6789 红队 D",
+      "desc": "已被隔离的 bundle（dsh.profile._quarantined）→ 跳过，不参与副本判定",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "rt"
+              ],
+              "_quarantined": [
+                {
+                  "name": "rt"
+                }
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: rt\n      name: rt\n",
+        "nodeModules": {
+          "rt/package.json": "{\"name\": \"rt\", \"version\": \"1.0.0\", \"main\": \"i.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}}",
+          "rt/cordis.patch.yml": "- insert:\n    - id: rt\n      name: rt\n",
+          "rt/i.js": "export default {};\n",
+          "rt/node_modules/@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
+        },
+        "hostLayer": {
+          "@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
+        }
+      },
+      "expect": {
+        "P23": "skip"
       }
     }
   ]

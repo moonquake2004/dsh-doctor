@@ -286,6 +286,11 @@ function report(section, id, ok, detail, fix, src, examined) {
   // 源码里没有 ✓ 也能让 stdout 出现 ✓。故在收口处剥掉数据里的判定符号（含 ⚠）。
   const safeDetail = String(detail).replace(VERDICT_GLYPH_RE, '·');
   const rec = { section, id, ok, detail: safeDetail, fix, src: src ?? 'builtin', phase: currentPhase };
+  // 覆盖量对**失败**记录同样重要（"我看了多少才说它有问题"）——此前只在 ok===true 时记录（实测缺口）
+  if (ok !== true && typeof examined === 'number') {
+    rec.examined = examined;
+    if (typeof arguments[7] === 'string') rec.examinedWhat = arguments[7];
+  }
   if (ok === true) {
     // 只有显式申报才算数；`examinedWhat` 也必须与**同一处**申报配套（由调用点传 what）
     if (typeof examined === 'number') {
@@ -857,79 +862,109 @@ function checkProfile(name) {
     }
   }
 
-  // P23：bundle **真的自带了一份宿主机包的副本**（社区 #6789）
+  // P23：bundle 的解析路径上出现了**宿主包的第二个实例**（社区 #6789）
   //
-  // 报告的现象：`@deepseek-ai/dsh-experimental-browser-use-runtime` 把 `@deepseek-ai/dsh-scope` 写成普通 dependency，
-  // 于是 profile 里出现**第二份实例** → 两份的 Symbol/协议不匹配 → "第一个会话能用、之后每个会话都失败"。
+  // 现象：插件把 `@deepseek-ai/dsh-scope` 当普通依赖 → 自带一份副本 → 两份实例的 Symbol/协议不匹配 →
+  // "第一个会话能用、之后每个会话都失败"。
   //
-  // 三轮红队把这条检查打穿过三次，教训是**判"代理"而不是判"条件"**：
-  //   · 第一版只看 manifest 键名（`dependencies` 里有 `@deepseek-ai/*`）→
-  //     副本**真的躺在盘上**但 manifest 没写时完全失明（红队 F1）；`optionalDependencies`（F2）、
-  //     `npm:`/`file:` 别名（F3）全漏；同 scope 的**插件依赖**被误报（F5）；
-  //     bundle 装在父层 `profiles/node_modules` 时整条跳过（F4）。
-  // 现在改为**判条件本身**：
-  //   ① 扫 bundle 自己的 `node_modules/@deepseek-ai/*`（真实存在的副本才报——这才是 #6789 的状态）；
-  //   ② 再看 `dependencies`/`optionalDependencies` 里指向宿主包的**别名**（`npm:` 前缀或键名本身就是宿主包名）；
-  //   ③ "是不是宿主机包"用 `resolveHostVersion`（profile nm + 父层两根）判定，**不用裸前缀**（修 F5）；
-  //   ④ 解析根与 `resolveHostVersion` 一致（含父层，修 F4）；排除 `_quarantined` 与本身就是 bundle 的插件包（F5/F6）。
+  // **判据（第四轮红队打穿三版后才站住）：判"条件"，且不靠任何类型标签。**
+  //   条件 = 同一个包名**既在 bundle 自己的解析路径里、也能沿祖先链解析到** ⇒ 确实存在两个实例。
+  // 走过的弯路（都在 docs/redteam-0.8.4.md / -0.8.5.md 留档）：
+  //   v1 只看 manifest 键名 → 副本躺在盘上也失明（F1）；
+  //   v2 用 installAnchor 判"宿主是否提供" → 该锚点依赖 PATH，**本机为 null** → 静默失效；
+  //   v3 用 `dsh.bundle`/`dsh.client` 区分"插件 vs 宿主库" → **宿主自己的 dsh-base/dsh-web-app/dsh-client-ui-*
+  //      全都带这两个字段**，于是"宿主核心 bundle 的第二份实例"（更致命）恰好被豁免（红队 A）；
+  //   v4（现行）**不比标签、只比名字与解析路径** —— 无豁免面，也不需要锚点。
+  // 另：manifest 读不出来时**不得据此报副本**（红队 B：空目录/截断/同名文件都会被误报），
+  //     只作为"残留目录"单独提示。
   {
+    // 在一个目录的 node_modules 里做有界扫描，找出所有包名属于 @deepseek-ai/* 的包
+    const scanHostCopies = (fromDir) => {
+      const hits = []; const residual = [];
+      let budget = 3000;
+      const walk = (dir, depth) => {
+        if (depth > 6 || budget <= 0) return;
+        let entries = [];
+        try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        // 目录自身的 manifest 也可能是别名（红队 C：`nm/scope-copy` 的 name 才是 @deepseek-ai/dsh-scope）
+        if (!dir.endsWith('node_modules')) {
+          const selfMf = (() => { try { return readJsonReportingBom(join(dir, 'package.json')).data; } catch { return null; } })();
+          if (selfMf && typeof selfMf.name === 'string' && selfMf.name.startsWith('@deepseek-ai/')) {
+            hits.push({ name: selfMf.name, dir, version: selfMf.version });
+          }
+        }
+        for (const e of entries) {
+          if (budget-- <= 0) return;
+          if (!e.isDirectory() && !e.isSymbolicLink()) continue;
+          const full = join(dir, e.name);
+          if (e.name === '@deepseek-ai') {
+            let subs = [];
+            try { subs = readdirSync(full, { withFileTypes: true }); } catch { continue; }
+            for (const sub of subs) {
+              if (!sub.isDirectory() && !sub.isSymbolicLink()) continue;
+              const pdir = join(full, sub.name);
+              const mf = (() => { try { return readJsonReportingBom(join(pdir, 'package.json')).data; } catch { return null; } })();
+              const name = `@deepseek-ai/${sub.name}`;
+              if (mf && typeof mf.name === 'string' && mf.name === name) hits.push({ name, dir: pdir, version: mf.version });
+              else if (!mf) residual.push(pdir);
+            }
+            continue; // 不再往 @deepseek-ai 内部递归
+          }
+          if (e.name === 'node_modules' || e.name === '.pnpm' || e.name.startsWith('@') || !e.name.startsWith('.')) {
+            walk(full, depth + 1);
+          }
+        }
+      };
+      walk(join(fromDir, 'node_modules'), 1);
+      return { hits, residual };
+    };
+    // 同一包名能否沿**祖先链**解析到（= 宿主层也提供它）
+    // 解析链：bundle 所在的 node_modules（profile 顶层）→ 上一层 node_modules（宿主共享根）→ 再往上。
+    // **必须从 bundle 之外开始**：若从 bundle 目录自己开始，嵌套的那份副本会把条件自我确认为真
+    // （实测：F5 对照"宿主不提供的同 scope 插件"因此被误报）。
+    const ancestorResolves = (bundleDir, name) => {
+      let nm = dirname(bundleDir); // <profile>/node_modules
+      for (let i = 0; i < 10 && nm; i++) {
+        if (existsSync(join(nm, name, 'package.json'))) return true;
+        const up = dirname(dirname(nm));
+        if (up === dirname(nm)) break;
+        nm = join(up, 'node_modules');
+      }
+      return false;
+    };
+
     const roots23 = [join(dir, 'node_modules'), join(dirname(dir), 'node_modules')];
-    const bundleSet = new Set(bundles.map(String));
-    const quarantined23 = new Set((manifest._quarantined ?? []).map((q) => String(q.name ?? q)));
-    const resolveBundleDir = (b) => roots23.map((r) => join(r, String(b))).find((d) => existsSync(join(d, 'package.json'))) ?? null;
-    // 判定"这是宿主库还是插件"用**内容**，不用锚点也不用裸前缀——
-    // 教训链：① 只看 manifest 键名 → 副本躺在盘上也失明（红队 F1）；
-    // ② 改用 CLI 安装树（installAnchor）→ 它依赖 PATH 里的 node_modules/.bin，
-    //    实测**本机也是 null**，于是永远判不出宿主包（等于静默失效）；
-    // ③ 现在：读**副本自己的 manifest** —— 带 `dsh.bundle`/`dsh.client` 的是**插件**（依赖它是正确写法，红队 F5），
-    //    不带的才是**宿主库**（出现第二份副本即 #6789 的条件）。
-    const isPluginPkg = (mf) => Boolean(mf && mf.dsh && (mf.dsh.bundle || mf.dsh.client));
-    const readPkg = (d) => { try { return readJsonReportingBom(join(d, 'package.json')).data; } catch { return null; } };
+    const quarantined23 = new Set(((manifest.dsh?.profile?._quarantined) ?? manifest._quarantined ?? [])
+      .map((q) => String(q.name ?? q))); // 红队 D：写入方在 dsh.profile._quarantined（此前只读顶层，功能不生效）
     let scanned23 = 0;
-    const issues23 = [];
+    const issues23 = []; const residual23 = [];
     for (const b of bundles) {
       if (quarantined23.has(String(b))) continue;
-      const bdir = resolveBundleDir(b);
+      const bdir = roots23.map((r) => join(r, String(b))).find((d) => existsSync(join(d, 'package.json')));
       if (!bdir) continue; // 解析不到 → 由 P1 负责
       scanned23++;
-      // ① 真实存在的第二份副本
-      let nested = [];
-      try { nested = readdirSync(join(bdir, 'node_modules', '@deepseek-ai')); } catch { /* 无嵌套目录 */ }
-      for (const n of nested) {
-        const full = `@deepseek-ai/${n}`;
-        const nestedDir = join(bdir, 'node_modules', '@deepseek-ai', n);
-        const nmf = readPkg(nestedDir);
-        if (!isPluginPkg(nmf)) {
-          issues23.push(`${b} 自带**宿主库**副本 ${full}${nmf?.version ? `@${nmf.version}` : ''}（嵌套在它自己的 node_modules 里，P5 只看顶层所以看不到）`);
-        }
-      }
-      // ② 别名 / optional 指向宿主包
-      let mf23 = null;
-      try { mf23 = readJsonReportingBom(join(bdir, 'package.json')).data; } catch { /* 忽略 */ }
-      for (const field of ['dependencies', 'optionalDependencies']) {
-        for (const [k, v] of Object.entries(mf23?.[field] ?? {})) {
-          const target = /^npm:(@deepseek-ai\/[^@]+)@/.exec(String(v));
-          const name = target ? target[1] : (k.startsWith('@deepseek-ai/') ? k : null);
-          if (!name || bundleSet.has(name)) continue; // 同 scope 的插件依赖插件 = 正确写法（F5）
-          // 目标落在 profile 两根里且**不是插件** → 是宿主库被当普通依赖引入（会带来第二份副本）
-          const dirs = roots23.map((r) => join(r, name)).concat([join(bdir, 'node_modules', name)]);
-          const found = dirs.map(readPkg).find((m) => m && !isPluginPkg(m));
-          if (found) issues23.push(`${b} 用 ${field} 引入宿主库 ${name}${target ? `（别名 ${k} → ${v}）` : ''}`);
+      const { hits, residual } = scanHostCopies(bdir);
+      for (const r of residual) residual23.push(r.replace(dir + '/', '').replace(bdir + '/', `${b}/`));
+      for (const h of hits) {
+        // 只有当同一包名**沿祖先链也能解析到**时，才是"两个实例"（宿主也提供它）
+        if (ancestorResolves(bdir, h.name)) {
+          issues23.push(`${b} 的解析路径里另有一份 ${h.name}${h.version ? `@${h.version}` : ''}（宿主层也提供同名包 → 两个实例）`);
         }
       }
     }
     if (issues23.length) {
       report('profile', 'P23', false,
-        `已装 bundle 自带**宿主包的第二份副本**（${issues23.length} 处 / 扫过 ${scanned23} 个 bundle）——`
+        `bundle 的解析路径上出现**宿主包的第二份实例**（${issues23.length} 处 / 扫过 ${scanned23} 个 bundle）——`
         + `两份实例的 Symbol/协议不匹配时，典型症状是"第一个会话能用、之后每个会话都失败"（社区 #6789：\`dsh-scope\`）：\n  `
         + issues23.slice(0, 5).join('\n  ')
-        + (issues23.length > 5 ? `\n  …另有 ${issues23.length - 5} 处` : ''),
-        '在该插件的 package.json 里把宿主机包从 dependencies/optionalDependencies 改为 **peerDependencies**（宿主机包由宿主共享根提供）；'
-        + '若副本是构建产物带进来的，清理其 node_modules 后重装；并向上游报告该发布缺陷',
+        + (issues23.length > 5 ? `\n  …另有 ${issues23.length - 5} 处` : '')
+        + (residual23.length ? `\n  （另有 ${residual23.length} 个读取失败的残留目录，未计入副本判定）` : ''),
+        '把该插件的这类依赖改为 peerDependencies（宿主包由宿主共享根提供）；若副本来自构建产物或残留安装，清理其 node_modules 后重装',
         undefined, scanned23, '已装 bundle');
     } else {
       report('profile', 'P23', true,
-        `已装 bundle 均未自带宿主包副本（扫过 ${scanned23} 个 bundle 的 node_modules 与依赖声明）`,
+        `bundle 的解析路径上未出现宿主包的第二个实例（扫过 ${scanned23} 个 bundle）`
+        + (residual23.length ? `；另有 ${residual23.length} 个读取失败的残留目录，未计入判定` : ''),
         undefined, undefined, scanned23, '已装 bundle');
     }
   }
@@ -1134,6 +1169,7 @@ function checkProfile(name) {
   //   2) 顶层映射(key: value)与顶层序列(- xxx)混排 → js-yaml "document separator expected"
   //   3) tab 缩进（YAML 硬错误）；4) insert 缺冒号
   const yamlProblems = [];
+  let patchEntries = 0;   // 块外声明：else 分支要用它申报覆盖量（块内的 topLines 在那里不可见）
   const patchText = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : '';
   if (patchText) {
     const topLines = patchText.split('\n');
@@ -1141,6 +1177,7 @@ function checkProfile(name) {
     topLines.forEach((line, i) => {
       if (!line.trim() || line.trim().startsWith('#')) return;
       if (line.includes('\t')) yamlProblems.push(`第 ${i + 1} 行含制表符缩进（YAML 禁止 tab）`);
+      if (/^\s*-\s/.test(line)) patchEntries++;   // 覆盖量单位：patch 条目数
       if (/^\s*(~|null|Null|NULL)\s*insert\s*:/.test(line)) yamlProblems.push(`第 ${i + 1} 行 "${line.trim()}" —— ~ 是 YAML null 字面量，应为 "- insert:"（#1724）`);
       else if (/^\s*-\s*insert(\s|$)/.test(line) && !/^\s*-\s*insert\s*:/.test(line)) yamlProblems.push(`第 ${i + 1} 行 "${line.trim()}" —— "- insert" 缺冒号`);
       // 顶层混排检测：col 0 的映射键 vs col 0 的序列项
@@ -1152,7 +1189,11 @@ function checkProfile(name) {
     if (hasTopMapping && hasTopSeq) yamlProblems.push('顶层同时存在 key: value 映射与 - xxx 序列（js-yaml 报 "stream or a document separator is expected"，#1724 实测）');
   }
   if (yamlProblems.length) report('profile', 'P7', false, `cordis.patch.yml 结构错误（boot 会崩，UI 打不开 #1724）: ${yamlProblems.join('; ')}`, 'patch 必须是顶层纯列表（只有 - insert: / - id: 条目）：删掉顶层 key: value 行；~ 是 YAML null；缩进用空格不用 tab');
-  else report('profile', 'P7', true, 'cordis.patch.yml 结构正常（无 tab / 无 ~ insert / 无映射-序列混排）', undefined);
+  else {
+    // 显式申报覆盖量：单位是**patch 条目数**。`~`（YAML null）表示 0 个条目 → 由覆盖不变量降级为 skip，
+    // 而不是宣称「结构正常」（那正是「没比较却说没问题」）。
+    report('profile', 'P7', true, 'cordis.patch.yml 结构正常（无 tab / 无 ~ insert / 无映射-序列混排）', undefined, undefined, patchEntries, 'patch 条目');
+  }
 
   // P8/P9 需要扫描 bundle 构建产物：收集目录下有限深度的 .js 文件（lib/dist/根 + main 入口，跳过 node_modules）
 

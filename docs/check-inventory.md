@@ -39,7 +39,7 @@
 | `P2` | profile | bundle vs 用户 patch 冲突（#1404） | #1377 #1404 |
 | `P20` | profile | 注意 | — |
 | `P21` | profile | client 侧还常通过 ctx.get('host'/'styles') 取沙箱服务 | — |
-| `P23` | profile | 目标落在 profile 两根里且**不是插件** → 是宿主库被当普通依赖引入（会带来第二 | — |
+| `P23` | profile | 只有当同一包名**沿祖先链也能解析到**时，才是"两个实例"（宿主也提供它） | — |
 | `P3` | profile | 并向上找一层以覆盖 profile 根安装（~/.dsh/profiles/node_mod | #1197 #880 |
 | `P4` | profile | P4 file | #1197 |
 | `P5` | profile | symlink 指向宿主同一份（#1697 的 link | #1197 #1486 |

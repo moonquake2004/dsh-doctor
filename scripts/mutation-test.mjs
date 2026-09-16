@@ -78,10 +78,11 @@ const MUTATIONS = [
   {
     id: 'P23-host-dep-detection',
     desc: 'P23 不再检出"插件把宿主机包声明为普通依赖"（#6789 漏检回归）',
-    // 判据已从"manifest 键名"升级为"副本是否真在盘上"（红队 F1–F3）→ 变异点随之更新
-    find: "if (!isPluginPkg(nmf)) {",
+    // 判据历经 v1→v5（键名 → 盘上条件 → 内容标签 → 名字+解析链）→ 变异点随最终判据：
+    // "同一包名是否也能沿祖先链解析到"（= 是否真的存在两个实例）
+    find: "if (ancestorResolves(bdir, h.name)) {",
     replace: "if (false) {",
-    test: 'plugin/test/corpus.test.mjs', pattern: 'host-copy-on-disk|host-dep-as-dependency',
+    test: 'plugin/test/corpus.test.mjs', pattern: 'host-copy-nested-real-layout|host-core-bundle-duplicate',
   },
   {
     id: 'catalog-skip-as-pass',

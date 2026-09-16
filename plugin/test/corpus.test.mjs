@@ -32,11 +32,20 @@ function build(home, c) {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'package.json'), s.manifestRaw ?? JSON.stringify(s.manifest, null, 2));
     if (s.patchRaw !== undefined) writeFileSync(join(dir, 'cordis.patch.yml'), s.patchRaw);
-    for (const [rel, content] of Object.entries(s.nodeModules ?? {})) {
+  for (const [rel, content] of Object.entries(s.nodeModules ?? {})) {
       const f = join(dir, 'node_modules', rel);
       mkdirSync(dirname(f), { recursive: true });
+      // 哨兵：表示"目录存在但没有 package.json"（中断安装的残留）——直接写 null 会让 writeFileSync 抛错
+      if (content === '__EMPTY_DIR__') { mkdirSync(f, { recursive: true }); continue; }
       writeFileSync(f, content);
     }
+  }
+  // 宿主共享根：真实布局里宿主包在 `profiles/node_modules`（父层），是 bundle 的**祖先链**——
+  // 判定"第二份实例"必须靠它；fixture 若只放嵌套副本，就测不到真实条件（红队第五轮指出）。
+  for (const [rel, content] of Object.entries(s.hostLayer ?? {})) {
+    const f = join(home, 'profiles', 'node_modules', rel);
+    mkdirSync(dirname(f), { recursive: true });
+    writeFileSync(f, content);
   }
   if (s.sessionName) {
     const dir = s.depth === 2
@@ -93,6 +102,7 @@ for (const c of CASES) {
         if (want === 'fail') assert.equal(got, 'fail', `${key} 期望 fail，实际 ${got}`);
         else if (want === 'pass') assert.equal(got, 'pass', `${key} 期望 pass（防误报），实际 ${got}`);
         else if (want === 'notPass') assert.notEqual(got, 'pass', `${key} 不应为 pass（实际 pass）`);
+        else if (want === 'skip') assert.equal(got, 'skip', `${key} 期望 skip，实际 ${got}`);
       }
       if (e.S11DetailHas) {
         const d = data.checks.find((x) => x.id === 'S11')?.detail ?? '';
