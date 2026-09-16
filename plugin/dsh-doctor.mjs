@@ -221,8 +221,36 @@ function hasDshEnvironment(home = HOME) {
   return existsSync(join(home, 'sessions')) || existsSync(join(home, 'settings.yaml'));
 }
 
-function report(section, id, ok, detail, fix, src) {
-  results.push({ section, id, ok, detail, fix, src: src ?? 'builtin' });
+/**
+ * 记录一条检查结论。
+ *
+ * **覆盖不变量（2026-09 反思后加入）**：一条检查说"通过"时，必须能说出**它检查了多少东西**。
+ * 起因是一组实测：空环境（零 bundle、无会话库）下曾出现 **18 项 pass，其中 14 项连一个数量都没有** ——
+ * 也就是说"我什么都没看"与"我全看过、很干净"打印出来完全一样。`--boot-check` 对
+ * "bundle 缺 dsh.bundle"（零 entry 可探）给出"✓ 全部可导入"就是这个 bug 的一个实例（社区 #6788）。
+ *
+ * 规则：
+ *   · `examined === 0` → **不得 pass**，自动降为 skip（"无可检查对象"）——硬不变量，CI 有测试盯着；
+ *   · `examined` 未报告 → 结果带 `coverage: 'unreported'`（机器可读的欠账标记），可被测试度量并逐项清零。
+ */
+let coverageContext = null; // 当前检查段"检查了多少同类对象"的默认值（由 setCoverage 设置）
+function setCoverage(n, what) { coverageContext = typeof n === 'number' ? { n, what } : null; }
+function coverageNow() { return coverageContext; }
+
+function report(section, id, ok, detail, fix, src, examined) {
+  const zeroCheck = typeof examined === 'number' ? examined : coverageNow()?.n;
+  if (ok === true && zeroCheck === 0) {
+    results.push({ section, id, ok: true, skip: true, coverage: 'none', detail: `${detail}（无可检查对象，未做任何比较）`, fix, src: src ?? 'builtin' });
+    return;
+  }
+  const rec = { section, id, ok, detail, fix, src: src ?? 'builtin' };
+  if (ok === true) {
+    const ctx = coverageNow();
+    const n = typeof examined === 'number' ? examined : ctx?.n;
+    if (typeof n === 'number') { rec.examined = n; if (ctx?.what) rec.examinedWhat = ctx.what; }
+    else rec.coverage = 'unreported';
+  }
+  results.push(rec);
 }
 
 /** skip 状态（v1 词汇表 r5：#1719）——"不适用"而非"通过"，必须带 reason（detail）。不计入 pass/fail，不翻退出码。 */
@@ -559,6 +587,7 @@ function checkProfile(name) {
   }
   const bundles = manifest.dsh?.profile?.bundles ?? [];
   const deps = manifest.dependencies ?? {};
+  setCoverage(bundles.length, 'bundle 条目');
 
   const installAnchor = (() => {
     // 从 PATH 找 dsh 的安装目录（node_modules），用于 bundle 双锚点解析
@@ -692,7 +721,7 @@ function checkProfile(name) {
     if (!profManifest || !(profManifest.dsh && profManifest.dsh.profile)) {
       reportSkip('profile', 'P18', '未找到 profile manifest（无 dsh.profile），跳过 version 检查');
     } else if (typeof profManifest.version === 'string' && profManifest.version.length > 0) {
-      report('profile', 'P18', true, `profile manifest 声明了 version（${profManifest.version}），不触发 #6667`);
+      report('profile', 'P18', true, `profile manifest 声明了 version（${profManifest.version}），不触发 #6667`, undefined, 'builtin', 1);
     } else {
       report('profile', 'P18', false,
         `profile manifest 有 name（${profManifest.name}）但**没有 version**——与 #6667 的条件一致：package inventory 在解析**游离本地模块**时会把该 manifest 当包处理并抛 "must declare non-empty name and version"（dsh-plugin-package-inventory-deepseek:34；其 allowAnonymous 只容忍缺 name），表现为 DeepSeek 请求 REQUEST_EXTENSION 失败`,
@@ -804,26 +833,8 @@ function checkProfile(name) {
     }
   }
 
-  // P22：profile manifest 带 UTF-8 BOM（#6758）—— **硬失败且报错不指向病因**
-  // DSH 直接 `JSON.parse` 该文件：带 BOM 时抛 `Unexpected token '...' is not valid JSON` 并**起不来**；
-  // 而 GBK 控制台会把 BOM 三个字节渲染成乱码，用户完全看不出是编码问题。
-  // 这条判据零误报，且正是"报错不指向病因"要补的那一句：**是 BOM，不是 JSON 语法**。
-  {
-    const profRead22 = readJsonReportingBom(join(dir, 'package.json'));
-    if (!profRead22.exists) {
-      reportSkip('profile', 'P22', '无 profile manifest，跳过 BOM 检查');
-    } else if (profRead22.hadBom) {
-      report('profile', 'P22', false,
-        `profile manifest 带 **UTF-8 BOM**（EF BB BF）—— DSH 会直接 \`JSON.parse\` 该文件：`
-        + `BOM 会让它抛 \`SyntaxError: Unexpected token '…' is not valid JSON\`（#6758）并**启动硬失败**；`
-        + `而在 GBK 控制台上那三个字节会显示成乱码，报错里看不出是编码问题`,
-        '去掉 BOM（保留 UTF-8 无 BOM）：PowerShell 5.1 的 `Set-Content -Encoding UTF8` 默认会写 BOM，改用 '
-        + '`[IO.File]::WriteAllText($p, (Get-Content $p -Raw), (New-Object Text.UTF8Encoding $false))`，'
-        + '或任何「UTF-8（无 BOM）」保存方式；本工具的其余检查已忽略 BOM 继续工作');
-    } else {
-      report('profile', 'P22', true, 'profile manifest 无 UTF-8 BOM（不会触发 #6758 的启动硬失败）');
-    }
-  }
+  // P22 已撤销：profile manifest 的 BOM 由 P15 覆盖（同一事实只应有一个归属）。
+  // 2026-09 反思的产物：加检查前必须先查清单——我当初没查，于是加了一条与 P15 重复的检查。
 
   // P19：插件声明的 host peer 范围 vs 实际提供的 host 版本（社区 #6678 @ciceroyang 提案）
   // 这是"升级后起不来"的常见原因之一：插件声明只支持某段 core 版本，而实际装的核心已在区间外，
@@ -1254,9 +1265,11 @@ function packageNamedExports(pkgDir) {
       const bundleVersion = JSON.parse(readFileSync(bundlePkg, 'utf8')).version;
       const cliVersion = localVersion();
       const same = bundleVersion === cliVersion;
+      // 显式覆盖量：P12 的比较对象是"已装的候选包"（1 个），不是 bundle 列表长度——
+      // 这正是上下文默认值需要被逐项复核的地方（否则 0 个 bundle 的 profile 会被误降为 skip）。
       report('profile', 'installed_bundle', same,
         same ? `profile 内 bundle 版本 ${bundleVersion} 与运行 CLI ${cliVersion} 一致` : `profile 内 bundle 版本 ${bundleVersion} ≠ 运行 CLI ${cliVersion}（web 面板/API 跑的是 bundle，两边行为可能不一致；若刚发布过新版本，升级可能被 pnpm-workspace.yaml 的 minimumReleaseAgeExclude 年龄门暂缓，可次日重试）`,
-        same ? undefined : `同步安装版本：dsh plugin --profile ${name} update ${selfName}（或让 CLI 与 bundle 走同一安装方式）`);
+        same ? undefined : `同步安装版本：dsh plugin --profile ${name} update ${selfName}（或让 CLI 与 bundle 走同一安装方式）`, undefined, 1);
     }
   } catch (e) {
     report('profile', 'installed_bundle', false, `bundle 版本对比异常: ${e.message.slice(0, 60)}`, undefined);
@@ -1287,9 +1300,15 @@ function packageNamedExports(pkgDir) {
     } catch { /* skip */ }
   }
   if (bomFiles.length > 0) {
-    report('profile', 'P15', false, `检测到 BOM 头（#5176：JSON/YAML 解析将失败）: ${bomFiles.join(', ')}`, '用文本编辑器打开文件，删除首字符（BOM/U+FEFF）后保存；或运行: sed -i "" "1s/^\xEF\xBB\xBF//" <file>');
+    report('profile', 'P15', false,
+      `检测到 BOM 头（#5176 / #6758：JSON/YAML 解析将失败）: ${bomFiles.join(', ')}`
+      + `—— 若命中 profile 的 package.json，DSH 会直接 \`JSON.parse\` 它并抛 \`SyntaxError: Unexpected token '…' is not valid JSON\`，`
+      + `**启动硬失败**；而 GBK 控制台会把 BOM 三个字节渲染成乱码，报错里看不出是编码问题`,
+      '删除首字符（BOM/U+FEFF）后保存；PowerShell 5.1 的 `Set-Content -Encoding UTF8` **默认会写 BOM**，'
+      + '改用 [IO.File]::WriteAllText($p, (Get-Content $p -Raw), (New-Object Text.UTF8Encoding $false))；'
+      + '或 sed -i "" "1s/^\xEF\xBB\xBF//" <file>', undefined, 'builtin', bomTargets.length);
   } else {
-    report('profile', 'P15', true, '关键文件无 BOM 头', undefined);
+    report('profile', 'P15', true, `关键文件无 BOM 头（检查 ${bomTargets.length} 个）`, undefined, 'builtin', bomTargets.length);
   }
 
   /* P16：插件命名导入的导出缺失检测（#5864：一个缺失导出 → 整棵插件树 boot 崩溃循环、

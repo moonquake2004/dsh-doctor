@@ -1762,7 +1762,7 @@ test('S11：读取路径带重试（#6739 的 25MB 场景不再一次失败即�
 
 /* ---------- P22：profile manifest 带 UTF-8 BOM（#6758：启动硬失败且报错不指向病因） ---------- */
 
-test('P22：manifest 带 BOM → 失败并点明病因；其余检查仍照常运行（不被它打败）', () => {
+test('P15（B 故障隔离回归）：manifest 带 BOM → 报出病因；且**其余检查仍照常运行**（不被它打败）', () => {
   const home = tempHome();
   const p = join(home, 'profiles', 'web');
   mkdirSync(p, { recursive: true });
@@ -1772,20 +1772,20 @@ test('P22：manifest 带 BOM → 失败并点明病因；其余检查仍照常�
     Buffer.from(JSON.stringify({ name: 'dsh-profile-web', version: '0.0.0', dsh: { profile: { bundles: [] } } })),
   ]));
   const { raw } = runCli({ home, args: ['--profile', 'web'] });
-  const p22 = raw.checks.find((c) => c.id === 'P22');
-  assert.equal(p22.status, 'fail', 'BOM 会让 DSH 启动硬失败，必须报出');
-  assert.match(p22.detail, /BOM/);
-  assert.match(p22.detail, /6758/);
+  const p15 = raw.checks.find((c) => c.id === 'P15');
+  assert.equal(p15.status, 'fail', 'BOM 会让 DSH 启动硬失败，必须报出');
+  assert.match(p15.detail, /BOM/);
+  assert.match(p15.detail, /6758/);
   const p0 = raw.checks.find((c) => c.id === 'P0');
   assert.ok(!p0 || p0.status !== 'fail', '诊断工具不能被它要诊断的输入打败：剥离 BOM 后其余检查应照常');
   rmSync(home, { recursive: true, force: true });
 });
 
-test('P22：无 BOM → 通过', () => {
+test('P15：无 BOM → 通过', () => {
   const home = tempHome();
   profileFixture(home, 'web', { manifest: { name: 'dsh-profile-web', version: '0.0.0', dsh: { profile: { bundles: [] } } }, patch: '' });
   const { raw } = runCli({ home, args: ['--profile', 'web'] });
-  assert.notEqual(raw.checks.find((c) => c.id === 'P22').status, 'fail');
+  assert.notEqual(raw.checks.find((c) => c.id === 'P15').status, 'fail');
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -1802,5 +1802,53 @@ test('--boot-check：列出的 bundle 缺 dsh.bundle → 失败（loader 会拒�
   const r = spawnSync(process.execPath, [CLI, '--boot-check', '--profile', 'web'], { encoding: 'utf8', env: { ...process.env, DSH_HOME: home } });
   assert.equal(r.status, 2, '这类失败没有任何 entry 可探，只做 import 会给出假绿灯——必须由 bundle 级前置条件判出');
   assert.match(r.stdout, /missing-bundle-manifest|dsh\.bundle/);
+  rmSync(home, { recursive: true, force: true });
+});
+
+/* ---------- A：覆盖不变量（2026-09 反思）——"没看"不得等于"通过" ---------- */
+
+test('A：examined === 0 的 pass 自动降为 skip（没看 ≠ 通过）', () => {
+  const src = readFileSync(CLI, 'utf8');
+  const m = src.match(/function report\([\s\S]*?\n}/);
+  assert.ok(m, '未找到 report');
+  const results = [];
+  // 抽取实现时要一并提供 coverageNow（report 依赖它做上下文回退）
+  const fn = new Function('results', 'coverageNow', `${m[0]}\nreturn report;`)(results, () => null);
+  fn('profile', 'X1', true, '全部正常', undefined, 'builtin', 0);
+  assert.equal(results[0].skip, true, '零检查对象时不得报通过');
+  assert.equal(results[0].coverage, 'none');
+  fn('profile', 'X2', true, '全部正常', undefined, 'builtin', 5);
+  assert.equal(results[1].skip, undefined);
+  assert.equal(results[1].examined, 5);
+  fn('profile', 'X3', true, '全部正常', undefined, 'builtin');
+  assert.equal(results[2].coverage, 'unreported', '未报告覆盖量必须留下机器可读的欠账标记');
+});
+
+test('A：空环境跑一遍 —— 不得出现“零检查对象却报通过”，并统计覆盖量欠账', () => {
+  const home = tempHome();
+  const p = join(home, 'profiles', 'web');
+  mkdirSync(p, { recursive: true });
+  writeFileSync(join(p, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', version: '0.0.0', dsh: { profile: { bundles: [] } } }));
+  const { raw } = runCli({ home, args: ['--profile', 'web'] });
+  const vacuous = raw.checks.filter((c) => c.ok && !c.skip && c.examined === 0);
+  assert.equal(vacuous.length, 0, `空环境下不得有“零检查对象却通过”: ${vacuous.map((c) => c.id).join(', ')}`);
+  const unreported = raw.checks.filter((c) => c.ok && !c.skip && c.coverage === 'unreported');
+  // 这是**可度量的欠账**：目标是 0。当前先让它可见（数字会随补齐覆盖量而下降）。
+  console.log(`      ↳ 覆盖量未报告的检查: ${unreported.length} 项${unreported.length ? `（${unreported.map((c) => c.id).join(', ')}）` : ''}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('B（故障隔离回归）：manifest 无法解析时，其余检查仍须给出结论（#6758 的真实教训——P15 曾被 P0 崩溃静默）', () => {
+  const home = tempHome();
+  const p = join(home, 'profiles', 'web');
+  mkdirSync(p, { recursive: true });
+  writeFileSync(join(p, 'package.json'), '{ "name": "web", "dsh": { "profile": { "bundles": [ }'); // 截断的 JSON
+  const { raw } = runCli({ home, args: ['--profile', 'web'] });
+  const ids = raw.checks.map((c) => c.id);
+  const p0 = raw.checks.find((c) => c.id === 'P0');
+  assert.equal(p0.status, 'fail', '解析失败必须如实报出');
+  assert.match(p0.detail, /无法解析|JSON/);
+  // 关键：早期失败**不得**让整段检查消失（此前 P0 一崩，P15 等根本没机会执行）
+  assert.ok(ids.length > 1, `早期失败不得掐断整段检查，实际只剩: ${ids.join(', ')}`);
   rmSync(home, { recursive: true, force: true });
 });
