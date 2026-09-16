@@ -270,6 +270,71 @@ function reportSkip(section, id, detail, src) {
   results.push({ section, id, ok: true, skip: true, detail, src: src ?? 'builtin' });
 }
 
+
+/* ================= 判定收口点（R10 边界律 + R11 闭集律） =================
+ * 2026-09 复查的结论：**"绿"此前可以在任意位置被手写出来**，所以 R3 的不变量只要放在
+ * report() 或某个输出路径里，别的路径就能绕过——修了三处、漏了顶层聚合与更新提示。
+ *
+ * 现在：**所有 ✓ / ⊖ / ✗ 只能由 printVerdict() 打印**，而"通过"这个状态只能由 makeVerdict() 构造，
+ * 且 `pass` 在 `checked === 0` 时**直接抛错**（构造期就挡住，而不是渲染期才补救）。
+ * 测试里有一条闭集断言：源码中任何出现 ✓/⊖/✗ 的代码行，都必须落在 printVerdict 的函数体内。
+ */
+
+/**
+ * 构造判定。**唯一能产生 'pass' 的地方**。
+ * @param {'pass'|'fail'|'skip'|'action'} state
+ * @param {{checked?: number, detail?: string, reason?: string, totals?: {verified:number, skipped:number, failed:number}}} opts
+ */
+function makeVerdict(state, opts = {}) {
+  if (state === 'pass') {
+    const n = opts.checked;
+    if (typeof n !== 'number' || n <= 0) {
+      throw new Error(`makeVerdict('pass') 需要 checked > 0：零检查对象不得构造为"通过"（R3 覆盖律；configured=${JSON.stringify(opts.checked)}）`);
+    }
+  }
+  return { state, ...opts };
+}
+
+/**
+ * 条目行打印器：**判定之下的明细**（某条 entry 失败、某个会话损坏……）。
+ * 与 printVerdict 的分工：判定回答"整件事成不成立"，条目回答"具体哪几条"。
+ * 两者构成本工具的**闭集**——闭集测试断言：源码里任何 ✓/⊖/✗ 都必须落在这两个函数体内。
+ */
+const VERDICT_MARKS = { pass: '✓', fail: '✗', skip: '⊖', warn: '⚠', action: '✓' };
+
+function printItem(state, text, indent = 2) {
+  console.log(`${' '.repeat(indent)}${VERDICT_MARKS[state] ?? '?'} ${text}`);
+}
+
+/** **唯一**打印 ✓ / ⊖ / ✗ 的**判定**的地方。任何新输出路径都必须走这里，否则闭集测试会红。 */
+function printVerdict(v, opts = {}) {
+  const out = opts.stream === 'stderr' ? console.error : console.log;
+  const line = (state, text) => out(opts.indent ? `  ${VERDICT_MARKS[state]} ${text}` : `${VERDICT_MARKS[state]} ${text}`);
+  if (v.state === 'pass') return line('pass', v.detail ?? `通过（检查 ${v.checked} 个对象）`);
+  if (v.state === 'fail') return line('fail', v.detail ?? '失败');
+  if (v.state === 'skip') return line('skip', `${v.reason ?? '未检查'}——**这不等于通过**`);
+  return line('action', v.detail ?? ''); // action：动作确认（不是验证断言）
+}
+
+/**
+ * 报告级聚合判定：把"验证过多少 / 跳过多少"如实呈现。
+ * 修前它对"18 项 skip + 2 项 pass"照样打印 "✓ 全部通过"——断言的强度超过了证据（R8）。
+ */
+function aggregateVerdict(records) {
+  const failed = records.filter((r) => !r.skip && !r.ok);
+  const verified = records.filter((r) => !r.skip && r.ok && (r.examined ?? 0) > 0).length;
+  const skipped = records.filter((r) => r.skip).length;
+  const totals = { verified, skipped, failed: failed.length };
+  if (failed.length) return makeVerdict('fail', { totals, detail: `${failed.length} 个问题` });
+  if (verified === 0) {
+    return makeVerdict('skip', { totals, reason: `没有任何检查实际验证过（${skipped} 项全部跳过）` });
+  }
+  if (skipped > 0) {
+    return makeVerdict('pass', { checked: verified, totals, detail: `${verified} 项通过、${skipped} 项未检查（skip）——**未检查的部分不代表通过**` });
+  }
+  return makeVerdict('pass', { checked: verified, totals, detail: `全部通过（${verified} 项，均已验证）` });
+}
+
 /** 解析 --profile 参数：名字（如 web）→ $DSH_HOME/profiles/<name>；含路径分隔符/~/开头 → 直接当 profile 目录（契约 harness 传绝对路径）。 */
 function resolveProfile(name) {
   if (!name) throw new Error('无效 profile 名');
@@ -2887,7 +2952,7 @@ async function run() {
       const base = writePreUpgrade(profDir);
       if (jsonOut) console.log(JSON.stringify({ ok: true, ...base }, null, 2));
       else {
-        console.log(`✓ 已记录升级前基线（${profDir}）`);
+        printVerdict(makeVerdict('action', { detail: `已记录升级前基线（${profDir}）` }));
         console.log(`  核心版本: ${base.coreVersion ?? '(未能确定)'} | bundle ${base.bundleCount} 个 | entry ${Object.keys(base.entries).length} 条`);
         console.log('  下一步：升级 dsh，然后运行');
         console.log(`    npx @moonquake2004/dsh-doctor --post-upgrade --profile ${profileArg || 'web'}`);
@@ -2897,7 +2962,7 @@ async function run() {
     }
     const base = readPreUpgrade(profDir);
     if (!base) {
-      console.error(`✗ 没找到升级前基线（${join(profDir, PRE_UPGRADE_FILE)}）——请先在升级前运行 --pre-upgrade`);
+      printVerdict(makeVerdict('fail', { detail: `没找到升级前基线（${join(profDir, PRE_UPGRADE_FILE)}）——请先在升级前运行 --pre-upgrade` }), { stream: 'stderr' }); // 错误路径：非判定
       process.exit(1);
     }
     const nowCore = coreVersion();
@@ -2920,12 +2985,12 @@ async function run() {
     for (const l of lines) console.log(`  · ${l}`);
     const verdictPost = bootVerdict(results);
     if (verdictPost.state === 'skip') {
-      console.log(`  ⊖ ${verdictPost.reason}——**不改写已知良好基线**`);
+      printVerdict(makeVerdict('skip', { reason: `${verdictPost.reason}——不改写已知良好基线` }), { indent: true });
     } else if (verdictPost.state === 'pass') {
-      console.log('  ✓ 装载模拟通过——升级未破坏任何可探测 entry');
+      printVerdict(makeVerdict('pass', { checked: verdictPost.checked, detail: '装载模拟通过——升级未破坏任何可探测 entry' }), { indent: true });
       writeSnapshot(profDir, nowSnap);
     } else {
-      console.log(`  ✗ 装载模拟失败 ${failed.length} 条（这就是"升级后起不来"的直接原因）：`);
+      printVerdict(makeVerdict('fail', { detail: `装载模拟失败 ${failed.length} 条（这就是"升级后起不来"的直接原因）：` }), { indent: true });
       for (const f of failed) {
         console.log(`      [${f.bundle}] ${f.id} → ${f.spec}`);
         console.log(`        ${f.kind}: ${f.error}`);
@@ -2948,15 +3013,15 @@ async function run() {
     const profDir = resolveProfile(profileArg || 'web');
     const r = safeAdd(profileArg || 'web', safeAddArg);
     if (jsonOut) console.log(JSON.stringify(r, null, 2));
-    else if (r.ok && r.stage === 'verified') console.log(`✓ 已安装并预检通过（${r.checked} 条 entry 均可导入）——重启 dsh 即可`);
+    else if (r.ok && r.stage === 'verified') printVerdict(makeVerdict('pass', { checked: r.checked, detail: `已安装并预检通过（${r.checked} 条 entry 均可导入）——重启 dsh 即可` }));
     else if (r.ok && r.stage === 'quarantined') {
       console.log(`⚠ 已安装，但该插件的 entry 导入失败，已自动隔离以避免 dsh 起不来：`);
       for (const f of r.failures || []) console.log(`    ${f}`);
       console.log(`  隔离项：${r.quarantined.join(', ')}（用 --unquarantine <包名> 放回，修好版本后再重试）`);
       console.log(`  dsh 现在可以正常启动。`);
-    } else if (r.stage === 'install') console.log(`✗ 安装命令本身失败（exit ${r.exit}），已还原 manifest`);
+    } else if (r.stage === 'install') printVerdict(makeVerdict('fail', { detail: `安装命令本身失败（exit ${r.exit}），已还原 manifest` }));
     else {
-      console.log(`✗ 安装后无法启动，且隔离也救不回来 → 已整体回滚到安装前状态`);
+      printVerdict(makeVerdict('fail', { detail: '安装后无法启动，且隔离也救不回来 → 已整体回滚到安装前状态' }));
       for (const f of r.failures || []) console.log(`    ${f}`);
     }
     process.exit(r.ok ? 0 : 2);
@@ -2966,13 +3031,13 @@ async function run() {
     try {
       if (quarantineArg || unquarantineArg) {
         const r = quarantineBundle(profDir, quarantineArg || unquarantineArg, !!unquarantineArg);
-        if (!r.ok) { console.error(`✗ ${r.error}`); process.exit(1); }
+        if (!r.ok) { printVerdict(makeVerdict('fail', { detail: r.error })); process.exit(1); }
         const payload = { ok: true, action: unquarantineArg ? 'unquarantine' : 'quarantine', ...r, next: '重启 dsh；随后用 --boot-check 复查，或用 --unquarantine 撤销' };
         if (jsonOut) console.log(JSON.stringify(payload, null, 2));
         else if (unquarantineArg) {
-          console.log(`✓ 已放回 ${unquarantineArg}（当前启动列表 ${r.bundles} 项）——重启 dsh 生效`);
+          printVerdict(makeVerdict('action', { detail: `已放回 ${unquarantineArg}（当前启动列表 ${r.bundles} 项）——重启 dsh 生效` }));
         } else {
-          console.log(`✓ 已隔离 ${quarantineArg}（启动列表现为 ${r.bundles} 项；原始 package.json 已备份）`);
+          printVerdict(makeVerdict('action', { detail: `已隔离 ${quarantineArg}（启动列表现为 ${r.bundles} 项；原始 package.json 已备份）` }));
           console.log(`  重启 dsh，然后用 --boot-check 复查；要放回：--unquarantine ${quarantineArg}`);
         }
         process.exit(0);
@@ -3005,7 +3070,7 @@ async function run() {
         if (jsonOut) {
           console.log(JSON.stringify({ ok: true, skip: true, reason: '启动列表为空：没有任何 entry 可探测，未做装载模拟', profile: profDir, checked: 0, failed: 0, drift, results }, null, 2));
         } else {
-          console.log(`装载模拟（${profDir}）：⊖ 无可检查对象——启动列表为空，**未做任何装载模拟**（这不等于"通过"）`);
+          console.log(`装载模拟（${profDir}）：`); printVerdict(makeVerdict('skip', { reason: '无可检查对象——启动列表为空，未做任何装载模拟' }));
           console.log('  若你预期这里有插件：检查 profile 的 dsh.profile.bundles 是否为空，或插件是否装到了别的 profile。');
         }
         process.exit(0);
@@ -3016,10 +3081,10 @@ async function run() {
       } else {
         console.log(`装载模拟（${profDir}）：检查 ${results.length} 条 entry，失败 ${failed.length} 条`);
         for (const r of results) {
-          if (r.status === 'failed') console.log(`  ✗ [${r.bundle}] ${r.id} → ${r.spec}\n      ${r.kind}: ${r.error}\n      修复方向：${r.hint}\n      先起来：npx @moonquake2004/dsh-doctor --quarantine ${r.bundle}`);
-          else if (r.status === 'skipped') console.log(`  ⊖ ${r.id}（${r.reason}）`);
+          if (r.status === 'failed') printItem('fail', `[${r.bundle}] ${r.id} → ${r.spec}\n      ${r.kind}: ${r.error}\n      修复方向：${r.hint}\n      先起来：npx @moonquake2004/dsh-doctor --quarantine ${r.bundle}`);
+          else if (r.status === 'skipped') printItem('skip', `${r.id}（${r.reason}）`);
         }
-        if (!failed.length) console.log('  ✓ 所有可探测 entry 均可导入——启动失败若仍发生，问题多在配置合并或原生环境，请贴 --json 输出');
+        if (!failed.length) printVerdict(makeVerdict('pass', { checked: results.length, detail: '所有可探测 entry 均可导入——启动失败若仍发生，问题多在配置合并或原生环境，请贴 --json 输出' }), { indent: true });
       }
       process.exit(failed.length ? 2 : 0);
     } catch (e) {
@@ -3228,7 +3293,15 @@ async function run() {
     // 于是把 warn 当成误报。状态本就不该由消费者自行推导。
     const statusOf = (r) => (r.skip ? 'skip' : (!r.ok ? (((r.section === 'security') ? r.severity !== 'critical' : catalogSeverity.get(r.id) === 'warn') ? 'warn' : 'fail') : 'pass'));
     const checksWithStatus = results.map((r) => ({ ...r, status: statusOf(r) }));
-    console.log(JSON.stringify({ ok: bad.length === 0 && secExit === 0, checks: checksWithStatus, catalog: catalogMeta, update: updateInfo, ...(securityMeta.enabled ? { security: securityMeta } : {}) }, null, 2));
+    const aggJson = aggregateVerdict(results);
+    console.log(JSON.stringify({
+      // ok 只有在"确实验证过且无失败"时才为 true —— 修前它只看 bad.length，于是"全部跳过"也会 ok:true
+      ok: aggJson.state === 'pass',
+      verified: aggJson.totals.verified,
+      skipped: aggJson.totals.skipped,
+      failed: aggJson.totals.failed,
+      checks: checksWithStatus, catalog: catalogMeta, update: updateInfo, ...(securityMeta.enabled ? { security: securityMeta } : {}),
+    }, null, 2));
   } else {
     const sectionOrder = { env: 0, profile: 1, session: 2, catalog: 3 };
     const ordered = [...results].sort((a, b) => (sectionOrder[a.section] ?? 9) - (sectionOrder[b.section] ?? 9));
@@ -3237,18 +3310,27 @@ async function run() {
       if (r.section !== lastSection) { console.log(`\n== ${r.section === 'security' ? '🔒 安全' : r.section.toUpperCase()} ==`); lastSection = r.section; }
       const sev = catalogSeverity.get(r.id);
       // 安全检查：skip 显示 ⊖；critical/high 失败 ✗；medium 及以下失败 ⚠（不影响退出码）
-      const mark = r.skip ? '⊖'
-        : (!r.ok ? (((r.section === 'security' && r.severity !== 'critical' && r.severity !== 'high') || sev === 'warn') ? '⚠' : '✗')
-        : '✓');
-      console.log(` ${mark} [${r.id}]${r.severity ? `（${r.severity}${r.skip ? '/skip' : ''}）` : ''} ${r.detail}${r.src === 'catalog' ? '  [目录]' : ''}`);
+      // 状态名（不是符号）：符号只由 printItem/printVerdict 决定，闭集测试据此断言
+      const mark = r.skip ? 'skip'
+        : (!r.ok ? (((r.section === 'security' && r.severity !== 'critical' && r.severity !== 'high') || sev === 'warn') ? 'warn' : 'fail')
+        : 'pass');
+      printItem(mark, `[${r.id}]${r.severity ? `（${r.severity}${r.skip ? '/skip' : ''}）` : ''} ${r.detail}${r.src === 'catalog' ? '  [目录]' : ''}`, 1);
       if (!r.ok && r.fix) console.log(`     ↳ 修复: ${r.fix}`);
     }
     if (updateInfo.available && !updateInfo.applied) {
       console.log(`\n⚠ 新版本 ${updateInfo.latest} 可用（当前 ${updateInfo.current}）→ 运行 \`dsh-doctor --update\` 或 \`dsh plugin update\``);
     } else if (updateInfo.applied) {
-      console.log(`\n✓ ${updateInfo.applied}`);
+      console.log(''); printVerdict(makeVerdict('action', { detail: updateInfo.applied }));
     }
-    console.log(`\n${(bad.length === 0 && secExit === 0) ? '✓ 全部通过' : `✗ ${bad.length} 个内置问题${secExit > 0 ? ` + 安全 ${secExit === 2 ? 'CRITICAL' : 'HIGH'} 级失败` : ''}`}（profile=${profileArg}，目录=${catalogMeta.source}，${catalogMeta.checks} 条）`);
+    const agg = aggregateVerdict(results.map((r) => ({ ...r, examined: r.examined })));
+    if (agg.state === 'fail') {
+      console.log('');
+      printVerdict(makeVerdict('fail', { detail: `${bad.length} 个内置问题${secExit > 0 ? ` + 安全 ${secExit === 2 ? 'CRITICAL' : 'HIGH'} 级失败` : ''}（profile=${profileArg}，目录=${catalogMeta.source}，${catalogMeta.checks} 条）` }));
+    } else {
+      console.log('');
+      printVerdict(agg);
+      console.log(`（profile=${profileArg}，目录=${catalogMeta.source}，${catalogMeta.checks} 条）`);
+    }
   }
   // 最终退出码：内置失败 → 1；安全 HIGH → 1、CRITICAL → 2（取 max）
   process.exit(Math.max(bad.length > 0 ? 1 : 0, secExit));

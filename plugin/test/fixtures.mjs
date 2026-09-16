@@ -1899,3 +1899,61 @@ test('R3：bootVerdict 是唯一判定入口 —— pass / fail / skip 三态，
   const uses = (src.match(/bootVerdict\(/g) || []).length;
   assert.ok(uses >= 4, `bootVerdict 应被定义 1 次 + 三处输出路径各用 1 次，实际出现 ${uses} 次`);
 });
+
+/* ---------- R10/R11：判定收口点 + 闭集（假绿灯的结构性防线） ---------- */
+
+test('R11 闭集律：源码里任何 ✓/⊖/✗ 都必须落在 printVerdict / printItem / VERDICT_MARKS 之内', () => {
+  const src = readFileSync(CLI, 'utf8');
+  const lines = src.split('\n');
+  const bodyRange = (re) => {
+    const start = lines.findIndex((l) => re.test(l));
+    if (start < 0) return null;
+    let depth = 0;
+    for (let i = start; i < lines.length; i++) {
+      depth += (lines[i].match(/\{/g) || []).length - (lines[i].match(/\}/g) || []).length;
+      if (i > start && depth <= 0) return [start, i];
+    }
+    return [start, start];
+  };
+  const ranges = [
+    bodyRange(/^function printVerdict\(/),
+    bodyRange(/^function printItem\(/),
+    (() => { const i = lines.findIndex((l) => l.startsWith('const VERDICT_MARKS')); return i < 0 ? null : [i, i]; })(),
+  ].filter(Boolean);
+  assert.equal(ranges.length, 3, '三个收口点必须都存在');
+  const isComment = (l) => l.trim().startsWith('//') || l.trim().startsWith('/*') || l.trim().startsWith('*');
+  const outside = [];
+  lines.forEach((l, i) => {
+    if (!/[✓⊖✗]/.test(l) || isComment(l)) return;
+    if (!ranges.some(([a, b]) => i >= a && i <= b)) outside.push(`${i + 1}: ${l.trim().slice(0, 80)}`);
+  });
+  assert.equal(outside.length, 0,
+    `出现手写判定符号（新增输出路径必须走 printVerdict/printItem，否则假绿灯会再次出现）:\n${outside.join('\n')}`);
+});
+
+test('R3：makeVerdict("pass") 在零检查对象时**构造期即抛错**（而不是渲染期补救）', () => {
+  const src = readFileSync(CLI, 'utf8');
+  const m = src.match(/function makeVerdict\([\s\S]*?\n}/);
+  assert.ok(m, '未找到 makeVerdict');
+  const fn = new Function(`${m[0]}\nreturn makeVerdict;`)();
+  assert.throws(() => fn('pass', { checked: 0 }), /checked > 0|零检查对象/, '零对象不得构造为通过');
+  assert.throws(() => fn('pass', {}), /checked > 0/);
+  assert.equal(fn('pass', { checked: 1 }).state, 'pass');
+  assert.equal(fn('skip', { reason: 'x' }).state, 'skip');
+});
+
+test('R3 聚合：全部跳过时不得说"全部通过"（顶层假绿灯）', () => {
+  const src = readFileSync(CLI, 'utf8');
+  const mv = src.match(/function makeVerdict\([\s\S]*?\n}/)[0];
+  const ag = src.match(/function aggregateVerdict\([\s\S]*?\n}/)[0];
+  const fn = new Function(`${mv}\n${ag}\nreturn aggregateVerdict;`)();
+  const allSkip = fn([{ skip: true, ok: true }, { skip: true, ok: true }]);
+  assert.equal(allSkip.state, 'skip', '18 项全跳过时曾打印"✓ 全部通过"');
+  assert.equal(allSkip.totals.skipped, 2);
+  const mixed = fn([{ ok: true, examined: 3 }, { skip: true, ok: true }]);
+  assert.equal(mixed.state, 'pass');
+  assert.match(mixed.detail, /未检查/, '有跳过时必须写明"未检查的部分不代表通过"');
+  const clean = fn([{ ok: true, examined: 3 }, { ok: true, examined: 1 }]);
+  assert.equal(clean.state, 'pass');
+  assert.equal(fn([{ ok: false }, { ok: true, examined: 1 }]).state, 'fail');
+});
