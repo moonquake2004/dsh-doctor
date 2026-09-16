@@ -3,7 +3,7 @@
 > R1 来源律 / R5 唯一归属律的机制：**加检查前先查这里**。
 > 覆盖范围：以字面量出现的 id + `DYNAMIC` 显式列出的动态 id；若新增检查后本文件未更新，CI 会红。`source` 为空表示该检查尚未标注权威来源（待补，见 docs/check-authoring-rules.md §2）。
 
-共 51 项。
+共 52 项。
 
 | id | 段 | 范围（取自代码注释） | 来源 |
 |---|---|---|---|
@@ -39,6 +39,7 @@
 | `P2` | profile | bundle vs 用户 patch 冲突（#1404） | #1377 #1404 |
 | `P20` | profile | 注意 | — |
 | `P21` | profile | client 侧还常通过 ctx.get('host'/'styles') 取沙箱服务 | — |
+| `P23` | profile | 目标落在 profile 两根里且**不是插件** → 是宿主库被当普通依赖引入（会带来第二 | — |
 | `P3` | profile | 并向上找一层以覆盖 profile 根安装（~/.dsh/profiles/node_mod | #1197 #880 |
 | `P4` | profile | P4 file | #1197 |
 | `P5` | profile | symlink 指向宿主同一份（#1697 的 link | #1197 #1486 |

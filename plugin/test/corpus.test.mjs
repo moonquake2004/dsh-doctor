@@ -91,6 +91,7 @@ for (const c of CASES) {
         if (!/^[A-Z]/.test(key)) continue; // 只处理以大写字母开头的检查 id
         const got = statusOf(data, key);
         if (want === 'fail') assert.equal(got, 'fail', `${key} 期望 fail，实际 ${got}`);
+        else if (want === 'pass') assert.equal(got, 'pass', `${key} 期望 pass（防误报），实际 ${got}`);
         else if (want === 'notPass') assert.notEqual(got, 'pass', `${key} 不应为 pass（实际 pass）`);
       }
       if (e.S11DetailHas) {

@@ -76,6 +76,14 @@ const MUTATIONS = [
     equivalent: '各阶段均自行 setCoverage，故该守卫当前冗余（防的是未来某阶段忘记设单位）',
   },
   {
+    id: 'P23-host-dep-detection',
+    desc: 'P23 不再检出"插件把宿主机包声明为普通依赖"（#6789 漏检回归）',
+    // 判据已从"manifest 键名"升级为"副本是否真在盘上"（红队 F1–F3）→ 变异点随之更新
+    find: "if (!isPluginPkg(nmf)) {",
+    replace: "if (false) {",
+    test: 'plugin/test/corpus.test.mjs', pattern: 'host-copy-on-disk|host-dep-as-dependency',
+  },
+  {
     id: 'catalog-skip-as-pass',
     desc: '目录检查自报 skipped 又被记成 pass（红队 R1 回归）',
     find: 'if (r.skipped) { reportSkip(check.section, check.id, r.detail, \'catalog\'); continue; }',

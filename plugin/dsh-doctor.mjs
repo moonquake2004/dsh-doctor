@@ -857,6 +857,83 @@ function checkProfile(name) {
     }
   }
 
+  // P23：bundle **真的自带了一份宿主机包的副本**（社区 #6789）
+  //
+  // 报告的现象：`@deepseek-ai/dsh-experimental-browser-use-runtime` 把 `@deepseek-ai/dsh-scope` 写成普通 dependency，
+  // 于是 profile 里出现**第二份实例** → 两份的 Symbol/协议不匹配 → "第一个会话能用、之后每个会话都失败"。
+  //
+  // 三轮红队把这条检查打穿过三次，教训是**判"代理"而不是判"条件"**：
+  //   · 第一版只看 manifest 键名（`dependencies` 里有 `@deepseek-ai/*`）→
+  //     副本**真的躺在盘上**但 manifest 没写时完全失明（红队 F1）；`optionalDependencies`（F2）、
+  //     `npm:`/`file:` 别名（F3）全漏；同 scope 的**插件依赖**被误报（F5）；
+  //     bundle 装在父层 `profiles/node_modules` 时整条跳过（F4）。
+  // 现在改为**判条件本身**：
+  //   ① 扫 bundle 自己的 `node_modules/@deepseek-ai/*`（真实存在的副本才报——这才是 #6789 的状态）；
+  //   ② 再看 `dependencies`/`optionalDependencies` 里指向宿主包的**别名**（`npm:` 前缀或键名本身就是宿主包名）；
+  //   ③ "是不是宿主机包"用 `resolveHostVersion`（profile nm + 父层两根）判定，**不用裸前缀**（修 F5）；
+  //   ④ 解析根与 `resolveHostVersion` 一致（含父层，修 F4）；排除 `_quarantined` 与本身就是 bundle 的插件包（F5/F6）。
+  {
+    const roots23 = [join(dir, 'node_modules'), join(dirname(dir), 'node_modules')];
+    const bundleSet = new Set(bundles.map(String));
+    const quarantined23 = new Set((manifest._quarantined ?? []).map((q) => String(q.name ?? q)));
+    const resolveBundleDir = (b) => roots23.map((r) => join(r, String(b))).find((d) => existsSync(join(d, 'package.json'))) ?? null;
+    // 判定"这是宿主库还是插件"用**内容**，不用锚点也不用裸前缀——
+    // 教训链：① 只看 manifest 键名 → 副本躺在盘上也失明（红队 F1）；
+    // ② 改用 CLI 安装树（installAnchor）→ 它依赖 PATH 里的 node_modules/.bin，
+    //    实测**本机也是 null**，于是永远判不出宿主包（等于静默失效）；
+    // ③ 现在：读**副本自己的 manifest** —— 带 `dsh.bundle`/`dsh.client` 的是**插件**（依赖它是正确写法，红队 F5），
+    //    不带的才是**宿主库**（出现第二份副本即 #6789 的条件）。
+    const isPluginPkg = (mf) => Boolean(mf && mf.dsh && (mf.dsh.bundle || mf.dsh.client));
+    const readPkg = (d) => { try { return readJsonReportingBom(join(d, 'package.json')).data; } catch { return null; } };
+    let scanned23 = 0;
+    const issues23 = [];
+    for (const b of bundles) {
+      if (quarantined23.has(String(b))) continue;
+      const bdir = resolveBundleDir(b);
+      if (!bdir) continue; // 解析不到 → 由 P1 负责
+      scanned23++;
+      // ① 真实存在的第二份副本
+      let nested = [];
+      try { nested = readdirSync(join(bdir, 'node_modules', '@deepseek-ai')); } catch { /* 无嵌套目录 */ }
+      for (const n of nested) {
+        const full = `@deepseek-ai/${n}`;
+        const nestedDir = join(bdir, 'node_modules', '@deepseek-ai', n);
+        const nmf = readPkg(nestedDir);
+        if (!isPluginPkg(nmf)) {
+          issues23.push(`${b} 自带**宿主库**副本 ${full}${nmf?.version ? `@${nmf.version}` : ''}（嵌套在它自己的 node_modules 里，P5 只看顶层所以看不到）`);
+        }
+      }
+      // ② 别名 / optional 指向宿主包
+      let mf23 = null;
+      try { mf23 = readJsonReportingBom(join(bdir, 'package.json')).data; } catch { /* 忽略 */ }
+      for (const field of ['dependencies', 'optionalDependencies']) {
+        for (const [k, v] of Object.entries(mf23?.[field] ?? {})) {
+          const target = /^npm:(@deepseek-ai\/[^@]+)@/.exec(String(v));
+          const name = target ? target[1] : (k.startsWith('@deepseek-ai/') ? k : null);
+          if (!name || bundleSet.has(name)) continue; // 同 scope 的插件依赖插件 = 正确写法（F5）
+          // 目标落在 profile 两根里且**不是插件** → 是宿主库被当普通依赖引入（会带来第二份副本）
+          const dirs = roots23.map((r) => join(r, name)).concat([join(bdir, 'node_modules', name)]);
+          const found = dirs.map(readPkg).find((m) => m && !isPluginPkg(m));
+          if (found) issues23.push(`${b} 用 ${field} 引入宿主库 ${name}${target ? `（别名 ${k} → ${v}）` : ''}`);
+        }
+      }
+    }
+    if (issues23.length) {
+      report('profile', 'P23', false,
+        `已装 bundle 自带**宿主包的第二份副本**（${issues23.length} 处 / 扫过 ${scanned23} 个 bundle）——`
+        + `两份实例的 Symbol/协议不匹配时，典型症状是"第一个会话能用、之后每个会话都失败"（社区 #6789：\`dsh-scope\`）：\n  `
+        + issues23.slice(0, 5).join('\n  ')
+        + (issues23.length > 5 ? `\n  …另有 ${issues23.length - 5} 处` : ''),
+        '在该插件的 package.json 里把宿主机包从 dependencies/optionalDependencies 改为 **peerDependencies**（宿主机包由宿主共享根提供）；'
+        + '若副本是构建产物带进来的，清理其 node_modules 后重装；并向上游报告该发布缺陷',
+        undefined, scanned23, '已装 bundle');
+    } else {
+      report('profile', 'P23', true,
+        `已装 bundle 均未自带宿主包副本（扫过 ${scanned23} 个 bundle 的 node_modules 与依赖声明）`,
+        undefined, undefined, scanned23, '已装 bundle');
+    }
+  }
+
   // P20 / P21：第三方插件把整棵插件树拖垮的两种**静态可判**形态（社区 #6693 实测）
   // 报告者在 host 侧 `apply()` 里连续撞了两个独立致命错、client 侧撞了两个静默白屏错；
   // 其核心抱怨是"唯一的诊断入口被故障本身摧毁"。这两条都不需要执行插件代码即可判定。
@@ -957,7 +1034,7 @@ function checkProfile(name) {
     } else if (notes21.length) {
       report('profile', 'P21', true, `未见裸引用沙箱专属符号（${notes21.length} 处有 typeof 守卫，未计入）`, undefined, undefined, hostFiles.length + clientFiles.length, 'host/client 文件');
     } else {
-      report('profile', 'P21', true, `扫描 ${hostFiles.length} 个 host 入口与 ${clientFiles.length} 个 client 产物，未见沙箱专属符号引用`);
+      report('profile', 'P21', true, `扫描 ${hostFiles.length} 个 host 入口与 ${clientFiles.length} 个 client 产物，未见沙箱专属符号引用`, undefined, undefined, hostFiles.length + clientFiles.length, 'host/client 文件');
     }
   }
 
@@ -2391,6 +2468,7 @@ function checkCatalog(ctx, catalog) {
     // 于是"没有目标可查"被记成**通过**（实测：无 profile 目录时 P6 仍 pass）。判据用探测自己的话：
     // **凡自述跳过的一律是 skip** —— 这类"文案与状态不一致"只能从结构上消灭，不能靠逐个改分支。
     if (!r.skipped && r.ok === true && /跳过|不适用/.test(String(r.detail))) r.skipped = true;
+    // R1（红队，2026-09-16；**曾被后续编辑覆盖回去，由离线目录用例抓回**）：自报 skipped 必须是 skip。
     if (r.skipped) { reportSkip(check.section, check.id, r.detail, 'catalog'); continue; }
     const severity = check.severity ?? 'error';
     catalogSeverity.set(check.id, severity);

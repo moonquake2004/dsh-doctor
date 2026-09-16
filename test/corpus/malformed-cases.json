@@ -307,6 +307,173 @@
         "jsonOkImpliesVerified": true,
         "aggregateNotAllPass": true
       }
+    },
+    {
+      "id": "host-dep-as-dependency",
+      "source": "forum#6789",
+      "desc": "插件把宿主机包 @deepseek-ai/dsh-scope 声明为普通 dependency → 自带第二份副本（未 hoist 时 P5 看不到）",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "browser-runtime"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: br\n      name: browser-runtime\n",
+        "nodeModules": {
+          "browser-runtime/package.json": "{\"name\":\"browser-runtime\",\"version\":\"0.1.6-alpha.1\",\"main\":\"i.js\",\"dsh\":{\"bundle\":{\"patch\":\"./cordis.patch.yml\"}},\"dependencies\":{\"@deepseek-ai/dsh-scope\":\"0.1.6-alpha.1\"}}",
+          "browser-runtime/cordis.patch.yml": "- insert:\n    - id: br\n      name: browser-runtime\n",
+          "browser-runtime/i.js": "export default {};\n",
+          "browser-runtime/node_modules/@deepseek-ai/dsh-scope/package.json": "{\"name\":\"@deepseek-ai/dsh-scope\",\"version\":\"0.1.6-alpha.1\"}"
+        }
+      },
+      "expect": {
+        "P23": "fail"
+      }
+    },
+    {
+      "id": "host-dep-as-peer-control",
+      "source": "forum#6789 对照",
+      "desc": "同一插件改用 peerDependencies 声明宿主机包 → 不得报错（防误报）",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "good-runtime"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: gr\n      name: good-runtime\n",
+        "nodeModules": {
+          "good-runtime/package.json": "{\"name\":\"good-runtime\",\"version\":\"0.1.6-alpha.1\",\"main\":\"i.js\",\"dsh\":{\"bundle\":{\"patch\":\"./cordis.patch.yml\"}},\"peerDependencies\":{\"@deepseek-ai/dsh-scope\":\"^0.1.6\"}}",
+          "good-runtime/cordis.patch.yml": "- insert:\n    - id: gr\n      name: good-runtime\n",
+          "good-runtime/i.js": "export default {};\n"
+        }
+      },
+      "expect": {
+        "P23": "pass"
+      }
+    },
+    {
+      "id": "host-copy-on-disk-without-manifest-key",
+      "source": "forum#6789 红队 F1",
+      "desc": "嵌套副本真在盘上但 manifest 不写 dependencies（旧判据只看键名 → 完全失明）",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "rt"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: rt\n      name: rt\n",
+        "nodeModules": {
+          "rt/package.json": "{\"name\": \"rt\", \"version\": \"1.0.0\", \"main\": \"i.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}}",
+          "rt/cordis.patch.yml": "- insert:\n    - id: rt\n      name: rt\n",
+          "rt/i.js": "export default {};\n",
+          "rt/node_modules/@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
+        }
+      },
+      "expect": {
+        "P23": "fail"
+      }
+    },
+    {
+      "id": "host-dep-in-optionalDependencies",
+      "source": "forum#6789 红队 F2",
+      "desc": "宿主机包写在 optionalDependencies（默认也会安装 → 同样产生第二份副本）",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "rt"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: rt\n      name: rt\n",
+        "nodeModules": {
+          "rt/package.json": "{\"name\": \"rt\", \"version\": \"1.0.0\", \"main\": \"i.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}, \"optionalDependencies\": {\"@deepseek-ai/dsh-scope\": \"0.1.6-alpha.1\"}}",
+          "rt/cordis.patch.yml": "- insert:\n    - id: rt\n      name: rt\n",
+          "rt/i.js": "export default {};\n",
+          "rt/node_modules/@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
+        }
+      },
+      "expect": {
+        "P23": "fail"
+      }
+    },
+    {
+      "id": "host-dep-via-npm-alias",
+      "source": "forum#6789 红队 F3",
+      "desc": "用 npm: 别名引入宿主包（键名不含 @deepseek-ai/ → 旧判据直接放行）",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "rt"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: rt\n      name: rt\n",
+        "nodeModules": {
+          "rt/package.json": "{\"name\": \"rt\", \"version\": \"1.0.0\", \"main\": \"i.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}, \"dependencies\": {\"scope-copy\": \"npm:@deepseek-ai/dsh-scope@0.1.6-alpha.1\"}}",
+          "rt/cordis.patch.yml": "- insert:\n    - id: rt\n      name: rt\n",
+          "rt/i.js": "export default {};\n",
+          "rt/node_modules/@deepseek-ai/dsh-scope/package.json": "{\"name\": \"@deepseek-ai/dsh-scope\", \"version\": \"0.1.6-alpha.1\"}"
+        }
+      },
+      "expect": {
+        "P23": "fail"
+      }
+    },
+    {
+      "id": "plugin-depends-on-plugin-control",
+      "source": "forum#6789 红队 F5 对照",
+      "desc": "同 scope 的另一插件作为依赖（唯一正确写法）→ 不得误报",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "rt"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: rt\n      name: rt\n",
+        "nodeModules": {
+          "rt/package.json": "{\"name\": \"rt\", \"version\": \"1.0.0\", \"main\": \"i.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}, \"dependencies\": {\"@deepseek-ai/dsh-other-plugin\": \"1.0.0\"}}",
+          "rt/cordis.patch.yml": "- insert:\n    - id: rt\n      name: rt\n",
+          "rt/i.js": "export default {};\n",
+          "rt/node_modules/@deepseek-ai/dsh-other-plugin/package.json": "{\"name\": \"@deepseek-ai/dsh-other-plugin\", \"version\": \"1.0.0\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}}"
+        }
+      },
+      "expect": {
+        "P23": "pass"
+      }
     }
   ]
 }
