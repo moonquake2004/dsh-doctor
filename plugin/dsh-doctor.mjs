@@ -2712,8 +2712,13 @@ function safeAdd(profileArg, pkg) {
     return { ok: false, stage: 'install', restored: true, exit: install.status };
   }
   const results = runBootCheckSync(profDir);
-  const failed = results.filter((r) => r.status === 'failed');
-  if (!failed.length) {
+  const verdictAdd = bootVerdict(results);
+  const failed = verdictAdd.failed;
+  if (verdictAdd.state === 'skip') {
+    // 零对象：**不写"已知良好"快照、不宣称已验证**——否则"未验证"会被固化成"已知良好"
+    return { ok: true, stage: 'unchecked', checked: 0, failed: 0, reason: verdictAdd.reason };
+  }
+  if (verdictAdd.state === 'pass') {
     writeSnapshot(profDir, bootSnapshot(profDir));
     return { ok: true, stage: 'verified', checked: results.length, failed: 0 };
   }
@@ -2731,6 +2736,25 @@ function safeAdd(profileArg, pkg) {
   }
   writeSnapshot(profDir, bootSnapshot(profDir));
   return { ok: true, stage: 'quarantined', quarantined, failures: failed.map((f) => `${f.bundle}/${f.id}: ${f.kind} ${f.error}`) };
+}
+
+
+/**
+ * **装载模拟的唯一判定入口**（R3 覆盖律的中央落实）。
+ *
+ * 来历：同一个缺陷曾出现在**三处**输出路径（--boot-check / --safe-add / --post-upgrade）——
+ * "零 entry 可探"被当成"通过"，其中 --safe-add 还会写"已知良好"快照。
+ * 我最初只修了 --boot-check 那一个实例（#6788 的具体形态），没修这一类。
+ * 所以判定必须只在一个地方：任何"探测了 0 个对象"的运行都是 **skip**，不是 pass；
+ * 也不得据此写快照（否则"未验证"会被固化成"已知良好"）。
+ */
+function bootVerdict(results) {
+  const failed = results.filter((r) => r.status === 'failed');
+  if (failed.length) return { state: 'fail', failed, checked: results.length };
+  if (results.length === 0) {
+    return { state: 'skip', failed: [], checked: 0, reason: '启动列表里没有任何 entry 可探测，未做装载模拟（这不等于通过）' };
+  }
+  return { state: 'pass', failed: [], checked: results.length };
 }
 
 /** 同步版装载模拟（--safe-add 内部用；与 --boot-check 同一逻辑） */
@@ -2894,7 +2918,10 @@ async function run() {
     }
     console.log(`升级后复检（基线取自 ${String(base.at).slice(0, 16)}）：`);
     for (const l of lines) console.log(`  · ${l}`);
-    if (!failed.length) {
+    const verdictPost = bootVerdict(results);
+    if (verdictPost.state === 'skip') {
+      console.log(`  ⊖ ${verdictPost.reason}——**不改写已知良好基线**`);
+    } else if (verdictPost.state === 'pass') {
       console.log('  ✓ 装载模拟通过——升级未破坏任何可探测 entry');
       writeSnapshot(profDir, nowSnap);
     } else {
@@ -2968,7 +2995,22 @@ async function run() {
           console.log('  ——若本次启动失败，上面这些就是首要嫌疑。');
         }
       }
-      if (!failed.length) writeSnapshot(profDir, curSnap); // 只有通过时才更新"已知良好"快照
+      // R3 覆盖律（2026-09 复查）：**"零检查对象"不得等于"通过"**。
+      // 这个输出路径不走 report()，所以 report() 里的不变量盖不到它——实测它曾对空启动列表打印
+      // "✓ 所有可探测 entry 均可导入"。这正是 R7 要问的那句："如果它完全坏了，会打印什么？"
+      // 答案与健康时相同 ⇒ 不可证伪。故这里把"检查了 0 个对象"单列为 skip（不更新快照、不宣称通过）。
+      const verdict = bootVerdict(results);
+      const vacuous = verdict.state === 'skip';
+      if (vacuous) {
+        if (jsonOut) {
+          console.log(JSON.stringify({ ok: true, skip: true, reason: '启动列表为空：没有任何 entry 可探测，未做装载模拟', profile: profDir, checked: 0, failed: 0, drift, results }, null, 2));
+        } else {
+          console.log(`装载模拟（${profDir}）：⊖ 无可检查对象——启动列表为空，**未做任何装载模拟**（这不等于"通过"）`);
+          console.log('  若你预期这里有插件：检查 profile 的 dsh.profile.bundles 是否为空，或插件是否装到了别的 profile。');
+        }
+        process.exit(0);
+      }
+      if (!failed.length) writeSnapshot(profDir, curSnap); // 只有**实际检查过且通过**时才更新"已知良好"快照
       if (jsonOut) {
         console.log(JSON.stringify({ ok: failed.length === 0, profile: profDir, checked: results.length, failed: failed.length, drift, results }, null, 2));
       } else {

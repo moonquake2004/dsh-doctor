@@ -36,11 +36,28 @@ lines.forEach((line, i) => {
   rows.push({ section, id, scope: scope.slice(0, 46), source });
 });
 
+// 动态构造的 id（由循环/模板拼出，静态 regex 抓不到）——2026-09 复查发现清单曾**缺这 8 项**，
+// 于是"加检查前查清单"可能查不到它们，重复风险仍在。这里显式列出，并由下面的断言保证与源码一致。
+const DYNAMIC = [
+  { section: 'env', id: 'E1-node', scope: 'node 可执行文件是否可用', source: '—' },
+  { section: 'env', id: 'E1-pnpm', scope: 'pnpm 可执行文件是否可用', source: '—' },
+  { section: 'env', id: 'E1-zstd', scope: 'zstd 可执行文件是否可用', source: '—' },
+  { section: 'env', id: 'E7-dsh-in-path', scope: 'dsh 是否在 PATH 中', source: '—' },
+  { section: 'env', id: 'E8-npmrc-workspace-flag', scope: 'profile .npmrc 的 workspace 标志', source: '—' },
+  { section: 'env', id: 'E9-storages-json-valid', scope: 'storages.json 是否合法', source: '—' },
+  { section: 'env', id: 'E11-settings-writable', scope: 'settings.yaml 可写性', source: '#1719' },
+  { section: 'profile', id: 'P6-patch-name-space', scope: '用户 patch 的 insert name 无空格', source: '—' },
+];
+for (const d of DYNAMIC) {
+  if (!rows.some((r) => r.id === d.id)) rows.push(d);
+  else Object.assign(rows.find((r) => r.id === d.id), { scope: d.scope });
+}
+
 rows.sort((a, b) => (a.section + a.id).localeCompare(b.section + b.id));
 const out = [
   '# 检查清单（由 `scripts/gen-check-inventory.mjs` 生成，请勿手改）',
   '',
-  '> R1 来源律 / R5 唯一归属律的机制：**加检查前先查这里**。`source` 为空表示该检查尚未标注权威来源（待补，见 docs/check-authoring-rules.md §2）。',
+  '> R1 来源律 / R5 唯一归属律的机制：**加检查前先查这里**。\n> 覆盖范围：以字面量出现的 id + `DYNAMIC` 显式列出的动态 id；若新增检查后本文件未更新，CI 会红。`source` 为空表示该检查尚未标注权威来源（待补，见 docs/check-authoring-rules.md §2）。',
   '',
   `共 ${rows.length} 项。`,
   '',

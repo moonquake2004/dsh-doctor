@@ -1872,3 +1872,30 @@ test('R3（收紧）：空环境下，未报告覆盖量的 pass 必须为 0', (
   assert.equal(un.length, 0, `未报告覆盖量的 pass 必须为 0（R3 硬不变量），实为: ${un.map((c) => c.id).join(', ')}`);
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- R3/R7：零对象在**所有**输出路径上都不是"通过"（复查发现的重复犯错） ---------- */
+
+test('R7：--boot-check 对零对象必须 skip，不得宣称“全部可导入”（此前的假绿灯）', () => {
+  const home = tempHome();
+  const p = join(home, 'profiles', 'web');
+  mkdirSync(p, { recursive: true });
+  writeFileSync(join(p, 'package.json'), JSON.stringify({ name: 'web', version: '0.0.0', dsh: { profile: { bundles: [] } } }));
+  const r = spawnSync(process.execPath, [CLI, '--boot-check', '--profile', 'web'], { encoding: 'utf8', env: { ...process.env, DSH_HOME: home } });
+  assert.equal(r.status, 0, 'skip 不翻退出码');
+  assert.match(r.stdout, /无可检查对象|skip/, '零对象必须显式说明，而不是"✓ 所有可探测 entry 均可导入"');
+  assert.ok(!/✓ 所有可探测 entry 均可导入/.test(r.stdout), '零对象时不得出现通过式断言');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('R3：bootVerdict 是唯一判定入口 —— pass / fail / skip 三态，零对象为 skip', () => {
+  const src = readFileSync(CLI, 'utf8');
+  const m = src.match(/function bootVerdict\([\s\S]*?\n}/);
+  assert.ok(m, '未找到 bootVerdict');
+  const fn = new Function(`${m[0]}\nreturn bootVerdict;`)();
+  assert.equal(fn([]).state, 'skip', '零对象 = skip（不写快照、不宣称通过）');
+  assert.equal(fn([{ status: 'ok' }]).state, 'pass');
+  assert.equal(fn([{ status: 'failed' }]).state, 'fail');
+  // 三处输出路径都必须走它（否则又是"修实例不修类"）
+  const uses = (src.match(/bootVerdict\(/g) || []).length;
+  assert.ok(uses >= 4, `bootVerdict 应被定义 1 次 + 三处输出路径各用 1 次，实际出现 ${uses} 次`);
+});
