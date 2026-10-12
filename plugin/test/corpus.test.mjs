@@ -122,6 +122,7 @@ for (const c of CASES) {
         const b = runBoot(home);
         assert.notEqual(b.status, 0, `--boot-check 应失败，实际退出码 ${b.status}`);
         if (e.notGreened) assert.ok(!/✓ 所有可探测 entry 均可导入/.test(b.stdout), '不得出现假绿灯');
+        if (e.bootCheckKind) assert.match(b.stdout, new RegExp(e.bootCheckKind), `应归类为 ${e.bootCheckKind}（如被误归类，用户拿到的修复方向就是错的）`);
       }
     } finally {
       rmSync(home, { recursive: true, force: true });

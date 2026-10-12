@@ -611,6 +611,39 @@
       "expect": {
         "P23": "skip"
       }
+    },
+    {
+      "id": "missing-export-from-subpath",
+      "source": "forum#6853",
+      "desc": "插件从子路径导入宿主机包的命名导出，而该子路径不导出它（--boot-check 必须识别为 missing-export；P16 按设计跳过子路径说明符，权威判定是 --boot-check）",
+      "setup": {
+        "manifest": {
+          "name": "web",
+          "version": "0.0.0",
+          "dsh": {
+            "profile": {
+              "bundles": [
+                "dsh-zotero"
+              ]
+            }
+          }
+        },
+        "patchRaw": "- insert:\n    - id: zotero\n      name: dsh-zotero\n",
+        "nodeModules": {
+          "dsh-zotero/package.json": "{\"name\": \"dsh-zotero\", \"version\": \"1.0.0\", \"type\": \"module\", \"main\": \"lib/command.js\", \"dsh\": {\"bundle\": {\"patch\": \"./cordis.patch.yml\"}}, \"peerDependencies\": {\"@deepseek-ai/dsh-commands\": \"^0.1.5\"}}",
+          "dsh-zotero/cordis.patch.yml": "- insert:\n    - id: zotero\n      name: dsh-zotero\n",
+          "dsh-zotero/lib/command.js": "import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand';\nexport function apply(ctx) { return CommandDefinitionId; }\n"
+        },
+        "hostLayer": {
+          "@deepseek-ai/dsh-commands/package.json": "{\"name\": \"@deepseek-ai/dsh-commands\", \"version\": \"0.1.6-alpha.1\", \"type\": \"module\", \"exports\": {\".\": \"./lib/index.js\", \"./brand\": \"./lib/types/brand.js\"}}",
+          "@deepseek-ai/dsh-commands/lib/index.js": "export const CommandId = 1;\nexport const CommandDefinitionId = 2;\n",
+          "@deepseek-ai/dsh-commands/lib/types/brand.js": "export const brand = 1;\n"
+        }
+      },
+      "expect": {
+        "bootCheckFails": true,
+        "bootCheckKind": "missing-export"
+      }
     }
   ]
 }
