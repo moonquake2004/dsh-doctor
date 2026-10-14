@@ -62,7 +62,7 @@
       "probe": {
         "type": "text-not-contains",
         "path": "{profile}/cordis.patch.yml",
-        "pattern": "^\\s*name:\\s*['\"]?[^'\"\\s]+[^'\"\\n]*\\s[^'\"\\n]+",
+        "pattern": "^\\s*name:\\s*['\\\"]?[^'\\\"\\s]+[^'\\\"\\n]*[^\\S\\n][^'\\\"\\n]+",
         "flags": "m",
         "required": false
       },

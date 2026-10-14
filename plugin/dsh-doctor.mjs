@@ -760,9 +760,28 @@ function checkProfile(name) {
   const userNames = (() => {
     const out = new Set();
     if (!existsSync(patchPath)) return out;
-    const text = readFileSync(patchPath, 'utf8');
-    // 真实格式：`- id:` 下缩进的 `name:` 行（无破折号）——2026-08-15 fixtures 发现旧正则从未匹配
-    for (const m of text.matchAll(/^\s*name:\s*['"]?([^'"\s]+)/gm)) out.add(m[1]);
+    // 2026-10-14 实测缺陷（与 collectBootEntries 同源）：旧版用无层级正则 `/^\s*name:/gm`，
+    // 把 config 里 providers.<name>.models[] 的 `- name: dsv4f` 全收进来 → P3 报
+    // 「不可解析的 name: dsv4f, ox-alpha…」，用户以为插件坏了。
+    // 只收**insert 列表里 entry 自己的 name**（与 readInsertIds 同一套层级判据）。
+    const lines = readFileSync(patchPath, 'utf8').split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/^(\s*)- insert:\s*$/);
+      if (!m) continue;
+      const base = m[1].length;
+      for (let j = i + 1; j < lines.length; j++) {
+        const l = lines[j];
+        if (l.trim() === '') continue;
+        const indent = (l.match(/^\s*/) || [''])[0].length;
+        if (indent <= base) break; // insert 块结束
+        // entry 的 name 与它的 `- id:` 同级（都在 base+2 或 base+4）
+        const nm = l.match(/^\s*name:\s*['"]?([^'"\s]+)/);
+        // entry 的 name 比 `- id:` 深（`- insert:` 0 → `- id:` 4 → `name:` 6），
+        // 而 config 里的 models 列表在 10 空格以上。判据：在 insert 块内、且比 `- id:` 深。
+        // （第一版用 `indent <= base+4` 把真实 fixture 的 name 排除了 → 2 个用例红。）
+        if (nm && indent > base + 2) out.add(nm[1]);
+      }
+    }
     return out;
   })();
 
@@ -2730,6 +2749,30 @@ function peerRangeState(version, range) {
 }
 
 /** 解析 host 包版本：profile node_modules → 共享镜像根；**跟随软链接**（readFileSync 会跟随）。 */
+/**
+ * 把一个已定位的包目录解析到它的**入口文件**（供 import 探针用）。
+ * 顺序与 Node 一致：`main` → `exports["."]` → `index.js`。返回绝对路径或 null。
+ */
+function resolveEntry(pkgDir) {
+  try {
+    const mf = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'));
+    const cands = [];
+    if (typeof mf.main === 'string') cands.push(join(pkgDir, mf.main));
+    const ex = mf.exports;
+    if (typeof ex === 'string') cands.push(join(pkgDir, ex));
+    else if (ex && typeof ex === 'object') {
+      for (const k of ['.', './', 'import', 'default']) {
+        const v = ex[k];
+        if (typeof v === 'string') cands.push(join(pkgDir, v));
+        else if (v && typeof v === 'object') { for (const kk of ['import', 'module', 'default']) { if (typeof v[kk] === 'string') cands.push(join(pkgDir, v[kk])); } }
+      }
+    }
+    cands.push(join(pkgDir, 'index.js'), join(pkgDir, 'index.mjs'));
+    for (const c of cands) if (existsSync(c)) return c;
+  } catch { /* manifest 读不了 */ }
+  return null;
+}
+
 function resolveHostVersion(profileDir, name) {
   const roots = [join(profileDir, 'node_modules'), join(dirname(profileDir), 'node_modules')];
   for (const root of roots) {
@@ -2809,19 +2852,40 @@ function collectBootEntries(profileDir) {
   const parsePatch = (text, source) => {
     let cur = null;
     const flush = () => { if (cur) out.push(cur); cur = null; };
+    // 2026-10-14 实测缺陷（用户问"插件是否不兼容新版本"时查出，两轮修反）：
+    //   旧版**不认层级**，把 config 里的深层结构也当 entry —— 真实 profile 的 `llm-pi-ai` config 有
+    //   providers.<name>.models[] 列表，每项 `- name: dsv4f` + `id: ...`，被误收成 7 个"插件 entry"，
+    //   进而 import 失败、报「7 条失败 / not-installed」，让用户和我一度以为插件全不兼容 0.2.x。
+    //   第一轮修法（`- id:` 缩进 ≤ 2）又**漏掉了真正的 entry**：真实 patch 的结构是
+    //   `- insert:` 在缩进 0、条目 `- id:` 在缩进 4（`- insert:` 之下的列表项）。
+    // 正确判据：**`- id:` 必须是某个 `- insert:` 列表的直接子项**（缩进 = insert 缩进 + 2 或 +4），
+    // 且它的 `name:` 比它深不超过 2。config 内的 models 列表在 6 空格以上，且不在任何 insert 之下。
+    let insertIndent = null;
     for (const line of text.split('\n')) {
-      const idM = /^\s*-?\s*id:\s*['"]?([\w@/.\-]+)['"]?\s*$/.exec(line);
-      if (idM) { flush(); cur = { id: idM[1], bundle: source, name: null, disabled: false }; continue; }
+      const indent = (line.match(/^ */) || [''])[0].length;
+      const insM = /^(\s*)-\s*insert\s*:/.exec(line);
+      if (insM) { flush(); insertIndent = insM[1].length; continue; }
+      const idM = /^\s*-\s*id:\s*['"]?([\w@/.\-]+)['"]?\s*$/.exec(line);
+      const isEntry = idM && insertIndent !== null
+        && indent > insertIndent && indent <= insertIndent + 4;
+      if (isEntry) { flush(); cur = { id: idM[1], bundle: source, name: null, disabled: false, indent }; continue; }
       if (!cur) continue;
       const nameM = /^\s*name:\s*['"]?([^'"\s]+)['"]?\s*$/.exec(line);
-      if (nameM) { cur.name = nameM[1]; continue; }
+      if (nameM && indent > cur.indent && indent <= cur.indent + 2) { cur.name = nameM[1]; continue; }
       if (/^\s*disabled:\s*true\s*$/.test(line)) cur.disabled = true;
+      // 顶层的新序列项/键 → 离开当前 insert 列表
+      if (indent <= (insertIndent ?? 0) && /^\s*-/.test(line)) { flush(); insertIndent = null; }
     }
     flush();
   };
+  // 解析根必须是**两根**（与 P1 的 findPkg / P23 的 roots23 同一口径）：宿主提供的 bundle
+  // （@deepseek-ai/dsh-base、dsh-web-app 等）装在父层 `profiles/node_modules`，不在 profile 自己
+  // 的 node_modules 里。旧版只查 profile 内 → 这些 bundle 的 entry 全部漏收，
+  // 于是"装载模拟"只覆盖用户 patch，宿主的 entry 从未被验证（红队 F4 反复指出的第三种口径）。
+  const bundleRoots = [join(profileDir, 'node_modules'), join(dirname(profileDir), 'node_modules')];
   for (const b of bundles) {
-    const patchPath = join(profileDir, 'node_modules', b, 'cordis.patch.yml');
-    if (!existsSync(patchPath)) continue;
+    const patchPath = bundleRoots.map((r) => join(r, b, 'cordis.patch.yml')).find((p) => existsSync(p));
+    if (!patchPath) continue;
     try { parsePatch(readFileSync(patchPath, 'utf8'), b); } catch { /* 读不了由 P1/P7 报 */ }
   }
   const userPatch = join(profileDir, 'cordis.patch.yml');
@@ -3017,8 +3081,79 @@ function runBootCheckSync(profileDir) {
     if (!e.name) continue;
     const spec = e.name;
     if (spec.startsWith('cordis:') || spec.startsWith('.') || spec.startsWith('/')) { out.push({ id: e.id, bundle: e.bundle, spec, status: 'skipped' }); continue; }
-    const r = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(spec)});`],
-      { cwd: profileDir, encoding: 'utf8', timeout: 20000, maxBuffer: 8 * 1024 * 1024 });
+    // **解析根必须是三根**（2026-10-14 实测：用户问"插件是否不兼容 0.2.x"时，
+    // 我们报了 26 条 not-installed，全部是误报 —— 宿主提供的包
+    // （@deepseek-ai/dsh-client-ui-settings-*、dsh-agent-preset-registry 等）
+    // 装在 **CLI 共享根** `/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/node_modules`，
+    // 而旧探针 `cwd: profileDir` + 裸 `import(spec)` 只解析 profile 自己的 node_modules，
+    // 于是把健康状态报成"没装全"。这与 P1/P23 的双根/三根口径长期不一致（红队 F4 反复指出）。
+    // 做法与 P1 的 findPkg 一致：先在三根里定位 manifest，再 import **绝对路径**。
+    const roots = [join(profileDir, 'node_modules'), join(dirname(profileDir), 'node_modules')];
+    // 宿主共享根 = CLI 自己的 node_modules。**不能**从 import.meta.url 向上找（我们装在 profile 的
+    // node_modules 里，向上走到 ~ 也到不了 /opt/homebrew）。可靠来源是 PATH 里的 dsh 可执行文件：
+    // /opt/homebrew/bin/dsh（符号链接）→ /opt/homebrew/lib/node_modules/@deepseek-ai/dsh。
+    // 找不到时返回 null，退回双根（那种环境本来就没有宿主共享根）。
+    const hostRoot = (() => {
+      try {
+        for (const dir of (process.env.PATH || '').split(PATH_DELIM)) {
+          if (!dir) continue;
+          const bin = join(dir, process.platform === 'win32' ? 'dsh.cmd' : 'dsh');
+          if (!existsSync(bin)) continue;
+          // 解析符号链接，找到真实的 lib/node_modules/@deepseek-ai/dsh
+          let real = bin;
+          try { real = realpathSync(bin); } catch { /* 用原路径 */ }
+          let d = dirname(dirname(real)); // 去掉 bin/ 与其父目录
+          for (let i = 0; i < 6; i++) {
+            const cand = join(d, '@deepseek-ai', 'dsh', 'package.json');
+            if (existsSync(cand)) return join(d, '@deepseek-ai', 'dsh', 'node_modules');
+            const up = dirname(d); if (up === d) break; d = up;
+          }
+        }
+      } catch { /* 忽略 */ }
+      return null;
+    })();
+    if (hostRoot) roots.push(hostRoot);
+    // spec 可能是**子路径**（`@deepseek-ai/dsh-web-app/startup`）：先拆出包名定位包目录，
+    // 再把子路径拼上去找入口文件（旧版直接把整串当包名 → 4 条假 not-installed）。
+    const splitSpec = (sp) => {
+      if (sp.startsWith('@')) {
+        const i = sp.indexOf('/', sp.indexOf('/') + 1);
+        return i < 0 ? { name: sp, sub: '' } : { name: sp.slice(0, i), sub: sp.slice(i) };
+      }
+      const i = sp.indexOf('/');
+      return i < 0 ? { name: sp, sub: '' } : { name: sp.slice(0, i), sub: sp.slice(i) };
+    };
+    const sp2 = splitSpec(spec);
+    const pkgDir = roots.map((r) => join(r, sp2.name)).find((d) => existsSync(join(d, 'package.json')));
+    let entryFile = pkgDir ? resolveEntry(pkgDir) : null;
+    if (pkgDir && sp2.sub) {
+      // 子路径入口：优先按 exports 映射，再按文件存在性
+      try {
+        const mf = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'));
+        const mapped = mf.exports?.[sp2.sub] ?? mf.exports?.['.' + sp2.sub];
+        const cand = typeof mapped === 'string' ? join(pkgDir, mapped)
+          : (mapped && typeof mapped === 'object' ? join(pkgDir, mapped.import ?? mapped.default ?? '') : null);
+        if (cand && existsSync(cand)) entryFile = cand;
+        else {
+          for (const c of [join(pkgDir, sp2.sub), join(pkgDir, sp2.sub + '.js'), join(pkgDir, sp2.sub, 'index.js')]) {
+            if (existsSync(c)) { entryFile = c; break; }
+          }
+        }
+      } catch { /* 用 resolveEntry 的结果 */ }
+    }
+    if (!entryFile) {
+      out.push({ id: e.id, bundle: e.bundle, spec, status: 'failed', kind: 'not-installed',
+        hint: '依赖或包本身没装全：在该 profile 里重装它（或它由宿主提供但本机缺少）',
+        error: `三根内均未找到 ${spec} 的 manifest（profile node_modules / 父层 profiles/node_modules / CLI 共享根）` });
+      continue;
+    }
+    // 子进程必须能解析**该包自己的依赖**：光给绝对入口不够 —— 入口内部的裸说明符仍从 cwd 找。
+    // 用 NODE_PATH 把三根都交给 Node（ESM 裸说明符解析也认 NODE_PATH）。
+    // cwd 选**能解析该包依赖**的目录：ESM 裸说明符只从 cwd 向上找 node_modules
+    // （NODE_PATH 对 ESM 无效，已实测）。宿主共享根的父目录覆盖全部 @deepseek-ai/*，
+    // 故优先用它；找不到再退回 profile 目录。
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(entryFile)});`],
+      { cwd: hostRoot ? dirname(hostRoot) : profileDir, encoding: 'utf8', timeout: 20000, maxBuffer: 8 * 1024 * 1024 });
     if (r.status === 0) out.push({ id: e.id, bundle: e.bundle, spec, status: 'loadable' });
     else {
       const raw = String((r.stderr || '') + (r.stdout || ''));
@@ -3072,30 +3207,12 @@ function readPreUpgrade(profileDir) {
   try { return JSON.parse(readFileSync(join(profileDir, PRE_UPGRADE_FILE), 'utf8')); } catch { return null; }
 }
 
+/** 异步版装载模拟（--boot-check 主路径）。
+ *  2026-10-14：它原本是 runBootCheckSync 的一份**重复实现**，于是修复只落到同步版、
+ *  主路径仍是旧探针（cwd=profileDir + 裸 import）→ 用户看到 26 条假 not-installed。
+ *  R5 唯一归属律：同一事实只留一个实现，直接委托同步版。 */
 async function runBootCheck(profileDir) {
-  const entries = collectBootEntries(profileDir);
-  const targets = entries.filter((e) => e.name);
-  const results = [];
-  // 同 runBootCheckSync：bundle 级前置条件必须一并判，否则这一类会得到假绿灯（#6788）
-  for (const miss of bundlesMissingManifest(profileDir)) {
-    results.push({ id: miss.id, bundle: miss.bundle, spec: '(bundle 清单)', status: 'failed', kind: 'missing-bundle-manifest', hint: '该包未声明 dsh.bundle（loader 会拒绝整个 profile）；升级/更换该包，或从 dsh.profile.bundles 移除', error: `bundle 条目 ${miss.bundle} 存在但未声明 dsh.bundle.patch（#1378/#6788）` });
-  }
-  for (const e of targets) {
-    const spec = e.name;
-    // 宿主内置与相对路径不做 import 探测（前者由宿主提供，后者依赖运行上下文）
-    if (spec.startsWith('cordis:') || spec.startsWith('.') || spec.startsWith('/')) {
-      results.push({ id: e.id, bundle: e.bundle, spec, status: 'skipped', reason: '宿主内置或相对路径，不在本探测范围' });
-      continue;
-    }
-    const r = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(spec)});`],
-      { cwd: profileDir, encoding: 'utf8', timeout: 20000, maxBuffer: 8 * 1024 * 1024 });
-    if (r.status === 0) { results.push({ id: e.id, bundle: e.bundle, spec, status: 'loadable' }); continue; }
-    const raw = String((r.stderr || '') + (r.stdout || '')).trim();
-    const first = raw.split('\n').find((l) => /Error|error/.test(l)) || raw.split('\n')[0] || '(无输出)';
-    const cls = classifyImportError(raw);
-    results.push({ id: e.id, bundle: e.bundle, spec, status: 'failed', kind: cls.kind, hint: cls.hint, error: first.slice(0, 220) });
-  }
-  return results;
+  return runBootCheckSync(profileDir);
 }
 
 function quarantineBundle(profileDir, name, undo = false) {

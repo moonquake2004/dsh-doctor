@@ -16,6 +16,48 @@
 
 ---
 
+## [0.8.7] — 2026-10-14
+
+**宿主大版本升级（0.1.6 → 0.2.1-alpha.2）后的第一次全量复查，查出我们自己的 4 类解析缺陷。**
+
+### 背景
+
+用户问"dsh 都升级到新版本了，插件是不是都不兼容"。答案分两半：**插件基本兼容**（193 条 entry 全部可导入），
+但**我们自己的工具报了 26 条假 not-installed**，差点让人（和我）误判为全面不兼容。
+另有一张截图证明**安装器层面确有真不兼容**：`dsh-doctor@0.4.3` 声明的
+`@deepseek-ai/dsh-client-* ^0.1.0-rc.6` 不接受 0.2.x → 被拦下（这正是 P19 的场景落到我们自己头上）。
+
+### Fixed —— 4 类解析缺陷（全部由"真实 profile + 新宿主"触发）
+
+| 缺陷 | 现象 | 修法 |
+|---|---|---|
+| **collectBootEntries 不认层级** | config 里 `providers.<name>.models[]` 的 `- name: dsv4f` + `id:` 被误收成 7 个"插件 entry" → 报 7 条 not-installed | `- id:` 必须是某个 `- insert:` 列表的直接子项；name 比 `- id:` 深 |
+| **探针解析根只有一根** | 宿主提供的包（`@deepseek-ai/dsh-client-ui-settings-*` 等）装在 **CLI 共享根**，`cwd: profileDir` + 裸 import 解析不到 → 26 条假 not-installed | 三根定位 manifest + import **绝对路径** + cwd 选可解析目录；hostRoot 从 PATH 的 dsh 符号链接推导 |
+| **子路径 spec 被当包名** | `@deepseek-ai/dsh-web-app/startup` → `join(root, spec)` 找不到 manifest | 拆分包名+子路径，先定位包再按 exports/文件找入口 |
+| **P6 正则跨行** | `[^'"\n]*\s` 中 `\s` 含 `\n`，把 models 列表下一行算进来 → 误报"name 含空格" | 改为 `[^\S\n]`（只匹配非换行空白） |
+
+**同一病灶的第三处**：P3 的 `userNames` 用无层级正则 `/^\s*name:/gm` 收 config 里的模型名 → 已改为
+与 `readInsertIds` 同一套层级判据。
+
+**另外**：`runBootCheck`（异步版，`--boot-check` 主路径）原本是 `runBootCheckSync` 的**重复实现**，
+修复只落到同步版 → 主路径仍是旧探针。按 R5 唯一归属律改为**直接委托**。
+
+### 过程中我自己引入又修掉的问题
+
+`hostRoot` 循环里用了**未定义的 `delimiter`**（应为已导入的 `PATH_DELIM`）→ ReferenceError 被
+`try/catch` 静默吞掉 → hostRoot 恒为 null → 修复"看起来做了"却完全不生效。
+**又是同一个模式**：异常被吞 + 未验证"修复真的生效"。这次是靠 DBG 输出抓到的。
+
+### 结果
+
+`--boot-check`：**193 条 entry，0 失败**（此前 26 条假失败）。fixtures 135 全绿；变异 8 杀死 / 0 存活。
+
+### 仍未修（需用户决策或属版本差异）
+
+- **E4 node-pty**：宿主仍依赖它，但 profile 安装树里没有 → 待宿主重启后复判
+- **P5 顶层重复**：父层是软链接（安全），profile 顶层是 10-11 装的**实体副本**（真风险）→ 建议换成软链接
+- **S12 84/105**：宿主 0.2.x 迁移链拒绝旧会话 —— **版本差异，非插件问题**
+
 ## [0.8.6] — 2026-09-16
 
 **巡查 #6853 的产物：一个覆盖边界的发现，而不是一个新 bug。**
