@@ -541,6 +541,11 @@ function checkEnv() {
   }
   const profileNM = join(HOME, 'profiles', 'web', 'node_modules');
   ptyDirs.push(join(profileNM, 'node-pty'));
+  // 2026-10-16 修：Homebrew/全局安装把 dsh 放在 `<prefix>/bin`，其依赖在
+  // `<prefix>/lib/node_modules/@deepseek-ai/dsh/node_modules`。旧版只查"以 node_modules/.bin
+  // 结尾的 PATH 项"与 profile，两者都够不着 → 对**完好**的 node-pty 报 fail（实测 pty.node 86KB 在位）。
+  const hostNM = hostInstallRoot();
+  if (hostNM) ptyDirs.push(join(hostNM, 'node-pty'));
   const pnpmStore = join(profileNM, '.pnpm');
   if (existsSync(pnpmStore)) {
     for (const d of readdirSync(pnpmStore)) if (d.startsWith('node-pty@')) ptyDirs.push(join(pnpmStore, d, 'node_modules', 'node-pty'));
@@ -2753,6 +2758,36 @@ function peerRangeState(version, range) {
  * 把一个已定位的包目录解析到它的**入口文件**（供 import 探针用）。
  * 顺序与 Node 一致：`main` → `exports["."]` → `index.js`。返回绝对路径或 null。
  */
+/**
+ * CLI 安装树的 `node_modules`（= 宿主共享根）。用于解析"宿主提供的包"与"CLI 自己的依赖"
+ * （如 node-pty）。返回绝对路径或 null。
+ *
+ * 为什么不能从 `import.meta.url` 向上找：我们装在 profile 的 node_modules 里，
+ * 向上走到 `~` 也到不了 `/opt/homebrew/lib/node_modules/@deepseek-ai/dsh`。
+ * 可靠来源是 PATH 里的 `dsh` 可执行文件（解析符号链接后回溯）。
+ *
+ * 2026-10-16：抽出为公共函数 —— 此前 `--boot-check` 探针与 E4 各写一份，
+ * 两处都漏了 Homebrew 全局布局（E4 的 PATH 分支还要求路径以 `node_modules/.bin` 结尾，
+ * 而 Homebrew 把 dsh 装在 `/opt/homebrew/bin`），导致 E4 对健康安装报 fail。
+ */
+function hostInstallRoot() {
+  try {
+    for (const dir of (process.env.PATH || '').split(PATH_DELIM)) {
+      if (!dir) continue;
+      const bin = join(dir, process.platform === 'win32' ? 'dsh.cmd' : 'dsh');
+      if (!existsSync(bin)) continue;
+      let real = bin;
+      try { real = realpathSync(bin); } catch { /* 用原路径 */ }
+      let d = dirname(dirname(real));
+      for (let i = 0; i < 6; i++) {
+        if (existsSync(join(d, '@deepseek-ai', 'dsh', 'package.json'))) return join(d, '@deepseek-ai', 'dsh', 'node_modules');
+        const up = dirname(d); if (up === d) break; d = up;
+      }
+    }
+  } catch { /* 忽略 */ }
+  return null;
+}
+
 function resolveEntry(pkgDir) {
   try {
     const mf = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'));
@@ -3093,25 +3128,7 @@ function runBootCheckSync(profileDir) {
     // node_modules 里，向上走到 ~ 也到不了 /opt/homebrew）。可靠来源是 PATH 里的 dsh 可执行文件：
     // /opt/homebrew/bin/dsh（符号链接）→ /opt/homebrew/lib/node_modules/@deepseek-ai/dsh。
     // 找不到时返回 null，退回双根（那种环境本来就没有宿主共享根）。
-    const hostRoot = (() => {
-      try {
-        for (const dir of (process.env.PATH || '').split(PATH_DELIM)) {
-          if (!dir) continue;
-          const bin = join(dir, process.platform === 'win32' ? 'dsh.cmd' : 'dsh');
-          if (!existsSync(bin)) continue;
-          // 解析符号链接，找到真实的 lib/node_modules/@deepseek-ai/dsh
-          let real = bin;
-          try { real = realpathSync(bin); } catch { /* 用原路径 */ }
-          let d = dirname(dirname(real)); // 去掉 bin/ 与其父目录
-          for (let i = 0; i < 6; i++) {
-            const cand = join(d, '@deepseek-ai', 'dsh', 'package.json');
-            if (existsSync(cand)) return join(d, '@deepseek-ai', 'dsh', 'node_modules');
-            const up = dirname(d); if (up === d) break; d = up;
-          }
-        }
-      } catch { /* 忽略 */ }
-      return null;
-    })();
+    const hostRoot = hostInstallRoot();  // R5 唯一归属：与 E4 共用一份推导
     if (hostRoot) roots.push(hostRoot);
     // spec 可能是**子路径**（`@deepseek-ai/dsh-web-app/startup`）：先拆出包名定位包目录，
     // 再把子路径拼上去找入口文件（旧版直接把整串当包名 → 4 条假 not-installed）。

@@ -2114,3 +2114,56 @@ test('红队F1（回归）：3 个"幽灵 bundle"（一个都没装）时，不�
   assert.equal(raw.unreported, unrep, `unreported 必须如实暴露（记录 ${unrep} vs JSON ${raw.unreported}）`);
   rmSync(home, { recursive: true, force: true });
 });
+
+/**
+ * E4 解析根回归（2026-10-16）。
+ *
+ * 真机实测：Homebrew/全局安装把 dsh 放在 `<prefix>/bin`（**不是** `node_modules/.bin`），
+ * 其依赖在 `<prefix>/lib/node_modules/@deepseek-ai/dsh/node_modules`。旧版 E4 只看
+ * "以 node_modules/.bin 结尾的 PATH 项"与 profile，两处都够不着 → 对**完好**的 node-pty
+ * （实测 pty.node 86904 字节在位）报 fail。
+ *
+ * 这里用 PATH 里的 `dsh` **符号链接**复刻该布局（与真机一致：/opt/homebrew/bin/dsh → …/lib/bin.js）。
+ */
+function fakeHostTree(root, { withPty }) {
+  const inst = join(root, 'lib', 'node_modules', '@deepseek-ai', 'dsh');
+  mkdirSync(join(inst, 'lib'), { recursive: true });
+  writeFileSync(join(inst, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.1-alpha.2' }));
+  writeFileSync(join(inst, 'lib', 'bin.js'), '// entry\n');
+  const bin = join(root, 'bin');
+  mkdirSync(bin, { recursive: true });
+  symlinkSync(join(inst, 'lib', 'bin.js'), join(bin, 'dsh'));
+  if (withPty) {
+    const plat = `${process.platform}-${process.arch}`;
+    const node = join(inst, 'node_modules', 'node-pty', 'prebuilds', plat, 'pty.node');
+    mkdirSync(join(node, '..'), { recursive: true });
+    writeFileSync(node, Buffer.alloc(1024, 7)); // 非空即可（判据是 size > 0）
+  }
+  return bin;
+}
+
+test('E4：node-pty 在 PATH 派生的宿主安装树里 → 通过（不得报"未找到"）', () => {
+  const home = tempHome();
+  mkdirSync(join(home, 'profiles', 'web', 'node_modules'), { recursive: true }); // 有安装树可查 → 不 skip
+  const root = mkdtempSync(join(tmpdir(), 'dsh-fakehost-'));
+  const bin = fakeHostTree(root, { withPty: true });
+  const { checks } = runCli({ home, args: ['--env'], env: { PATH: `${bin}:/usr/bin:/bin` } });
+  const e4 = checks.find((c) => c.id === 'E4');
+  assert.ok(e4, '未产出 E4');
+  assert.equal(e4.status, 'pass', `E4 应通过（宿主树里有 node-pty），实际 ${e4.status}：${e4.detail ?? ''}`);
+  rmSync(home, { recursive: true, force: true });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('E4：宿主树里确实没有 node-pty → 失败（新解析根不得把 fail 变成静默 skip）', () => {
+  const home = tempHome();
+  mkdirSync(join(home, 'profiles', 'web', 'node_modules'), { recursive: true });
+  const root = mkdtempSync(join(tmpdir(), 'dsh-fakehost-'));
+  const bin = fakeHostTree(root, { withPty: false });
+  const { checks } = runCli({ home, args: ['--env'], env: { PATH: `${bin}:/usr/bin:/bin` } });
+  const e4 = checks.find((c) => c.id === 'E4');
+  assert.ok(e4, '未产出 E4');
+  assert.equal(e4.status, 'fail', `E4 应失败（三处都没有 node-pty），实际 ${e4.status}`);
+  rmSync(home, { recursive: true, force: true });
+  rmSync(root, { recursive: true, force: true });
+});

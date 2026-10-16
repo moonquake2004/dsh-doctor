@@ -16,6 +16,55 @@
 
 ---
 
+## [0.8.8] — 2026-10-16
+
+**重启后复查的产物：E4 是对健康安装的误报，根因与上一版同一病灶（解析根不全 + 重复实现）。**
+
+### Fixed
+
+**E4（node-pty 完整性）对完好安装报 fail。** 真机实测：node-pty 与原生二进制都在位
+（`prebuilds/darwin-arm64/pty.node`，86904 字节，位于 `/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/node_modules/node-pty`），
+E4 却报「未找到 node-pty」。
+
+根因两层，都与 0.8.7 修过的同源：
+
+1. **解析根不全**：E4 只查「PATH 里以 `node_modules/.bin` 结尾且含 `dsh` 的目录的兄弟 node-pty」
+   与「profile 自己的 node_modules」。而 Homebrew/全局安装把 `dsh` 放在 `<prefix>/bin`，
+   依赖在 `<prefix>/lib/node_modules/@deepseek-ai/dsh/node_modules` —— 两处都够不着（实测 PATH 里
+   符合前一条的条目数 = **0**）。
+2. **重复实现**：宿主根推导在 `--boot-check` 探针里已写过一份，E4 又各写一份，于是两边都漏。
+
+修法：抽出公共函数 `hostInstallRoot()`（从 PATH 的 `dsh` 符号链接回溯到 CLI 安装树），
+**E4 与装载探针共用一份**（R5 唯一归属律）。
+
+### Added
+
+- 2 条对抗性回归用例（fixtures 135 → **137**）：
+  - PATH 派生的宿主树里**有** node-pty → E4 必须 **pass**（此前误报 fail）
+  - 三处都**没有** node-pty → E4 必须 **fail**（并钉住"新增解析根不得把 fail 变成静默 skip"）
+  - 用例用 PATH 里的 `dsh` **符号链接**复刻真机布局（`<prefix>/bin/dsh` → `…/lib/bin.js`），
+    而不是造一个"看起来像"的目录结构 —— 否则测的是 fixture 的想象。
+
+### 复查结果（Desktop 应用重启后）
+
+| 项 | 结果 |
+|---|---|
+| 装载模拟 | **193 条 entry，0 失败** ✓ |
+| E4 | 误报已消除 ✓ |
+| P5 | **仍是真问题**（见下，待决策） |
+| S1 / S12 | 会话日志问题，**与插件兼容性无关** |
+| P18 | 良性（profile manifest 无 version） |
+
+### 仍未修（记入交接清单，需决策）
+
+- **P5 顶层重复**：`profiles/web/node_modules/@deepseek-ai/{cosmokit,schemastery}` 是**实体目录副本**
+  （1.8.5 / 3.18.4），而父层是指向宿主的**符号链接**（1.8.6-alpha.1 / 3.18.5-alpha.1）。
+  社区插件因此拿到旧版、宿主用新版 → 同包双实例（#1486/#1697 的 Symbol 不匹配场景）。
+  修法有两种（换成符号链接 / 直接删掉让它回落到父层），**各有风险**，故不单方面动手：
+  删掉后 `dsh-better-sidebar` 声明的 `^3.18.4` 在 semver 下**不匹配**宿主的 `3.18.5-alpha.1`
+  （预发布版本的区间匹配规则），需用户确认后在其停机状态下操作。
+- **我们自己的 peer 范围**要放宽到兼容 0.2.x（否则用户装我们的插件会被安装器拦下）。
+
 ## [0.8.7] — 2026-10-14
 
 **宿主大版本升级（0.1.6 → 0.2.1-alpha.2）后的第一次全量复查，查出我们自己的 4 类解析缺陷。**
