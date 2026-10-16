@@ -75,3 +75,32 @@ test('P19 判定：未知的三种来源都不得折叠成确定态', () => {
   assert.equal(peerRangeState('1.0.0-rc.1', '^1.0.0').state, 'unsatisfied', '1.0.0-rc.1 数值上低于 1.0.0');
   assert.equal(peerRangeState('', '^1.0.0').state, 'unknown', '版本缺失 = 未知');
 });
+
+/**
+ * 我们**自己**声明的 host peer 必须接受预发布宿主（2026-10-16）。
+ *
+ * 事故：`peerDependencies["@deepseek-ai/cordis"] = "^4.0.1"`，而宿主 0.2.1-alpha.2 提供
+ * cordis `4.0.5-alpha.1`。按**严格 semver**（pnpm 的口径）不满足 → 安装时打出
+ * `missing peer @deepseek-ai/cordis`；用户看到这行会以为插件不兼容。
+ * （宿主自己的 `evaluatePluginCompatibility` 用 `includePrerelease: true`，且只核对
+ *  `@deepseek-ai/dsh*` 命名空间，故 cordis 不在它的核对范围内 —— 但它仍会误导人。）
+ *
+ * 这里不从 package.json 之外引入 semver：直接用**本仓库那个经外部差分验证过的**
+ * `peerRangeState`（与 P19 同一实现），断言"声明的范围必须同时满足
+ *  ① 新宿主线（预发布）  ② 老宿主线（稳定）
+ * "。若有人把范围改回 `^4.0.1`，本用例立刻变红。
+ */
+test('我们自己声明的 peer 必须接受预发布宿主（且不放弃老宿主）', () => {
+  const pkg = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'));
+  const range = pkg.peerDependencies?.['@deepseek-ai/cordis'];
+  assert.ok(range, 'package.json 必须声明 @deepseek-ai/cordis 的 peer（它是我们唯一声明的 host 依赖）');
+  // ① 新宿主线：0.2.1-alpha.2 提供的是 4.0.5-alpha.1，必须**正面判定为满足**。
+  //   注意不能只断言"不是 unsatisfied" —— 我们的实现对"release 组 vs 预发布版本"返回
+  //   `unknown`（不猜），于是 `notEqual(..., 'unsatisfied')` 对 `^4.0.1` 也会通过，
+  //   守卫就成了摆设（实测：把范围改回 ^4.0.1，弱断言版本仍然全绿）。
+  assert.equal(peerRangeState('4.0.5-alpha.1', range).state, 'satisfied',
+    `声明的 ${range} 不能正面满足预发布宿主 cordis 4.0.5-alpha.1（安装时会报 missing peer）`);
+  // ② 老宿主线：4.0.1（我们最初支持的版本）必须仍然被接受，否则等于把老用户踢掉
+  assert.equal(peerRangeState('4.0.1', range).state, 'satisfied',
+    `声明的 ${range} 不再接受 cordis 4.0.1 —— 放宽时不得丢掉老宿主`);
+});

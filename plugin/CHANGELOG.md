@@ -16,6 +16,61 @@
 
 ---
 
+## [0.8.9] — 2026-10-16
+
+### 结论修正：截图里那个"不兼容"**不是我们的包**
+
+用户截图显示 `dsh-doctor@0.4.3 与 DSH 0.2.0-rc.2 不兼容（要求 @deepseek-ai/dsh-client-* ^0.1.0-rc.6 …）`。
+排查后确认：**那是 npm 上同名的另一个包** ——
+
+| | 我们的 | 截图的 |
+|---|---|---|
+| 包名 | `@moonquake2004/dsh-doctor` | **`dsh-doctor`（未加 scope）** |
+| 作者 | moonquake2004 | **astra3294**（github.com/astra3294/dsh-doctor） |
+| 最后发布 | 0.8.8 / 2026-10 | 0.4.3 / **2026-08-15** |
+| 描述 | Offline diagnostic for DeepSeek Harness… | Deterministic diagnostics and recovery for DeepSeek Harness |
+| peer | 只有 `@deepseek-ai/cordis` | cordis + **10 个 `@deepseek-ai/dsh-client-* ^0.1.0-rc.6`** |
+
+用**宿主自己的判定实现** `evaluatePluginCompatibility`（从 `dsh-app-boot` 抽取）实测：
+
+| 包 | runtime 0.2.1-alpha.2 |
+|---|---|
+| 我们的 `@moonquake2004/dsh-doctor@0.8.8` | **✓ 兼容** |
+| 同名 `dsh-doctor@0.4.3` | **✗ 不兼容**（未满足列表与截图逐条一致） |
+
+**所以我上一轮说"我们的 peer 被安装器拦下"是错的** —— 那是把截图当成了我们的包。
+另外实测：把 0.8.8 装进一个**临时 profile**（基于 0.2.1-alpha.2）**成功**，只有 pnpm 的 peer 告警。
+
+### Fixed（仍然值得修的一处）
+
+`peerDependencies["@deepseek-ai/cordis"] = "^4.0.1"`，而宿主提供 `4.0.5-alpha.1`。
+按**严格 semver**（pnpm 口径）不满足 → 安装时打印 `missing peer @deepseek-ai/cordis`，
+用户看到这行会以为插件不兼容（宿主自己的判定用 `includePrerelease: true` 且只核对
+`@deepseek-ai/dsh*` 命名空间，故它不算不兼容 —— 但这行告警确实误导人）。
+
+改为 **`^4.0.1 || ^4.0.5-alpha.1`** —— 两个口径都通过，且不放弃老宿主：
+
+| 范围 | 严格(pnpm) | 含预发布(宿主) |
+|---|---|---|
+| `^4.0.1` | ✗ | ✓ |
+| **`^4.0.1 \|\| ^4.0.5-alpha.1`** | **✓** | **✓** |
+| `~4.0.5-alpha.2`（宿主自家惯例） | ✗ | ✗（连在位的 alpha.1 都不匹配） |
+
+### Added
+
+- 回归用例：**我们声明的 peer 必须同时满足"新宿主线（预发布）"与"老宿主线（稳定）"**，
+  用本仓库那个经外部差分验证过的 `peerRangeState` 判定（不另引 semver）。
+  - **第一版是装饰性的**：只断言"不是 unsatisfied"，而实现把"release 组 vs 预发布版本"
+    判为 `unknown` → 把范围改回 `^4.0.1` 仍然全绿。改成**正面断言 `satisfied`** 后，
+    对抗性自检确认：改回旧范围 → **立刻变红**。
+
+测试 227 → **228**。
+
+### 记入待办
+
+- **同名包混淆**：市场上叫 `dsh-doctor` 的条目是别人的包（且已与 0.2.x 不兼容）。
+  我们无法改名，但可以在 README/市场文案里显式写全 `@moonquake2004/dsh-doctor`。
+
 ## [0.8.8] — 2026-10-16
 
 **重启后复查的产物：E4 是对健康安装的误报，根因与上一版同一病灶（解析根不全 + 重复实现）。**
