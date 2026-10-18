@@ -52,9 +52,36 @@
 ### 测试
 
 - 新增 `plugin/test/regression-0.8.10.test.mjs`（全部正面断言确切状态）。
-- 全套 **229 → 243**（242 pass / 1 主动 skip / 0 fail；基线 229 含 1 条主动 skip）。
+- 全套 **229 → 252**（251 pass / 1 主动 skip / 0 fail；基线 229 含 1 条主动 skip）。
 - **对抗自检**：逐条回退修复确认用例会变红——包括"只修一半"（S1 只认 `data.toolCallId`）
   与"过度解除"（有 result 就放行）两种半吊子修法，确认都被拦住。
+
+### Fixed（E11：从"恒 skip"改为真正守护 sudo 属主风险）
+
+E11 原本查 `{home}/settings.yaml` 的可写性。这个前提**已经不成立**：
+`dsh-settings/lib/index.js:346-363` 的 `importLegacyDocument()` 会把该文件 rename 成
+`settings.yaml.imported`，且第 349 行 `if (!existsSync(path)) return` —— **新装机器根本没有它**。
+于是 E11 在健康机上恒 skip，从没检出过它要守护的那件事。现役设置落盘在
+`<profile>/cordis.patch.yml`，写入走 `writeFileAtomic`（同目录临时文件 + rename 覆盖）。
+
+**为什么不能简单地把 `file-writable` 指向现役文件**——实测两条相反的结论：
+
+| 场景 | `open('a')`（旧 `file-writable` 语义） | 实际能否写 | 结论 |
+|---|---|---|---|
+| 文件 0444、父目录可写 | EACCES | **能**（rename 覆盖成功） | 旧语义**误报** |
+| 父目录 0555 | ok（追加只改元数据） | **不能**（rename EACCES） | 旧语义**漏报** |
+
+故新增原语 **`dir-writable`**：在目标目录建 `wx` 临时兄弟文件再删掉（与 `writeFileAtomic` 同形），
+E11 改用它 + `{profile}/cordis.patch.yml`。
+
+**另修一处同族假 fail**：`dir-writable` 在目录不存在时最初按 `required:true` 报 fail，
+把"没装 profile"说成"目录不可写"。现统一为 skip —— **目录不存在不是权限问题**，
+"该存在却不存在"由 P0 负责。
+
+**以及一个只有实跑才会暴露的坑**：在本会话的 macOS 沙箱里，对属主与权限都正常的目录执行
+`open('wx')` 会得到 `EPERM`，E11 直接把用户的健康环境报成 fail。现已区分：
+`EACCES`/`EROFS` 或权限位本身矛盾 → fail；**仅 EPERM 且权限位正常 → skip（"运行环境拒绝，无法判定"）**。
+与 E4/E6 属于同一族问题：**环境受限导致的结论，不能当作用户的问题**。
 
 ### 已知未修（本轮范围外，已记台账）
 

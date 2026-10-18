@@ -314,18 +314,132 @@ test('file-writable: 可写 → ok；只读 → fail；缺失+required:false →
   assert.equal(runCatalogCheck({ probe: { type: 'file-writable', path: '{profile}/missing.yaml', required: false } }, c).ok, true);
   rmSync(home, { recursive: true, force: true });
 });
-test('E11 种子规则：settings.yaml 不可写 → fail', () => {
+/* E11（0.8.11 重新定向）：从"legacy settings.yaml 可写"改为"**设置目录可写**"。
+ *
+ * 为什么必须改（实证，不是推测）：
+ *   - 旧 E11 查 {home}/settings.yaml。DSH 0.2.x 的 importLegacyDocument
+ *     （dsh-settings/lib/index.js:346-363）启动时把它 rename 成 settings.yaml.imported，
+ *     且第 349 行 `if (!existsSync(path)) return` —— **新装机器根本没有这个文件**。
+ *     于是 E11 在健康机上恒 skip，从没检出过它要守护的 sudo 属主问题。
+ *   - 现役设置落盘在 <profile>/cordis.patch.yml，写入走 writeFileAtomic（同目录临时文件 + rename）。
+ *   - 实测证明旧原语 file-writable 判不准这件事：
+ *       文件 0444、目录可写 → open('a')=EACCES，但 rename 覆盖**成功**（dsh 写得进去）→ 旧原语误报；
+ *       父目录 0555        → open('a')=ok（追加只改元数据），但 rename=EACCES → 旧原语**漏报**。
+ *   因此新增原语 dir-writable（同目录 wx 临时文件探测），E11 改用它 + {profile}/cordis.patch.yml。
+ *   P3/P6/P15 读的是 cordis.patch.yml 的**内容**，E11 查的是**目录写权限**，不构成一事实多检查。
+ */
+
+test('E11：设置目录可写 → pass（健康的 profile 不应被报错）', () => {
   const home = tempHome();
   const c = ctx(home);
-  mkdirSync(c.home, { recursive: true });
-  writeFileSync(join(c.home, 'settings.yaml'), 'x\n');
-  chmodSync(join(c.home, 'settings.yaml'), 0o444);
-  const cat = bundledCatalog();
-  const e11 = cat.checks.find((x) => x.id === 'E11-settings-writable');
-  assert.ok(e11, 'E11 存在');
+  mkdirSync(c.profileDir, { recursive: true });
+  writeFileSync(join(c.profileDir, 'cordis.patch.yml'), '[]\n');
+  const e11 = bundledCatalog().checks.find((x) => x.id === 'E11-settings-writable');
   const r = runCatalogCheck(e11, c);
-  assert.equal(r.ok, false, '只读 settings.yaml 应 fail');
+  // root 会绕过权限位，但"可写"这个结论在 root 下依旧成立
+  assert.equal(r.ok, true, `健康目录应 pass: ${r.detail}`);
+  assert.equal(r.skipped, undefined, '不得 skip');
   rmSync(home, { recursive: true, force: true });
+});
+
+test('E11：目录写权限被剥夺 → fail（这才是 sudo 属主要守护的真风险）', () => {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) return; // root 绕过权限位，无法测
+  const home = tempHome();
+  const c = ctx(home);
+  mkdirSync(c.profileDir, { recursive: true });
+  writeFileSync(join(c.profileDir, 'cordis.patch.yml'), '[]\n');
+  chmodSync(c.profileDir, 0o555); // 去掉写位：rename 覆盖会 EACCES
+  const e11 = bundledCatalog().checks.find((x) => x.id === 'E11-settings-writable');
+  const r = runCatalogCheck(e11, c);
+  try {
+    // 沙箱/安全策略下可能 EPERM → 引擎会判 skip（"无法判定"）。真权限问题（EACCES/EROFS）必须 fail。
+    if (r.skipped === true) {
+      assert.match(r.detail, /EPERM|沙箱|无法判定/, `skip 必须说明是被环境拒绝，不得含糊: ${r.detail}`);
+    } else {
+      assert.equal(r.ok, false, `目录不可写应 fail: ${r.detail}`);
+      assert.doesNotMatch(r.detail, /^$/, 'fail 必须带原因');
+    }
+  } finally {
+    chmodSync(c.profileDir, 0o755);
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('E11：文件 0444 但目录可写 → pass（钉死"不得用 file-writable 查文件本身"）', () => {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) return;
+  const home = tempHome();
+  const c = ctx(home);
+  mkdirSync(c.profileDir, { recursive: true });
+  const f = join(c.profileDir, 'cordis.patch.yml');
+  writeFileSync(f, '[]\n');
+  chmodSync(f, 0o444);          // 文件只读
+  // 同目录放一个 **可写** 的 settings.yaml：旧实现只看它，会 pass；新实现看目录，也 pass。
+  writeFileSync(join(c.home, 'settings.yaml'), 'x\n', { mode: 0o644 });
+  const e11 = bundledCatalog().checks.find((x) => x.id === 'E11-settings-writable');
+  const r = runCatalogCheck(e11, c);
+  try {
+    assert.equal(r.ok, true,
+      `文件 0444 + 目录可写时 dsh 仍能持久化设置（rename 覆盖），不得报错: ${r.detail}`);
+  } finally {
+    chmodSync(f, 0o644);
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('E11 交叉污染：settings.yaml 不可写、但设置目录可写 → 必须 pass（判定跟目录走，不跟 legacy 文件走）', () => {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) return;
+  const home = tempHome();
+  const c = ctx(home);
+  mkdirSync(c.profileDir, { recursive: true });
+  writeFileSync(join(c.profileDir, 'cordis.patch.yml'), '[]\n');
+  // 一侧（legacy 文件）极坏：只读文件；另一侧（真正的目标目录）健康。
+  const legacy = join(c.home, 'settings.yaml');
+  writeFileSync(legacy, 'x\n');
+  chmodSync(legacy, 0o444);
+  const e11 = bundledCatalog().checks.find((x) => x.id === 'E11-settings-writable');
+  const r = runCatalogCheck(e11, c);
+  try {
+    // 旧实现（查 settings.yaml 可写性）在这里会 fail —— 这是**假阳性**，因为它查错了对象。
+    // 新实现查 profile 目录 → pass。
+    assert.equal(r.ok, true,
+      `判定必须跟随设置目录（可写），而不是 legacy settings.yaml: ${r.detail}`);
+  } finally {
+    chmodSync(legacy, 0o644);
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('E11 交叉污染（反向）：legacy settings.yaml 可写、但设置目录不可写 → 必须 fail', () => {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) return;
+  const home = tempHome();
+  const c = ctx(home);
+  mkdirSync(c.profileDir, { recursive: true });
+  writeFileSync(join(c.profileDir, 'cordis.patch.yml'), '[]\n');
+  writeFileSync(join(c.home, 'settings.yaml'), 'x\n', { mode: 0o644 }); // legacy 可写（旧实现会 pass）
+  chmodSync(c.profileDir, 0o555);                                       // 真目标目录不可写
+  const e11 = bundledCatalog().checks.find((x) => x.id === 'E11-settings-writable');
+  const r = runCatalogCheck(e11, c);
+  try {
+    // 旧实现在这里会 pass（假阴性，漏掉真风险）。
+    if (r.skipped === true) {
+      assert.match(r.detail, /EPERM|沙箱|无法判定/, `skip 必须说明环境拒绝: ${r.detail}`);
+    } else {
+      assert.equal(r.ok, false, `设置目录不可写必须 fail（legacy 文件可写不得掩盖它）: ${r.detail}`);
+    }
+  } finally {
+    chmodSync(c.profileDir, 0o755);
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('E11 不变量②：引擎两处"跳过"判据锁（跳过理由含跳过/不适用 → 记 skip；无 profile 目录时 env 照跑）', () => {
+  const src = readFileSync(new URL('../dsh-doctor.mjs', import.meta.url), 'utf8');
+  // checkCatalog：自报 ok:true 但文案自述跳过 → 归一化成 skip（否则 env 段会被记 pass）
+  assert.match(src, /r\.ok === true && \/跳过\|不适用\/\.test\(String\(r\.detail\)\)\s*\)\s*r\.skipped = true/,
+    '引擎须保留"文案自述跳过 → skip"归一化（checkCatalog）');
+  // env 段检查不得被 `if (check.section === 'profile' && !ctx.profileDir) continue` 误伤
+  assert.match(src, /if \(check\.section === 'profile' && !ctx\.profileDir\) continue/,
+    '无 profile 目录时只应跳过 profile 段');
 });
 
 /* ---------- v1 词汇表 r5（#1719）：node 两态语义 ---------- */

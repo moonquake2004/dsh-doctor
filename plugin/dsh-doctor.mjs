@@ -2574,6 +2574,70 @@ export function runCatalogCheck(check, ctx) {
       return writable ? { ok: true, detail: check.detailOk ?? `${fp} 可写` }
                       : { ok: false, detail: check.detailFail ?? `${fp} 不可写（sudo 属主或只读权限，#1719）` };
     }
+    case 'dir-writable': {
+      /* 2026-10-18（0.8.11）：探测"目标文件的**父目录**能否被写入"——按 dsh 自己的持久化语义判定。
+       *
+       * 为什么不能复用 file-writable：dsh 写配置走 `writeFileAtomic`（同目录 wx 临时文件 + rename 覆盖，
+       * 见 dsh-atomic-write）。实测两条相反的结论：
+       *   - 目标文件 0444 / root 属主、**父目录可写** → open('a')=EACCES，但 rename 覆盖**成功** → 文件写得了；
+       *   - 父目录 0555 / root 属主 → open('a')=**ok**（追加只改元数据），但 rename=EACCES → **真写不了**。
+       * 也就是说 open('a') 语义（file-writable）会同时误报和漏报。本原语用一个跟 writeFileAtomic 同形的
+       * 探针：在父目录建 wx 临时兄弟文件再删掉——能建就能 rename 覆盖。
+       *
+       * probe.path 指向**目标文件**（可以是还不存在的文件）；目录取它的 dirname。
+       */
+      const fp = p(probe.path);
+      const dir = probe.dir ? p(probe.dir) : dirname(fp);
+      let st;
+      try { st = statSync(dir); } catch {
+        /* 目录不存在 ⇒ **不适用**，一律 skip，与 required 无关。
+         * 曾经在这里按 `required === true` 报 fail，于是"没装 profile"被说成"目录不可写"——
+         * 又是一个把"没对象可查"当"出问题"的假 fail（与 E4/E6 同族）。
+         * 目录不存在不是权限问题；"该存在却不存在"由 P0（profile 有效性）负责。 */
+        return { ok: true, skipped: true,
+          detail: check.detailSkip ?? `${dir} 不存在——无对象可查，跳过（不是权限问题）` };
+      }
+      if (!st.isDirectory()) return { ok: false, detail: check.detailFail ?? `${dir} 不是目录` };
+      let probeFile = null;
+      let writable = false;
+      let errCode = null;
+      try {
+        probeFile = join(dir, `.dsh-doctor-probe-${process.pid}-${Date.now()}`);
+        const fd = openSync(probeFile, 'wx');
+        closeSync(fd);
+        writable = true;
+      } catch (e) { errCode = e?.code ?? null; }
+      finally {
+        if (probeFile) { try { unlinkSync(probeFile); } catch { /* 清理失败不影响判定 */ } }
+      }
+      if (writable) return { ok: true, detail: check.detailOk ?? `${dir} 可写（持久化不受阻）` };
+      /* 关键区分（0.8.11，实测踩到的）：**不能把"探测被我自己的沙箱挡了"报成"用户权限坏了"**。
+       * macOS seatbelt 等沙箱下，对属主与权限都正常的目录执行 touch 会得到 EPERM
+       * （实测：目录 drwxr-xr-x 属主=当前用户，仍 `open('wx')` → EPERM）。这种失败与
+       * "sudo 遗留属主"（EACCES/EROFS）、"只读挂载"（EROFS）是**不同的事**：
+       *   - EACCES / EROFS → 真问题，报 fail；
+       *   - EPERM → 可能是沙箱/策略拦截，**无法判定**，报 skip 并说明（我们自己的运行环境受限时，
+       *     对用户的机器下结论就是假告警——这类"环境受限导致的假 fail"本仓库已在 E4/E6 上踩过）。
+       * 若目录属主/权限位本身就直接矛盾（非属主且无写位），即使 EPERM 也能确定是坏的，照报 fail。 */
+      let modeSaysUnwritable = false;
+      try {
+        const st2 = statSync(dir);
+        const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+        const ownerBits = st2.mode & 0o200;
+        const groupBits = st2.mode & 0o020;
+        const otherBits = st2.mode & 0o002;
+        if (uid !== null) {
+          // 属主是别人且组/其他都无写位 → 无论如何写不进去
+          if (st2.uid !== uid && !groupBits && !otherBits) modeSaysUnwritable = true;
+          else if (st2.uid === uid && !ownerBits) modeSaysUnwritable = true;
+        }
+      } catch { /* 取不到 stat 就只用 errCode 判断 */ }
+      if (errCode === 'EPERM' && !modeSaysUnwritable) {
+        return { ok: true, skipped: true, detail: check.detailSkip
+          ?? `${dir} 写入探测被运行环境拒绝（EPERM，可能是沙箱/安全策略），无法判定——跳过而非报错` };
+      }
+      return { ok: false, detail: check.detailFail ?? `${dir} 不可写（${errCode ?? '未知原因'}：sudo 属主或只读权限），dsh 无法持久化配置` };
+    }
     default:
       return { ok: true, skipped: true, detail: `探测原语 ${probe.type} 本引擎不支持，已跳过（需更新插件）` };
   }

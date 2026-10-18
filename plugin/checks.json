@@ -97,7 +97,7 @@
       "id": "E11-settings-writable",
       "section": "env",
       "severity": "error",
-      "title": "settings.yaml 可写性（sudo 属主问题）",
+      "title": "设置持久化目录可写性（sudo 属主问题）",
       "discussion": "#1719",
       "when": {
         "os": [
@@ -107,13 +107,14 @@
         ]
       },
       "probe": {
-        "type": "file-writable",
-        "path": "{home}/settings.yaml",
-        "required": false
+        "type": "dir-writable",
+        "path": "{profile}/cordis.patch.yml",
+        "required": true
       },
-      "detailOk": "settings.yaml 可写",
-      "detailFail": "settings.yaml 不可写（sudo 安装遗留的属主/权限问题），dsh 无法持久化设置",
-      "fix": "把属主改回当前用户：sudo chown <当前用户> ~/.dsh/settings.yaml（或删掉让 dsh 重建）"
+      "detailOk": "设置目录可写，dsh 能持久化设置（cordis.patch.yml 所在目录）",
+      "detailFail": "设置目录不可写（sudo 安装遗留的属主/只读权限）：dsh 写设置走「同目录临时文件 + rename」，目录不可写时设置无法保存",
+      "detailSkip": "设置目录写入探测不可用（未定位到 profile 目录，或被运行环境的沙箱/安全策略拒绝）——无法判定，跳过",
+      "fix": "把目录属主改回当前用户：sudo chown <当前用户> ~/.dsh/profiles/<profile>（只修文件权限不够：dsh 靠 rename 覆盖，需要写目录）"
     }
   ]
 }
