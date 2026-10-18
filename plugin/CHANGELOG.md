@@ -16,6 +16,58 @@
 
 ---
 
+## [0.8.10] — 2026-10-18
+
+**一次针对"假绿灯 / 假告警"的定向修复。三条都是**在健康环境上给出错误结论**，不是崩溃。**
+
+### Fixed
+
+**S1 把健康会话报成"历史不完整"（假阳性，最严重）。** 宿主 0.2.x 把工具结果写成独立的
+`tool/result` 行（`data.toolCallId` / `data.message.source.callId`），而 S1 只在内联的
+`type:'tool-result'` 内容块里找结果，于是**结果集恒为空** → 所有 `tool_call` 全被判为孤儿，
+并建议用户"新建会话"。实测某会话报出 35 个孤儿，**其中 35 个都有对应的 result，真实孤儿 0 个**。
+现已同时收集两种形态，并补收独立的 `tool/call` 行。
+
+**E9 查错了路径，在健康机上恒 skip 且谎称"合法"。** `probe.path` 写的是
+`{home}/config/workspace.json`，真实布局是 `{home}/storages/workspace.json`（`config/` 目录
+在新版里根本不存在）。配合 `required:false`，它在健康机上恒跳过、却打印
+「config/workspace.json 为合法 JSON」——文件真损坏时也不会报警。现改为真实路径。
+
+**E4 把"没有安装树"和"有安装树但缺 node-pty"混为一谈。** 判据 `existsSync(profileNM)`
+只要目录存在就算"有安装树"，于是空的 `profiles/web/node_modules` 会让干净环境报
+`未找到 node-pty`（假 fail）；反过来，从 `hostInstallRoot()` 找到的安装又不在判据里。
+现统一为"能证明本机装了 dsh"（PATH 有 dsh / 宿主包可定位 / profile 非空 / pnpm store），
+找不到 node-pty 才是真 fail。
+
+**目录检查"跳过"时不再沿用肯定句。** 探测原语（`json-valid` / `text-contains` /
+`file-writable`）在目标缺失时返回 `detail: detailOk`，于是 skip 行读起来像"已检查通过"。
+新增 `detailSkip` 字段，缺省用中性文案「不存在——无对象可查，跳过」。
+
+### Changed
+
+- **E9 降为 `warn`**：它与内置 E5 检查同一文件，同为 error 会重复报警、并污染无关 fixture
+  （`assertIsolated`）。判定权归 E5，E9 只做定点提示并附带修复建议。
+  —— 这是本项目"故障隔离"纪律的一次应用：**一条检查的改动不得让别的用例变红**。
+
+### 测试
+
+- 新增 `plugin/test/regression-0.8.10.test.mjs`（全部正面断言确切状态）。
+- 全套 **229 → 243**（242 pass / 1 主动 skip / 0 fail；基线 229 含 1 条主动 skip）。
+- **对抗自检**：逐条回退修复确认用例会变红——包括"只修一半"（S1 只认 `data.toolCallId`）
+  与"过度解除"（有 result 就放行）两种半吊子修法，确认都被拦住。
+
+### 已知未修（本轮范围外，已记台账）
+
+- **E11-settings-writable 结构性恒 skip**：新版 DSH 已把 settings 迁入
+  `profiles/<name>/cordis.patch.yml`，顶层 `settings.yaml` 只作为 legacy 文档被
+  `importLegacyDocument()` 改名成 `.imported` ——该文件**永远不存在**。需重新定性
+  （删掉，或改为"legacy settings.yaml 残留检测"）。
+- **目录检查的改动不会自动生效**：默认运行读远程 `checks.json`（TTL 6h），
+  命中缓存时用缓存副本。改完 `plugin/checks.json` 后需发布或清
+  `~/.dsh/.cache/dsh-doctor/checks.json` 才对已有实例生效。
+
+---
+
 ## [0.8.9] — 2026-10-16
 
 ### 结论修正：截图里那个"不兼容"**不是我们的包**

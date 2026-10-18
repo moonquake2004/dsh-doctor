@@ -73,8 +73,8 @@
     {
       "id": "E9-storages-json-valid",
       "section": "env",
-      "severity": "error",
-      "title": "config 目录 JSON 文件合法性",
+      "severity": "warn",
+      "title": "storages/workspace.json 合法性（E5 的定点版）",
       "discussion": "#1357",
       "when": {
         "os": [
@@ -85,12 +85,13 @@
       },
       "probe": {
         "type": "json-valid",
-        "path": "{home}/config/workspace.json",
+        "path": "{home}/storages/workspace.json",
         "required": false
       },
-      "detailOk": "config/workspace.json 为合法 JSON",
-      "detailFail": "config/workspace.json 不是合法 JSON（#1357 并发写乱码类，工作区列表会消失）",
-      "fix": "排查多实例并发写；修复或删除损坏文件"
+      "detailOk": "storages/workspace.json 为合法 JSON",
+      "detailFail": "storages/workspace.json 不是合法 JSON（#1357 并发写乱码类，工作区列表会消失）——判定权归内置 E5，本条为定点版并附带修复建议",
+      "detailSkip": "storages/workspace.json 不存在——无对象可查，跳过（本检查只做事后校验，不判定缺失）",
+      "fix": "排查多实例并发写；修复或删除损坏文件（dsh 会在下次写工作区时重建）"
     },
     {
       "id": "E11-settings-writable",

@@ -555,10 +555,37 @@ function checkEnv() {
   // 但此前在**没有任何 node_modules 的合成 HOME**（测试 fixture、全新环境）里也会报"未找到 node-pty" ——
   // 那不是"缺失"，而是"这里根本没有安装树可查"。据此报 fail 会让 fixture 全红、也会让 CI 在
   // 干净容器里得到无意义的 exit 2。与项目一贯纪律一致：不适用 ⇒ skip 且带 reason。
-  // "有安装树可查" = PATH 里找到了 dsh 的 node_modules，**或**本 HOME 的 profile 里有 node_modules。
-  // 二者皆无（合成 HOME、干净容器）→ 这里没有"已安装的 dsh"可言，报 fail 是无意义的。
-  const fromPath = ptyDirs.length > 0 && existsSync(ptyDirs[0]);
-  const hasInstall = fromPath || existsSync(profileNM);
+  //
+  // 2026-10 修（判据收口）：此前 `hasInstall` 只认 "ptyDirs[0]（PATH 分支，且要求路径以
+  // node_modules/.bin 结尾）**或** profile 的 node_modules"，而搜索集里还包含 `hostInstallRoot()`
+  // （Homebrew/全局布局）与 pnpm store —— **搜索的口径比判据宽**，于是"有安装树但三种搜索都没找到 pty"
+  // 被错当成"没有安装树"而 skip，反之空 profile 目录（存在但空）又让 hasInstall=true → 对健康环境报 fail。
+  // 现在改为单一判据：**只要能证明"本机装了 dsh"**（PATH 里的 dsh 可执行、hostInstallRoot 定位到宿主包、
+  // profile 里装了 dsh 相关的包/依赖树）就说"有安装树可查"，此时找不到 node-pty 才是真 fail。
+  // 反例（用过的）：空目录 `~/.dsh/profiles/web/node_modules` 存在但里面什么都没装 —— 那不是安装树，
+  // 旧判据 `existsSync(profileNM)` 却认了它，于是干净环境报 fail。
+  // 红队 R3（0.8.10）：判据必须是"profile 里**真的装了包**"，不是"目录里**有东西**"。
+  // 第一版用 `readdirSync(profileNM).length > 0`，于是空 `.bin/`、空 `.pnpm/`、一个无关的点文件
+  // 都能让干净环境报 fail —— 与代码注释自己援引的反例同类，只是没修完。
+  // `.bin` 尤其危险：任何跑过 `pnpm install` 的 profile 里它都存在。
+  const profileHasPackages = (() => {
+    try {
+      return readdirSync(profileNM, { withFileTypes: true }).some((e) => {
+        if (!e.name || e.name.startsWith('.') || e.name === 'node_modules') return false;
+        // 普通包目录 / 软链（pnpm 与 file: 安装都是软链）都算；scoped 目录只要非空也算
+        if (!(e.isDirectory() || e.isSymbolicLink())) return false;
+        if (!e.name.startsWith('@')) return true;
+        try { return readdirSync(join(profileNM, e.name)).length > 0; } catch { return false; }
+      });
+    } catch { return false; }
+  })();
+  // pnpm store 同理：空 `.pnpm` 不算安装树
+  const pnpmHasContent = (() => {
+    try { return readdirSync(pnpmStore).length > 0; } catch { return false; }
+  })();
+  const pathHasDsh = (process.env.PATH || '').split(PATH_DELIM)
+    .some((p) => p && (existsSync(join(p, 'dsh')) || existsSync(join(p, 'dsh.cmd'))));
+  const hasInstall = Boolean(hostNM) || profileHasPackages || pnpmHasContent || pathHasDsh;
   const ptyFound = ptyDirs.filter((d) => existsSync(d));
   let ptyBinary = null;
   for (const d of ptyFound) {
@@ -567,7 +594,7 @@ function checkEnv() {
     }
     if (ptyBinary) break;
   }
-  if (!hasInstall) reportSkip('env', 'E4', '未发现 DSH 安装树（无 profiles/node_modules 可查），跳过 node-pty 完整性检测');
+  if (!hasInstall) reportSkip('env', 'E4', '未发现 DSH 安装树（PATH 无 dsh、宿主包定位失败、profile 为空）——node-pty 完整性检测不适用，跳过');
   else if (ptyFound.length === 0) report('env', 'E4', false, '未找到 node-pty（dsh web 终端依赖它，#1219）', '重新安装 @deepseek-ai/dsh，确保 node-pty 装全');
   else if (ptyBinary) report('env', 'E4', true, `node-pty 原生模块在位（${plat}）`, undefined);
   else report('env', 'E4', false, `node-pty 存在但缺 ${plat} 原生二进制（#1219: dsh web 启动失败）`, '重装 node-pty（npm rebuild node-pty）或从源码构建');
@@ -1926,22 +1953,58 @@ function checkSession(targetPath) {
         if (typeof ref === 'number' && ref >= seq) sesViolations.push(`sourceEventSeqs 引用 ${ref} >= 当前 seq ${seq}（${t}）`);
       }
     }
-    // S6/S7：收集所有数值位置（seq 或 chunk 的 seq0），按文件序做单调/重复检测
     const pos = typeof seq === 'number' ? seq : (typeof d.seq0 === 'number' ? d.seq0 : null);
     if (pos !== null) positions.push({ pos, type: d.type, seq: seq ?? null });
     if (d.type === 'session/end-seed' && typeof seq === 'number') endSeedSeqs.push(seq);
     if (typeof d.turn === 'number') { if (d.type === 'turn/start') turnStarts.add(d.turn); if (d.type === 'turn/end') turnEnds.add(d.turn); }
+    /* S1 记录一次 tool_call：同一个调用现在会被收集**两次**（assistant 内联块 + 独立 `tool/call` 行）。
+     * seq 大小驱动下面的"真孤儿 vs 尾部 in-flight"判定（`o.seq < maxSeq - 1`），故取 **min**
+     * （最早出现的位置），方向是"宁可报孤儿，也不放过"。
+     *
+     * **可观测，且已配用例**（红队 R4，2026-10-18 纠正了我先前的错误标注）：先前的注释说"两种实现
+     * 结论相同"，那是在 inline 与独立行**相邻**（seq 相差 1）的构造下测的，此时阈值余量把它掩盖了。
+     * 红队给出的是正确构造：inline seq=8、独立行 seq=11、maxSeq=12（阈值 `seq < 11`）——
+     * 取 min 得 8 → 判**真孤儿（fail）**；后写入覆盖得 11 → 归为"尾部 in-flight"而**放过（pass，漏报）**。
+     * 见 plugin/test/regression-0.8.10.test.mjs 的「min 与后写覆盖有区分度」用例。 */
+    const rememberCall = (id, sq, nm) => {
+      const prev = calls.get(id);
+      if (!prev) { calls.set(id, { seq: sq, name: nm }); return; }
+      const a = typeof prev.seq === 'number' ? prev.seq : Infinity;
+      const b = typeof sq === 'number' ? sq : Infinity;
+      calls.set(id, { seq: Math.min(a, b) === Infinity ? prev.seq : Math.min(a, b), name: prev.name ?? nm });
+    };
+    /* S1（2026-10 修，host 0.2.x）：结果有两种写法，**都要收**，否则"结果在、判定说没有"。
+     *   ① 内联块：assistant 消息里 `type:'tool-result'` 的 content 块（老形态，保留）
+     *   ② 独立行：`{type:'tool/result', data:{toolCallId, message:{role:'tool', source:{callId}}}}`
+     * —— ② 是本版宿主的实际形态。旧实现只在 `msg.content` 存在时才进循环、且只认 ①，
+     *    于是 results2 恒空 → 对**健康会话**报出全部 tool_call 为孤儿，还建议"新建会话"（实测 35/35 假阳）。
+     *    注意这里不能 `continue` 掉：没有 content 的行（正是 ②）必须继续参与收结果。
+     * 写法用块注释而非 `//`：scripts/gen-check-inventory.mjs 取"上方最近的 `//` 注释"作检查范围，
+     * 在此插入 `//` 会把 S2 的范围串成这里（实测 S2 的 scope 被改写成 S1 的）。
+     */
+    if (d.type === 'tool/result') {
+      const cid = d.data?.toolCallId ?? d.data?.message?.toolCallId
+        ?? d.data?.message?.source?.callId ?? d.data?.callId;
+      if (typeof cid === 'string' && cid) results2.add(cid);
+    }
     const msg = d.data?.message;
+    /* 独立 tool/call 行：与 tool/result 同理，不能只靠 content（同一处修复） */
+    if (d.type === 'tool/call') {
+      const cid = d.data?.toolCallId ?? d.data?.callId ?? d.data?.message?.toolCallId
+        ?? d.data?.message?.source?.callId;
+      if (typeof cid === 'string' && cid) rememberCall(cid, d.seq, d.data?.name ?? d.data?.message?.name);
+    }
     if (!msg || !Array.isArray(msg.content)) continue;
     for (const blk of msg.content) {
       if (!blk || typeof blk !== 'object') continue;
-      if (blk.type === 'tool-call' && typeof blk.id === 'string') calls.set(blk.id, { seq: d.seq, name: blk.name });
+      if (blk.type === 'tool-call' && typeof blk.id === 'string') rememberCall(blk.id, d.seq, blk.name);
       else if (blk.type === 'tool-result' && typeof blk.toolCallId === 'string') results2.add(blk.toolCallId);
     }
   }
   const orphans = [...calls].filter(([id]) => !results2.has(id)).map(([id, v]) => ({ id, ...v }));
   const real = orphans.filter((o) => typeof o.seq === 'number' && o.seq < maxSeq - 1);
   const inflight = orphans.filter((o) => !real.includes(o));
+  // S6/S7：收集所有数值位置（seq 或 chunk 的 seq0），按文件序做单调/重复检测
   if (real.length) report('session', 'S1', false, `孤儿 tool_call（#1363，会 INVALID_REQUEST）: ${real.map((o) => o.id).join(', ')}`, '该会话历史不完整，建议新建会话');
   else report('session', 'S1', true, inflight.length ? `无真孤儿（仅尾部 in-flight: ${inflight.length} 个）` : '无孤儿 tool_call', undefined);
   const unclosed = [...turnStarts].filter((t) => !turnEnds.has(t));
@@ -2455,8 +2518,11 @@ export function runCatalogCheck(check, ctx) {
     }
     case 'json-valid': {
       const fp = p(probe.path);
+      // 缺文件时**不得**沿用 detailOk："没东西可查"不是"它是合法的"。
+      // 此前这里 `detail: check.detailOk` → skip 行却打印肯定句（E9 实测：健康机恒 skip 且宣称
+      // 「config/workspace.json 为合法 JSON」）。detailSkip 可显式定制，缺省用中性文案。
       if (!existsSync(fp)) return probe.required === false
-        ? { ok: true, skipped: true, detail: check.detailOk ?? `${fp} 不存在（跳过）` }
+        ? { ok: true, skipped: true, detail: check.detailSkip ?? `${fp} 不存在——无对象可查，跳过` }
         : { ok: false, detail: check.detailFail ?? `${fp} 缺失` };
       let utf8ok = true, jsonok = false;
       try { new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(fp)); } catch { utf8ok = false; }
@@ -2468,7 +2534,7 @@ export function runCatalogCheck(check, ctx) {
     case 'text-not-contains': {
       const fp = p(probe.path);
       if (!existsSync(fp)) return probe.required === false
-        ? { ok: true, skipped: true, detail: check.detailOk ?? `${fp} 不存在（跳过）` }
+        ? { ok: true, skipped: true, detail: check.detailSkip ?? `${fp} 不存在——无对象可查，跳过` }
         : { ok: false, detail: check.detailFail ?? `${fp} 缺失` };
       let re;
       try { re = new RegExp(probe.pattern, probe.flags ?? ''); } catch (e) { return { ok: false, detail: `目录规则正则非法: ${e.message.slice(0, 60)}` }; }
@@ -2479,9 +2545,11 @@ export function runCatalogCheck(check, ctx) {
     }
     case 'file-size-above': {
       const fp = p(probe.path);
+      // 红队 R2（0.8.10）：这里曾返回 `ok:true` 且**不带 skipped** —— 文件不存在却报"大小在限内"，
+      // 是本版本要消灭的"跳过却说通过"的最后一个漏网分支（另三个原语已改）。
       if (!existsSync(fp)) return probe.required === true
         ? { ok: false, detail: check.detailFail ?? `${fp} 缺失` }
-        : { ok: true, detail: check.detailOk ?? `${fp} 不存在（跳过）` };
+        : { ok: true, skipped: true, detail: check.detailSkip ?? `${fp} 不存在——无对象可查，跳过` };
       const size = statSync(fp).size;
       return size > probe.minBytes
         ? { ok: false, detail: check.detailFail ?? `${fp} 过大: ${size}B > ${probe.minBytes}B` }
@@ -2499,7 +2567,7 @@ export function runCatalogCheck(check, ctx) {
     case 'file-writable': {
       const fp = p(probe.path);
       if (!existsSync(fp)) return probe.required === false
-        ? { ok: true, skipped: true, detail: check.detailOk ?? `${fp} 不存在（跳过）` }
+        ? { ok: true, skipped: true, detail: check.detailSkip ?? `${fp} 不存在——无对象可查，跳过` }
         : { ok: false, detail: check.detailFail ?? `${fp} 缺失` };
       let writable = false;
       try { const fd = openSync(fp, 'a'); closeSync(fd); writable = true; } catch { /* 只读/属主问题 */ }

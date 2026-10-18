@@ -103,7 +103,13 @@ test('file-size-above', () => {
   writeFileSync(join(c.profileDir, 'big.log'), 'x'.repeat(5000));
   assert.equal(runCatalogCheck({ probe: { type: 'file-size-above', path: '{profile}/big.log', minBytes: 1000 } }, c).ok, false);
   assert.equal(runCatalogCheck({ probe: { type: 'file-size-above', path: '{profile}/big.log', minBytes: 10000 } }, c).ok, true);
-  assert.equal(runCatalogCheck({ probe: { type: 'file-size-above', path: '{profile}/missing.log', minBytes: 10 } }, c).ok, true);
+  // 红队 R2（0.8.10）：这里原本断言 `ok === true`，等于把「文件不存在 → 报"大小在限内"」这个 bug
+  // 锁成了契约。正确的语义是 **skip**（不适用 ≠ 通过），且文案不得是肯定句。
+  {
+    const missing = runCatalogCheck({ probe: { type: 'file-size-above', path: '{profile}/missing.log', minBytes: 10 } }, c);
+    assert.equal(missing.skipped, true, '文件不存在必须是 skip，不能是 pass');
+    assert.doesNotMatch(String(missing.detail), /在限内/, `skip 行不得宣称"在限内": ${missing.detail}`);
+  }
   rmSync(home, { recursive: true, force: true });
 });
 
