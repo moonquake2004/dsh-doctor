@@ -2457,3 +2457,100 @@ test('S0 大日志闸门：预算内的正常会话 → 照常检查（不得误
   assert.equal(s1.status, 'pass', `正常会话 S1 应 pass: ${s1.status} ${s1.detail}`);
   rmSync(home, { recursive: true, force: true });
 });
+
+test('P24 × #9753：存在 boot recovery 备份时，把"成批未登记"归因为宿主重置而不是安装中断', () => {
+  // dsh-app-boot 的 sanitizeProfile()（lib/index.js:1244-1251）会 rename patch 成
+  // `cordis.patch.yml.bak-<Date.now()>` 再只写回 recovery bundles。于是"已装未登记"成批出现，
+  // 而那不是用户的锅。第一版用"命中 >=3 个"去猜，但用户真装了 5 个坏插件时同样 >=3——
+  // 改成实证检测备份文件。
+  const home = tempHome();
+  const dir = profileFixture(home, 'web', {
+    manifest: {
+      name: 'web', version: '1.0.0',
+      dsh: { profile: { bundles: [] } },
+      dependencies: { 'p-a': '1.0.0', 'p-b': '1.0.0', 'p-c': '1.0.0' },
+    },
+    nodeModules: Object.fromEntries(['p-a', 'p-b', 'p-c'].flatMap((n) => [
+      [`${n}/package.json`, BUNDLE_PKG(n)],
+      [`${n}/cordis.patch.yml`, '[]\n'],
+    ])),
+  });
+  writeFileSync(join(dir, 'cordis.patch.yml.bak-1789232269000'), '- insert: []\n');
+  const { checks } = runCli({ home, args: ['--profile', 'web'] });
+  const c = checks.find((x) => x.id === 'P24');
+  assert.ok(c, '未产出 P24');
+  assert.equal(c.status, 'fail', `未登记仍须报 fail: ${c.status}`);
+  assert.match(String(c.detail), /#9753|boot recovery|被宿主抹掉/, `必须归因到宿主重置: ${c.detail}`);
+  assert.match(String(c.fix ?? ''), /bak/, `修复建议必须指向备份文件: ${c.fix}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P24 × #9753 反向：无备份文件时不得拿"宿主重置"当挡箭牌', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: {
+      name: 'web', version: '1.0.0',
+      dsh: { profile: { bundles: [] } },
+      dependencies: { 'q-a': '1.0.0', 'q-b': '1.0.0', 'q-c': '1.0.0' },   // 同样 >=3
+    },
+    nodeModules: Object.fromEntries(['q-a', 'q-b', 'q-c'].flatMap((n) => [
+      [`${n}/package.json`, BUNDLE_PKG(n)],
+      [`${n}/cordis.patch.yml`, '[]\n'],
+    ])),
+  });
+  const { checks } = runCli({ home, args: ['--profile', 'web'] });
+  const c = checks.find((x) => x.id === 'P24');
+  assert.equal(c.status, 'fail', `仍须 fail: ${c.status}`);
+  // 关键：没有备份就不能说是宿主重置（否则真问题会被这句话淡化）
+  assert.doesNotMatch(String(c.detail), /被宿主抹掉/, `无备份时不得归因宿主: ${c.detail}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+/* ---------- 社区 #10145：身份不符的日志副本不是会话 ----------
+ * 宿主 assertStoredIdentity()（session-persistence-jsonl:1522）会拒载"会话头 id/cwd 不指向
+ * 这个物理构件"的日志，典型是用户把日志拷进 `backup/`。我们原来只按文件名枚举，
+ * 于是**完好的副本**被当成独立会话诊断，报出"seq 空洞"之类的假损坏。
+ */
+
+test('S11 × #10145：backup/ 里的日志副本（身份不符）不得被当成会话', () => {
+  const home = tempHome();
+  const dir = join(home, 'sessions', 'proj', 'session-real');
+  mkdirSync(dir, { recursive: true });
+  const rows = [
+    { type: 'session', version: 4, id: 'session-real', createdAt: 1, cwd: '/tmp', isSeeded: false, delegationDepth: 0, agentPreset: 'standard' },
+    { type: 'user/message', seq: 0, turn: 1, data: { message: { content: [{ type: 'text', text: 'hi' }] } } },
+    { type: 'turn/start', seq: 1, turn: 1 },
+    { type: 'turn/end', seq: 2, turn: 1 },
+  ];
+  const body = rows.map((r) => JSON.stringify(r)).join('\n') + '\n';
+  writeFileSync(join(dir, 'session.v4.jsonl'), body);
+  // 把同一份日志拷贝到 backup/ —— 头里 id 仍是 session-real，但目录名是 backup
+  const bak = join(home, 'sessions', 'proj', 'backup');
+  mkdirSync(bak, { recursive: true });
+  writeFileSync(join(bak, 'session.v4.jsonl'), body);
+  const { checks } = runCli({ home, args: ['--session'] });
+  const s11 = checks.find((c) => c.id === 'S11');
+  assert.ok(s11, '未产出 S11');
+  assert.equal(s11.status, 'pass', `副本不得被当成损坏会话: ${s11.status} ${s11.detail}`);
+  assert.doesNotMatch(String(s11.detail), /损坏会话/, `不得报损坏: ${s11.detail}`);
+  // 且必须说明排除了副本，否则用户会以为会话"少了一个"
+  assert.match(String(s11.detail), /身份不符|副本/, `应说明排除了身份不符的副本: ${s11.detail}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('S11 × #10145 反向：身份一致的正常会话照常计入（不得把好会话也排掉）', () => {
+  const home = tempHome();
+  const dir = join(home, 'sessions', 'proj', 'session-abc');
+  mkdirSync(dir, { recursive: true });
+  const rows = [
+    { type: 'session', version: 4, id: 'session-abc', createdAt: 1, cwd: '/tmp', isSeeded: false, delegationDepth: 0, agentPreset: 'standard' },
+    { type: 'user/message', seq: 0, turn: 1, data: { message: { content: [{ type: 'text', text: 'hi' }] } } },
+  ];
+  writeFileSync(join(dir, 'session.v4.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const { checks } = runCli({ home, args: ['--session'] });
+  const s11 = checks.find((c) => c.id === 'S11');
+  assert.equal(s11.status, 'pass', `正常会话应 pass: ${s11.status} ${s11.detail}`);
+  assert.match(String(s11.detail), /1 个会话/, `正常会话必须被计入: ${s11.detail}`);
+  assert.doesNotMatch(String(s11.detail), /身份不符/, `不应误排正常会话: ${s11.detail}`);
+  rmSync(home, { recursive: true, force: true });
+});

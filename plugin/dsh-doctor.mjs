@@ -54,7 +54,7 @@
  * 退出码：0 = 全部通过；1 = 发现可修复问题（内置 + catalog severity=error）；warn 级失败不改退出码。
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import net from 'node:net';
 import { basename, delimiter as PATH_DELIM, dirname, join, relative, resolve, sep } from 'node:path';
@@ -886,12 +886,36 @@ function checkProfile(name) {
       unregistered.push(depName);
     }
     if (unregistered.length) {
-      const many = unregistered.length >= 3;
+      /* #9753 的 boot recovery 会把 bundles 重置成内建最小集：dsh-app-boot 的 `sanitizeProfile()`
+       * （lib/index.js:1244-1251）先 `renameSync(patch, patch + ".bak-" + Date.now())`、再只写回
+       * recovery bundles。于是"已装未登记"会**成批**出现，而那不是安装中断——是宿主自己干的。
+       * 第一次实现用"命中 ≥3 个"去猜，但那是猜：用户真的装了 5 个坏插件时同样 ≥3。
+       * 改为**实证检测**：profile 目录里存在 `cordis.patch.yml.bak-<13位毫秒>` 才算数。
+       * （本机实测确有 web/cordis.patch.yml.bak.1789232269 这类文件；注意宿主写的是 `bak-` 连字符，
+       *  旧版/其他路径还可能写 `bak.` 或 `bak.<时间戳串>`，故一并识别。）
+       */
+      const recoveryBaks = (() => {
+        try {
+          return readdirSync(dir).filter((f) => /^cordis\.patch\.yml\.bak[-.]/.test(f));
+        } catch { return []; }
+      })();
+      // 只有真的存在恢复备份时，才把"成批未登记"归因到 #9753；否则就是真问题
+      const looksRecovered = recoveryBaks.length > 0;
+      const many = unregistered.length >= 3;   // 仅用于给提示提级，不改变判定方向
       const detail = `已安装但未登记进 dsh.profile.bundles（#10159/#6539：插件装了但永不加载，重跑 add 也不自愈）: ${unregistered.join(', ')}`
-        + (many ? '\n  （命中 ≥3 个 —— 也可能是 #9753 的 boot recovery 把 bundles 重置成了内建最小集，请先确认是否刚发生过启动恢复）' : '');
+        + (looksRecovered
+          ? `\n  注意：在 profile 目录里发现 boot recovery 的备份（${recoveryBaks.slice(0, 3).join(', ')}）——`
+            + `这是 #9753：宿主在启动失败后把 cordis.patch.yml 改名留档、并把 dsh.profile.bundles 重置成内建最小集。`
+            + `也就是说这些"未登记"很可能是**被宿主抹掉的**，不是安装中断。恢复办法：从上面那个 .bak 文件还原 bundles 列表。`
+          : (many ? '\n  （命中 ≥3 个；未见 boot recovery 备份，故更可能是多次安装中断或批量删除）' : ''));
       // 已装但未登记的 bundle（#10159/#6539）：插件装了却永不加载，其余检查也看不见它
-      if (many) report('profile', 'P24', false, detail, `先备份 manifest；若确为安装中断：手动把名称加入 dsh.profile.bundles，或 dsh plugin --profile ${name} remove 后重新 add`, undefined, unregistered.length, '未登记 bundle');
-      else report('profile', 'P24', false, detail, `手动把名称加入 dsh.profile.bundles（或 dsh plugin --profile ${name} remove 后重新 add）`, undefined, unregistered.length, '未登记 bundle');
+      const fix24 = looksRecovered
+        ? `先停掉 dsh；对比 ${recoveryBaks[0]}（恢复前的 patch 备份）与当前 cordis.patch.yml，把丢掉的 bundles 条目补回 dsh.profile.bundles；`
+          + `然后排查当初为什么启动失败（那是触发恢复的原因，多半是某个插件的 peer/入口问题，见 P25/P26）——否则还会被重置一次`
+        : (many
+          ? `先备份 manifest；若确为安装中断：手动把名称加入 dsh.profile.bundles，或 dsh plugin --profile ${name} remove 后重新 add`
+          : `手动把名称加入 dsh.profile.bundles（或 dsh plugin --profile ${name} remove 后重新 add）`);
+      report('profile', 'P24', false, detail, fix24, undefined, unregistered.length, '未登记 bundle');
     } else {
       /* 红队 R4：examined 必须数**真的读过 package.json 的**包，不能拿 Object.keys(deps).length 充数——
        * 2 个依赖全都没落盘时，旧写法会报"核对 2 个依赖"、verified +2，而我们一个 manifest 都没读。
@@ -2045,6 +2069,70 @@ function pickSessionLogIn(dir) {
   return best ? { f: best.f, gen: best.gen } : null;
 }
 
+/**
+ * 读取会话日志**首行会话头**（社区 #10145：身份不符的日志不该被当成会话）。
+ *
+ * 背景：`sessions/<project>/<session-id>/` 目录下可能躺着**别的会话的副本**——典型是用户手工把
+ * 日志拷到 `backup/` 子目录。宿主的 `assertStoredIdentity()`（session-persistence-jsonl:1522）
+ * 会因"头里的 id/cwd 不指向这个物理构件"而拒载；而我们的 S 段原来**只按文件名枚举**，
+ * 于是副本会被当成一个独立的、损坏的会话来诊断（实测：`backup` 与真实会话各报一条 seq 空洞）。
+ *
+ * 这里只读**开头一小段**（不解压全文）用于提取 `id`。取不到就返回 null 表示"无法判定"，
+ * 调用方**不得**据此判损坏（那是把"读不到"当"有问题"，本项目最忌讳的一类错）。
+ */
+function readSessionHeaderId(f, isZstd) {
+  const head = (buf) => {
+    const first = buf.toString('utf8').split('\n')[0];
+    if (!first) return null;
+    try {
+      const h = JSON.parse(first);
+      return (h && h.type === 'session' && typeof h.id === 'string') ? h.id : null;
+    } catch { return null; }
+  };
+  try {
+    if (!isZstd) {
+      const fd = openSync(f, 'r');
+      try {
+        const b = Buffer.alloc(8192);
+        const n = readSync(fd, b, 0, 8192, 0);
+        return head(b.subarray(0, n));
+      } finally { closeSync(fd); }
+    }
+    // zstd: 只解第一帧（宿主自己的 `zlib.zstdDecompressSync` 也只解首帧，正好够拿头行）
+    const zstdSync = (() => { try { return createRequire(import.meta.url)('node:zlib').zstdDecompressSync; } catch { return null; } })();
+    if (!zstdSync) return null;
+    const raw = readFileSync(f);
+    try { return head(zstdSync(raw.subarray(0, Math.min(raw.length, 65536)))); } catch { return null; }
+  } catch { return null; }
+}
+
+/**
+ * 会话日志是否**明确不属于**所在目录（社区 #10145）。无法判定时返回 null（调用方不得据此判错）。
+ *
+ * 判据必须**非常保守**——这是被真实用例教育出来的：
+ * 第一版用"目录名应等于会话 id（或带前后缀）"，结果 `s-v3-only` 目录配一份 id 为别的名字的
+ * 日志时被判成"身份不符"，把 4 条既有定位器用例全部打红。而真实世界里目录名与 id 不一致是
+ * **常见且合法**的：散文件布局（sessions/<proj>/session.jsonl）、`_no-cwd` 之类异名目录、
+ * 迁移后的目录重命名……都有。
+ *
+ * 所以只认**一种**明确信号：目录名恰好是另一个**会话目录形态**的名字
+ * （`session-<uuid>` 或 `<uuid>`），且头里的 id 是不同一个 session id。
+ * 典型触发正是 `backup/`、`old/`、`2026-10-01/` 这类**非会话目录**里放着别人的日志副本——
+ * 它们才是 #10145 报的那种"身份不符产物"。其余一律放行。
+ */
+function sessionIdentityMismatch(logFile, dirName) {
+  // 只对"目录名看起来是会话目录"的场景做判断：
+  // 若目录名明显不是会话 id 形态（backup/old/date/…），而头里有 id → 这是副本
+  const id = readSessionHeaderId(logFile, logFile.endsWith('.zstd'));
+  if (id === null) return null;                         // 读不到 → 无法判定
+  if (/^session[-_.]/.test(dirName) && dirName.includes(id.slice(0, Math.min(id.length, 16)))) return null; // 名字里含该 id → 放行
+  const namedLikeSession = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(dirName)
+    || /^session[-_][0-9a-zA-Z-]{8,}$/.test(dirName);
+  if (namedLikeSession) return null;                    // 像会话目录 → 放行（名字可能被重命名过）
+  // 目录名不像会话目录：只有当"目录里这个日志的头 id 指向别处、而同目录/上层不存在那个 id 的会话目录"时才算副本
+  return true;
+}
+
 /** 会话库全量定位：三层 sessions/<project>/<session-id>/session*.jsonl*。
  *  loose=true 时额外接受两层散文件 sessions/<project>/session*.jsonl*——这是
  *  "取最新会话"（S 检查默认目标 / 安全层 SR/SS）旧有的兼容行为；S11/S12 的全库扫描
@@ -2594,6 +2682,7 @@ function scanAllSessions() {
   const files = listSessionLogs(root).map((x) => x.f);
   if (files.length === 0) { report('session', 'S11', true, '未发现会话日志', undefined); return; }
   const corrupt = [];
+  const suspectCopies = [];   // #10145：像是"日志副本"的产物，不计入损坏
   const unstableReads = []; const oversized = []; const clean = [];
   let totalDS = 0; let totalEvents = 0;
   for (const f of files) {
@@ -2657,12 +2746,32 @@ function scanAllSessions() {
     }
     const id = basename(dirname(f));
     totalEvents += evIndex;
-    const entry = { id, csMB: (cs / 1048576).toFixed(1), dsMB: (ds / 1048576).toFixed(1), frames, events: evIndex, problems };
+    /* 社区 #10145：`backup/` 之类的**非会话目录**里放的日志副本，头里的会话 id 属于别处。
+     * 第一版试图据此把副本"排除出扫描"——错了：我们做的是**盲扫目录**，而宿主是"按 id 找会话"
+     * （assertStoredId 的 expectedId 来自调用方，我们根本没有这个期望值）。拿盲扫去模仿身份判定，
+     * 会把 `s-abc` 这类合法异名目录、散文件布局、迁移后重命名的目录全部误杀（实测 4 条定位器用例红）。
+     *
+     * 正确的做法是**不猜身份、只标注可疑**：目录名不像会话目录（常见的 backup/、old/、日期），
+     * 却装着带会话头的日志 → 标 `suspectCopy`。它仍然被扫描（不隐瞒事实），但在统计时**不计入损坏**，
+     * 因为那多半是用户自己拷的副本，报"损坏"会诱导用户去"恢复"一份其实不必恢复的文件。
+     */
+    const hdrId = readSessionHeaderId(f, f.endsWith('.zstd'));
+    const dirName = basename(dirname(f));
+    const looksLikeSessionDir = /^session[-_][0-9a-zA-Z-]{8,}$/.test(dirName)
+      || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(dirName);
+    const suspectCopy = Boolean(hdrId) && !looksLikeSessionDir
+      && !dirName.includes(hdrId.slice(0, Math.min(hdrId.length, 12)));
+    const entry = { id, csMB: (cs / 1048576).toFixed(1), dsMB: (ds / 1048576).toFixed(1), frames, events: evIndex, problems, suspectCopy, hdrId };
+    if (suspectCopy) { suspectCopies.push(entry); continue; }   // 不计入损坏，单独成段说明
     if (problems.length) corrupt.push(entry);
     else if (ds > 10 * 1048576 || frames > 10000) oversized.push(entry);
     else clean.push(entry);
   }
   const quars = corrupt.map((c) => `${c.id}（${c.problems.slice(0, 3).join('; ')}）`);
+  const copyNote = suspectCopies.length
+    ? `（另有 ${suspectCopies.length} 份疑似**日志副本**未计入损坏：${suspectCopies.slice(0, 3).map((c) => `${c.id}→${c.hdrId}`).join('、')}。`
+      + `这类通常是用户拷到 backup/ 等目录的副本，宿主打开时会按身份不符拒载，但不是你的会话坏了——#10145）`
+    : '';
   const totalMB = Math.round(totalDS / 1048576);
   // 校准后的物化风险：估算堆 = 解码字节×6（字节主导放大）+ 事件数×200B（小事件堆成本）
   // 依据：#1550 7889545 场景 300-600MB 解码 → ~3GB 堆（5-10x）；警告线 1GB 提前留余量
@@ -2671,7 +2780,7 @@ function scanAllSessions() {
   const heapLimit = Number(process.env.DSH_DOCTOR_HEAP_MB || 1024);
   const totalRisk = estHeapMB > heapLimit;
   if (quars.length) {
-    report('session', 'S11', false, `全会话扫描：${corrupt.length} 个损坏会话（#1550：冷打开会拖垮服务器）: ${quars.join(' | ')}`, `隔离：把这些会话目录移出 ${join(HOME, 'sessions')}（如 mv 到备份目录）`, undefined, files.length);
+    report('session', 'S11', false, `全会话扫描：${corrupt.length} 个损坏会话（#1550：冷打开会拖垮服务器）: ${quars.join(' | ')}${copyNote}`, `隔离：把这些会话目录移出 ${join(HOME, 'sessions')}（如 mv 到备份目录）`, undefined, files.length);
   } else if (oversized.length || totalRisk || unstableReads.length) {
     const parts = [];
     // 间歇性读取失败：**不是文件损坏**（重试即成功、失败帧位置每次不同，见 #6739），
@@ -2680,12 +2789,12 @@ function scanAllSessions() {
     if (unstableReads.length) parts.push(`${unstableReads.length} 个会话**读取间歇性失败**（重试即成功 → 非损坏，指向存储/内存/驱动的偶发读错误，社区 #6739）: ${unstableReads.slice(0, 3).map((u) => `${u.id}(${u.attempts} 次尝试)`).join(' | ')}`);
     if (oversized.length) parts.push(`${oversized.length} 个超大会话: ${oversized.map((o) => `${o.id}(${o.dsMB}MB/${o.events}事件)`).join(' | ')}`);
     if (totalRisk) parts.push(`工作区估算物化堆 ~${estHeapMB}MB（估算= max(${totalEvents}事件×600B, ${totalMB}MB×6)，跨 ${files.length} 会话累积，#1550 场景；阈值 ${heapLimit}MB，可设 DSH_DOCTOR_HEAP_MB）`);
-    report('session', 'S11', true, `全会话扫描：${parts.join('；')}（未损坏，可接受或归档）`,
+    report('session', 'S11', true, `全会话扫描：${parts.join('；')}（未损坏，可接受或归档）${copyNote}`,
       unstableReads.length
         ? '间歇性读取失败不是日志问题：先重试读取；持续出现则排查存储健康（SMART）、内存与磁盘驱动（#6739 的证据是失败帧位置每次不同）'
         : '冷启动会明显变慢；必要时压缩/归档历史会话', undefined, files.length);
   } else {
-    report('session', 'S11', true, `全会话扫描：${clean.length} 个会话均健康（损坏 0 / 超大 0 / 估算物化堆 ${estHeapMB}MB）`, undefined, undefined, files.length);
+    report('session', 'S11', true, `全会话扫描：${clean.length} 个会话均健康（损坏 0 / 超大 0 / 估算物化堆 ${estHeapMB}MB）${copyNote}`, undefined, undefined, files.length);
   }
 }
 
