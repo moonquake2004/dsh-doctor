@@ -2218,13 +2218,17 @@ test('P24 反向：普通依赖（不声明 dsh.bundle）不得被报 —— 防
   rmSync(home, { recursive: true, force: true });
 });
 
-test('P24 反向：scoped 包用裸名登记也须认（作用域名两段归一化）', () => {
+test('P24 反向（红队 R3 纠正）：bundles 里的裸名**不能**替 scoped 依赖脱罪 —— 宿主按全名匹配', () => {
+  // 第一版本用例断言的是"裸名登记也算已登记"，红队在宿主源码里证伪了它：
+  // dsh-app-boot 只用 `bundles.includes(dependency.name)` 全名匹配（lib/index.js:1217/1176/1223），
+  // 没有任何按裸名比对的代码。所以 bundles=["dsh-scoped"] 与依赖 "@acme/dsh-scoped" 是**两个不同的名字**，
+  // 该插件实际不会被启用 —— 必须报 fail 而不是 pass。
   const home = tempHome();
   profileFixture(home, 'web', {
     manifest: {
       name: 'web', version: '1.0.0',
-      dsh: { profile: { bundles: ['dsh-scoped'] } }, // 登记的是裸名
-      dependencies: { '@acme/dsh-scoped': '1.0.0' },  // 装的是 scoped 名
+      dsh: { profile: { bundles: ['dsh-scoped'] } },  // 裸名，宿主不认
+      dependencies: { '@acme/dsh-scoped': '1.0.0' },  // 实际装的是 scoped 全名
     },
     nodeModules: {
       '@acme/dsh-scoped/package.json': BUNDLE_PKG('@acme/dsh-scoped'),
@@ -2234,7 +2238,8 @@ test('P24 反向：scoped 包用裸名登记也须认（作用域名两段归一
   const { checks } = runCli({ home, args: ['--profile', 'web'] });
   const c = checks.find((x) => x.id === 'P24');
   assert.ok(c, '未产出 P24');
-  assert.equal(c.status, 'pass', `裸名登记应被视为已登记，实际 ${c.status}: ${c.detail}`);
+  assert.equal(c.status, 'fail', `裸名不等于全名，应报未登记，实际 ${c.status}: ${c.detail}`);
+  assert.match(String(c.detail), /@acme\/dsh-scoped/, `detail 应点名全名: ${c.detail}`);
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -2273,5 +2278,138 @@ test('P25 反向：patch 文件在位 → 通过（正向锚点，防"一律 fai
   const c = checks.find((x) => x.id === 'P25');
   assert.ok(c, '未产出 P25');
   assert.equal(c.status, 'pass', `patch 在位应通过，实际 ${c.status}: ${c.detail}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+/* 红队 0.8.11 的三个存活变异（M1/M2/M3）——这些边界原先没有用例守住，补上。 */
+
+test('P24 边界（红队 M1）：依赖声明了但没落盘 → 不得崩溃、不得报 fail（P1/P3 的领域）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: {
+      name: 'web', version: '1.0.0',
+      dsh: { profile: { bundles: [] } },
+      dependencies: { 'ghost-pkg': '1.0.0' },   // 只有声明，node_modules 里没有
+    },
+    nodeModules: {},                            // 故意不落盘
+  });
+  const { checks } = runCli({ home, args: ['--profile', 'web'] });
+  const c = checks.find((x) => x.id === 'P24');
+  // 关键：profile 段必须没被异常打断。M1 变异（删掉 `if (!depDir) continue`）后，
+  // findPkg 返回 null，后续 join(null,…) 抛 TypeError —— 若没人 catch 会整段崩成 P0；
+  // 若被 catch 吞掉则静默跳过。两种都不是"正确地跳过"。
+  // 所以这里既断言 P24 存在，也断言**没有 P0 异常**（那是"崩溃"与"静默"的分界）。
+  assert.ok(c, `未产出 P24 —— profile 段可能整体异常: ${JSON.stringify(checks.filter((x) => x.section === 'profile').map((x) => [x.id, x.status]))}`);
+  assert.notEqual(c.status, 'fail', `没落盘不是"未登记"，不该 fail: ${c.detail}`);
+  // 且必须如实说明"没有对象可查"，不能报"核对 N 个依赖"的虚假覆盖
+  assert.doesNotMatch(String(c.detail), /核对 1 个依赖/, `未落盘不得计入覆盖量: ${c.detail}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P24 边界（红队 R4）：依赖全都没落盘 → skip 而非 pass（不得伪造覆盖量）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: {
+      name: 'web', version: '1.0.0',
+      dsh: { profile: { bundles: [] } },
+      dependencies: { 'ghost-a': '1.0.0', 'ghost-b': '1.0.0' },
+    },
+    nodeModules: {},
+  });
+  const { checks } = runCli({ home, args: ['--profile', 'web'] });
+  const c = checks.find((x) => x.id === 'P24');
+  assert.ok(c, '未产出 P24');
+  assert.equal(c.status, 'skip', `一个 manifest 都没读到时必须是 skip，实际 ${c.status}: ${c.detail}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P24 边界（红队 R2）：devDependencies 里的 bundle 包 → 不得误报', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: {
+      name: 'web', version: '1.0.0',
+      dsh: { profile: { bundles: [] } },
+      // 宿主 reconcile 只遍历 dependencies，devDeps 不会被自动登记，也不该被删——合法的"可选加载"
+      devDependencies: { 'dev-only-tool': '1.0.0' },
+    },
+    nodeModules: {
+      'dev-only-tool/package.json': BUNDLE_PKG('dev-only-tool'),
+      'dev-only-tool/cordis.patch.yml': '[]\n',
+    },
+  });
+  const { checks } = runCli({ home, args: ['--profile', 'web'] });
+  const c = checks.find((x) => x.id === 'P24');
+  assert.ok(c, '未产出 P24');
+  assert.notEqual(c.status, 'fail', `devDependencies 不该被报未登记: ${c.detail}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P25 边界（红队 R6）：patch 写成**数组** → 必须逐个检查（宿主接受数组）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: {
+      name: 'web', version: '1.0.0',
+      dsh: { profile: { bundles: ['arr-bundle'] } },
+      dependencies: { 'arr-bundle': '1.0.0' },
+    },
+    nodeModules: {
+      'arr-bundle/package.json': JSON.stringify({
+        name: 'arr-bundle', version: '1.0.0',
+        dsh: { bundle: { patch: ['./a.yml', './missing.yml'] } },  // 第二个不存在
+      }),
+      'arr-bundle/a.yml': '- insert: []\n',
+      'arr-bundle/missing.yml': '',   // 占位文件，下面删掉
+    },
+  });
+  // 真正制造缺失：删掉 missing.yml
+  rmSync(join(home, 'profiles', 'web', 'node_modules', 'arr-bundle', 'missing.yml'), { force: true });
+  const { checks } = runCli({ home, args: ['--profile', 'web'] });
+  const c = checks.find((x) => x.id === 'P25');
+  assert.ok(c, '未产出 P25');
+  assert.equal(c.status, 'fail', `数组里有一项缺失必须 fail（旧实现只认 string 会 skip）: ${c.status} ${c.detail}`);
+  assert.match(String(c.detail), /missing\.yml/, `detail 应点名缺失的那一项: ${c.detail}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P25 边界（红队 R7）：patch 路径是**目录** → fail（existsSync 对目录也 true，须判 isFile）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: {
+      name: 'web', version: '1.0.0',
+      dsh: { profile: { bundles: ['dir-patch'] } },
+      dependencies: { 'dir-patch': '1.0.0' },
+    },
+    nodeModules: {
+      'dir-patch/package.json': JSON.stringify({
+        name: 'dir-patch', version: '1.0.0',
+        dsh: { bundle: { patch: './patch-dir' } },
+      }),
+      'dir-patch/patch-dir/keep.txt': 'x',   // 让 patch-dir 成为目录
+    },
+  });
+  const { checks } = runCli({ home, args: ['--profile', 'web'] });
+  const c = checks.find((x) => x.id === 'P25');
+  assert.ok(c, '未产出 P25');
+  assert.equal(c.status, 'fail', `目录不是文件，宿主 readFileSync 会 EISDIR，必须 fail: ${c.status} ${c.detail}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P25 边界（红队 R5）：**未登记**的 bundle 的 patch 缺失也要被看见', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: {
+      name: 'web', version: '1.0.0',
+      dsh: { profile: { bundles: [] } },          // 未登记
+      dependencies: { 'unreg-bad': '1.0.0' },
+    },
+    nodeModules: {
+      'unreg-bad/package.json': BUNDLE_PKG('unreg-bad'),  // 声明了 patch，但不提供该文件
+    },
+  });
+  const { checks } = runCli({ home, args: ['--profile', 'web'] });
+  const c = checks.find((x) => x.id === 'P25');
+  assert.ok(c, '未产出 P25');
+  assert.equal(c.status, 'fail', `未登记 bundle 的 patch 缺失也必须报（旧实现只遍历 bundles，看不见它）: ${c.status} ${c.detail}`);
+  assert.match(String(c.detail), /unreg-bad/, `detail 应点名该包: ${c.detail}`);
   rmSync(home, { recursive: true, force: true });
 });

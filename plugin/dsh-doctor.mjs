@@ -846,19 +846,43 @@ function checkProfile(name) {
    *   ② 该包 package.json 可读且声明了 dsh.bundle.patch（= 本该被自动登记）
    *   ③ 其名字（含去掉 scope 的裸名）不在 bundles 里（= 没登记）
    * 已知会误伤的宿主行为：#9753 的 boot recovery 会把 bundles 重置成内建最小集——
-   * 那种情况下 ③ 对多个包同时成立。故**命中 ≥3 个时降为 warn** 并提示可能是恢复重置，避免一次误报刷屏。
+   * 那种情况下 ③ 对多个包同时成立，一次能刷出十条。
+   *
+   * **红队 R1（0.8.11）纠正**：本检查第一版注释写"命中 ≥3 个时降为 warn"，但 `report()` 的第三参是
+   * ok 布尔、没有 severity 参数——warn 只能由 `catalogSeverity.get(id)==='warn'` 产生，那层"降级"
+   * 从未生效，只是改了 detail 文字，status 恒 fail、退出码恒 1。**说了没做**比不说更坏。
+   * 现在改成诚实的做法：**不降级**（真问题就该 fail），命中 ≥3 个时在 detail 里**追加一条提示**
+   * 让用户先排除 boot recovery 误伤。不要改成 `catalogSeverity.set('P24','warn')` ——
+   * 那是按 id 全局降级，1 个真命中会被一起降掉，比现在更坏。
    */
+  const withPatch24 = [];   // 声明了 patch 的依赖（供 P25 复用，红队 R5）——必须在块外，
+                            // 否则 P25 的块作用域访问不到（本轮实测踩过：P0 报 "withPatch24 is not defined"）
   {
-    const deps = { ...(manifest.dependencies ?? {}), ...(manifest.devDependencies ?? {}) };
-    const bundleBare = new Set(bundles.map((b) => String(b).replace(/^@[^/]+\//, '')));
+    // 红队 R2：只用 dependencies。devDependencies 里的包宿主不会自动登记进 bundles，
+    // 也不会被删除——那是"可选加载"的合法状态，算进"装过"会误报。
+    const deps = { ...(manifest.dependencies ?? {}) };
     const unregistered = [];
+    let examined24 = 0;
     for (const depName of Object.keys(deps)) {
-      if (bundleBare.has(depName) || bundleBare.has(depName.replace(/^@[^/]+\//, ''))) continue;
+      /* 红队 R3：**只做全名比对**。宿主的匹配是 `bundles.includes(dependency.name)` 全名
+       * （dsh-app-boot/lib/index.js:1217、:1176、:1223），resolveBundleDir 也是全名 join——
+       * 源码里**没有任何**按裸名匹配 bundles 的地方。
+       * 第一版加了"去 scope 裸名"的比对，方向是错的：它只放宽、不收紧，于是
+       *   bundles=["@a/ui-widget"] + dependencies 含 "@b/ui-widget" → 被裸名顶掉 → **假 pass**（漏报）。
+       * 只保留全名，与宿主口径一致。 */
+      if (bundles.includes(depName)) continue;
       const depDir = findPkg(depName);
-      if (!depDir) continue;                       // 装了但没落盘：不是本检查的事（P1/P3 管）
+      /* 显式跳过"没落盘"的依赖（P1/P3 的领域）。
+       * 诚实标注（红队 M1 变异实测）：删掉这一行，行为**完全不变** —— findPkg 返回 null 后，
+       * 下面的 join(null,…) 抛 TypeError 会被 catch 吞掉，等价于 continue。也就是说这行当前
+       * **不可被测试区分**，它不是守卫、只是把"靠异常兜底"改成"显式意图"。保留它的理由是可读性，
+       * 不要为它写断言声称"已测"（本项目 §6：没有区分度的用例是装饰性的）。 */
+      if (!depDir) continue;
       let depPkg;
       try { depPkg = JSON.parse(readFileSync(join(depDir, 'package.json'), 'utf8')); } catch { continue; }
+      examined24++;                                // 真的读到了 manifest 才计数（R4）
       if (!depPkg?.dsh?.bundle?.patch) continue;   // 不声明 bundle = 普通依赖，本就不该登记
+      withPatch24.push({ name: depName, dir: depDir, patch: depPkg.dsh.bundle.patch });
       unregistered.push(depName);
     }
     if (unregistered.length) {
@@ -869,7 +893,14 @@ function checkProfile(name) {
       if (many) report('profile', 'P24', false, detail, `先备份 manifest；若确为安装中断：手动把名称加入 dsh.profile.bundles，或 dsh plugin --profile ${name} remove 后重新 add`, undefined, unregistered.length, '未登记 bundle');
       else report('profile', 'P24', false, detail, `手动把名称加入 dsh.profile.bundles（或 dsh plugin --profile ${name} remove 后重新 add）`, undefined, unregistered.length, '未登记 bundle');
     } else {
-      report('profile', 'P24', true, `已装且声明 dsh.bundle 的依赖均已登记进 bundles（核对 ${Object.keys(deps).length} 个依赖）`, undefined, undefined, Object.keys(deps).length, '依赖');
+      /* 红队 R4：examined 必须数**真的读过 package.json 的**包，不能拿 Object.keys(deps).length 充数——
+       * 2 个依赖全都没落盘时，旧写法会报"核对 2 个依赖"、verified +2，而我们一个 manifest 都没读。
+       * 那正是本项目最痛的"假绿灯"。 */
+      if (examined24 > 0) {
+        report('profile', 'P24', true, `已装且声明 dsh.bundle 的依赖均已登记进 bundles（核对 ${examined24} 个依赖）`, undefined, undefined, examined24, '依赖');
+      } else {
+        reportSkip('profile', 'P24', 'profile 依赖均未落盘（或均不声明 dsh.bundle）——无对象可查，跳过');
+      }
     }
   }
 
@@ -879,21 +910,44 @@ function checkProfile(name) {
    * P1 只判"声明了 dsh.bundle"，不判"它指向的文件在"—— 这是两个事实。
    */
   {
+    /* 红队 R5：遍历集必须涵盖**未登记的 bundle**。原先只遍历 bundles，于是"装了没登记"的插件
+     * 若 patch 也缺失，P25 看不见——而 P24 恰好用"没登记的插件对检查树隐形"论证自己的价值，
+     * 这里却复制了同一个盲区。（withPatch24 来自上面 P24 的遍历，已覆盖 dependencies 里的全部包）
+     * 红队 R6：宿主的 bundlePatchFiles() 接受 **数组**，每个都 loadOverlayPatches。
+     * 只认 string 会让 `["./p.yml"]` 直接 skip，还错报成"无 bundle 声明 patch 文件"。
+     * 红队 R7：existsSync 对目录也返回 true，而宿主 readFileSync(dir) 会 EISDIR —— 必须判 isFile。
+     */
     let checked25 = 0;
     const missing25 = [];
+    const seen25 = new Set();
+    const checkOne25 = (label, pkgDir, rel) => {
+      const rels = Array.isArray(rel) ? rel : [rel];
+      for (const one of rels) {
+        if (typeof one !== 'string' || !one) continue;
+        checked25++;
+        let isFile = false;
+        try { isFile = statSync(join(pkgDir, one)).isFile(); } catch { isFile = false; }
+        if (!isFile) missing25.push(`${label} → ${one}`);
+      }
+    };
     for (const b of bundles) {
       const d25 = findPkg(b);
-      if (!d25) continue;
+      if (!d25 || seen25.has(d25)) continue;
+      seen25.add(d25);
       let pkg25;
       try { pkg25 = JSON.parse(readFileSync(join(d25, 'package.json'), 'utf8')); } catch { continue; }
       const rel = pkg25?.dsh?.bundle?.patch;
-      if (typeof rel !== 'string' || !rel) continue;
-      checked25++;
-      if (!existsSync(join(d25, rel))) missing25.push(`${b} → ${rel}`);
+      if (rel === undefined || rel === null || rel === '') continue;
+      checkOne25(b, d25, rel);
+    }
+    for (const w of withPatch24) {
+      if (seen25.has(w.dir)) continue;   // 已由 bundles 循环查过
+      seen25.add(w.dir);
+      checkOne25(`${w.name}（未登记）`, w.dir, w.patch);
     }
     // bundle 声明的 patch 文件缺失（#6539）：启动时 ENOENT，连 --help 都起不来
     if (missing25.length) {
-      report('profile', 'P25', false, `bundle 声明的 patch 文件不存在（#6539：启动时 ENOENT，连 --help 都起不来）: ${missing25.join('; ')}`, '该包发布时漏打包了 patch 文件：升级到修复版，或从 bundles 移除该条目', undefined, checked25, 'bundle patch');
+      report('profile', 'P25', false, `bundle 声明的 patch 文件不存在（#6539：启动时 ENOENT，连 --help 都起不来）: ${missing25.join('; ')}`, '该包发布时漏打包了 patch 文件：升级到修复版，或从 bundles 移除该条目；若该包本就未登记（见 P24），先把 P25 的问题修好再登记', undefined, checked25, 'bundle patch');
     } else if (checked25) {
       report('profile', 'P25', true, `bundle 声明的 patch 文件均在（检查 ${checked25} 个）`, undefined, undefined, checked25, 'bundle patch');
     } else {

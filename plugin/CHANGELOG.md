@@ -72,7 +72,27 @@ E11 改用它 + `{profile}/cordis.patch.yml`。
 - 真机零误报：P24 核对 16 个依赖、P25 核对 13 个 bundle，均 pass。
 - 新增 5 条用例（P24 正/反向 + scoped 裸名、P25 正/反向），**对抗自检**：禁用检测后恰好那 2 条
   正向用例变红，反向用例仍绿。
-- 全套 **229 → 257**（256 pass / 1 主动 skip / 0 fail）；变异 8 杀 0 存活 1 等价；审计 7 过 0 败。
+- 全套 **229 → 263**（262 pass / 1 主动 skip / 0 fail）；变异 8 杀 0 存活 1 等价；审计 7 过 0 败。
+
+### 红队证伪（0.8.11）—— 7 条反例，全部已修
+
+**R1（High）：本版声称的"命中 ≥3 降为 warn"是死代码。** `report()` 第三参是 `ok` 布尔、没有
+severity 参数，warn 只能由 `catalogSeverity.get(id)` 产生，而 P24 从未登记进去——`many` 只改
+detail 文字，status 恒 fail。**说了没做比不说更坏**。现改为诚实做法：不降级，只在 detail 里
+追加"可能是 #9753 恢复重置"的提示。（不要用 `catalogSeverity.set('P24','warn')` 去补：那是按 id
+全局降级，1 个真命中会被一起降掉。）
+
+R2 `devDependencies` 被无条件算"装过" → 误报；改为只看 `dependencies`。
+R3 裸名归一化造成假 pass（`@a/ui-widget` 与 `@b/ui-widget` 互相顶掉）；已核宿主源码
+（`dsh-app-boot:1217/1176/1223` 全是全名匹配），删掉裸名比对。**原用例本身是错的，已改写。**
+R4 pass 分支 examined 用依赖总数充数 → 一个 manifest 都没读也报"核对 N 个"；改为只数真读到的。
+R5 P25 只遍历 `bundles`，看不见未登记 bundle 的 patch 缺失；并入 P24 的遍历结果。
+R6 P25 只认 `typeof rel === 'string'`，而宿主接受**数组**；已支持。
+R7 `existsSync` 对目录也 true，而宿主 `readFileSync(dir)` 会 EISDIR；改用 `isFile()`。
+
+**M1（变异存活，且结论正确）**：删掉 `if (!depDir) continue` 行为完全不变（`join(null,…)` 抛错被
+catch 吞掉，等价于 continue）。该行**不可被测试区分**，已在代码里如实标注"保留它是可读性，不是守卫"，
+而不是写一条杀不死的假用例。
 
 ### 已知未做（社区巡检发现，需进一步验证或决策）
 

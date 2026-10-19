@@ -40,7 +40,7 @@
 | `P20` | profile | 注意 | — |
 | `P21` | profile | client 侧还常通过 ctx.get('host'/'styles') 取沙箱服务 | — |
 | `P23` | profile | 只有当同一包名**沿祖先链也能解析到**时，才是"两个实例"（宿主也提供它） | — |
-| `P24` | profile | 已装但未登记的 bundle（#10159/#6539） | #9753 #10159 |
+| `P24` | profile | 已装但未登记的 bundle（#10159/#6539） | #10159 #6539 |
 | `P25` | profile | bundle 声明的 patch 文件缺失（#6539） | #6539 #6539 |
 | `P3` | profile | 并向上找一层以覆盖 profile 根安装（~/.dsh/profiles/node_mod | #1197 #880 |
 | `P4` | profile | P4 file | #1197 |
