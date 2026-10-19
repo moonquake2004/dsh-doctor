@@ -2413,3 +2413,47 @@ test('P25 边界（红队 R5）：**未登记**的 bundle 的 patch 缺失也要
   assert.match(String(c.detail), /unreg-bad/, `detail 应点名该包: ${c.detail}`);
   rmSync(home, { recursive: true, force: true });
 });
+
+/* ---------- 大日志闸门（社区 #10182 / #10152 / #9660，2026-10-19） ----------
+ * 社区记录单会话解压后 438 MiB / 113k events；本工具原用 execFileSync('zstd','-dc') 一次全量
+ * 解压到内存（maxBuffer 512MB）。触顶后抛错会被 S0 报成"解压失败"——把"日志太大"说成"日志损坏"，
+ * 用户会去恢复一个完好的会话。闸门的原则是：**读不完整就不下结论**（skip 并说明规模），
+ * 而不是硬算出一堆基于残缺数据的错误判定。
+ */
+
+test('S0 大日志闸门：明文超出预算 → skip 且理由说明规模（不得报"解压失败/损坏"）', () => {
+  const home = tempHome();
+  const dir = join(home, 'sessions', 'biglog');
+  mkdirSync(dir, { recursive: true });
+  const rows = [{ type: 'session', version: 4, id: 'big', createdAt: 1, cwd: '/tmp', isSeeded: false, delegationDepth: 0, agentPreset: 'standard' }];
+  for (let i = 1; i <= 4000; i++) {
+    rows.push({ type: 'user/message', seq: i, turn: 1, data: { message: { content: [{ type: 'text', text: 'x'.repeat(400) }] } } });
+  }
+  const file = join(dir, 'session.jsonl');
+  writeFileSync(file, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  // 预算压到 1MB，这份约 1.6MB 的明文必然超限
+  const { checks } = runCli({ home, args: ['--session', file], env: { DSH_DOCTOR_MAX_LOG_MB: '1' } });
+  const s0 = checks.find((c) => c.id === 'S0');
+  assert.ok(s0, '未产出 S0');
+  assert.equal(s0.status, 'skip', `超预算必须是 skip，实际 ${s0.status}: ${s0.detail}`);
+  assert.match(String(s0.detail), /预算|过大/, `应说明是规模问题: ${s0.detail}`);
+  assert.doesNotMatch(String(s0.detail), /解压失败|损坏/, `不得把"太大"说成"损坏": ${s0.detail}`);
+  // 且不得继续产出基于残缺数据的 S 段结论
+  assert.equal(checks.find((c) => c.id === 'S1'), undefined, '跳过时不得继续产出 S1（那是基于不完整数据的结论）');
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('S0 大日志闸门：预算内的正常会话 → 照常检查（不得误杀）', () => {
+  const home = tempHome();
+  const dir = join(home, 'sessions', 'small');
+  mkdirSync(dir, { recursive: true });
+  const rows = [{ type: 'session', version: 4, id: 'small', createdAt: 1, cwd: '/tmp', isSeeded: false, delegationDepth: 0, agentPreset: 'standard' },
+    { type: 'turn/start', seq: 1, turn: 1 }, { type: 'turn/end', seq: 2, turn: 1 }];
+  const file = join(dir, 'session.jsonl');
+  writeFileSync(file, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const { checks } = runCli({ home, args: ['--session', file], env: { DSH_DOCTOR_MAX_LOG_MB: '1' } });
+  const s1 = checks.find((c) => c.id === 'S1');
+  assert.ok(s1, '预算内的正常会话必须继续检查，不得被闸门误杀');
+  assert.equal(s1.status, 'pass', `正常会话 S1 应 pass: ${s1.status} ${s1.detail}`);
+  rmSync(home, { recursive: true, force: true });
+});

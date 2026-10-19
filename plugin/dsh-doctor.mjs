@@ -1910,10 +1910,51 @@ function checkSession(targetPath) {
   if (!wants('session')) return;
   const target = targetPath || latestSessionLog();
   if (!target || !existsSync(target)) { report('session', 'S0', true, '无会话日志，跳过单会话检查（可用 --session <path> 指定）', undefined); return; }
+  /* 2026-10-19（社区 #10182 / #10152 / #9660）：**大日志闸门**。
+   *
+   * 社区已记录单会话解压后 438 MiB / 113k events（#10152）、迁移产物"3 帧但最大帧占明文 100%"、
+   * 单次 open 约 +267 MB 堆（#9660）。本工具此前用 `execFileSync('zstd','-dc')` 一次全量解压到内存
+   * （maxBuffer 512MB），本机实测放大比约 3.7×（10.7MB zstd → 39.3MB 明文）。
+   * 438 MiB 的会话会吃掉 1.6GB 以上，且 `maxBuffer` 触顶后**抛错**——那会被 S0 报成"解压失败"，
+   * 把"日志太大"说成"日志损坏"，又是一个把环境限制当用户问题的假告警（与 E4/E6/E11 同族）。
+   *
+   * 处理原则：**读不完整就不下结论**。超过阈值时 S0 报 skip 并说明规模，
+   * 后续所有 S 项基于不完整数据会给出错误结论，故整段跳过而不是硬算。
+   * 阈值可用 DSH_DOCTOR_MAX_LOG_MB 调整（默认 256MB 明文预算，约合 70MB 的 zstd）。
+   */
+  const maxLogBytes = (() => {
+    const n = Number(process.env.DSH_DOCTOR_MAX_LOG_MB);
+    return (Number.isFinite(n) && n > 0 ? n : 256) * 1024 * 1024;
+  })();
   let text;
   try {
-    text = target.endsWith('.zstd') ? execFileSync('zstd', ['-dc', target], { maxBuffer: 512 * 1024 * 1024 }).toString('utf8') : readFileSync(target, 'utf8');
-  } catch (e) { report('session', 'S0', false, `解压失败: ${e.message.slice(0, 80)}`); return; }
+    if (target.endsWith('.zstd')) {
+      const packed = statSync(target).size;
+      /* 粗筛只能"挡极端"、不能当判据：实测同一份 29.5MB 明文可压到 0.1MB（约 295×，
+       * 大量重复文本时 zstd 压缩比远超经验值）。所以这里用一个**宽**的界（50×）只拦
+       * 明显不可能的巨物，真正的判据是解压后的实际字节数（见下方二次校验）。
+       * 反过来把界收紧会误杀正常会话——那是更坏的错。 */
+      if (packed * 50 > maxLogBytes * 2) {
+        reportSkip('session', 'S0', `会话日志过大（${(packed / 1048576).toFixed(1)}MB zstd，按压缩比估算明文可能超 ${(maxLogBytes / 1048576) | 0}MB 预算，#10182/#10152）——为避免 OOM 未做单会话检查；可设 DSH_DOCTOR_MAX_LOG_MB 调高上限`);
+        return;
+      }
+      text = execFileSync('zstd', ['-dc', target], { maxBuffer: Math.max(64 * 1024 * 1024, maxLogBytes * 2) }).toString('utf8');
+    } else {
+      text = readFileSync(target, 'utf8');
+    }
+  } catch (e) {
+    // maxBuffer 触顶是"太大"而不是"损坏"——必须分开报，否则用户会去恢复一个完好的会话。
+    if (String(e?.code || '') === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || /maxBuffer/i.test(String(e?.message))) {
+      reportSkip('session', 'S0', `会话日志解压后超出内存预算（#10182，已按不完整数据处理会得出错误结论）——跳过单会话检查；可设 DSH_DOCTOR_MAX_LOG_MB 调高上限`);
+      return;
+    }
+    report('session', 'S0', false, `解压失败: ${e.message.slice(0, 80)}`); return;
+  }
+  // 解压完成后按**实际明文大小**再核一次（压缩比可能远超预估）
+  if (Buffer.byteLength(text, 'utf8') > maxLogBytes) {
+    reportSkip('session', 'S0', `会话明文 ${(Buffer.byteLength(text, 'utf8') / 1048576).toFixed(1)}MB 超出 ${(maxLogBytes / 1048576) | 0}MB 预算（#10182）——跳过单会话检查；可设 DSH_DOCTOR_MAX_LOG_MB 调高上限`);
+    return;
+  }
 
   // S9：zstd 容器结构（#1043：单帧容器会让 session.list 整体 500）
   if (target.endsWith('.zstd')) {
