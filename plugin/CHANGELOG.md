@@ -72,7 +72,7 @@ E11 改用它 + `{profile}/cordis.patch.yml`。
 - 真机零误报：P24 核对 16 个依赖、P25 核对 13 个 bundle，均 pass。
 - 新增 5 条用例（P24 正/反向 + scoped 裸名、P25 正/反向），**对抗自检**：禁用检测后恰好那 2 条
   正向用例变红，反向用例仍绿。
-- 全套 **229 → 263**（262 pass / 1 主动 skip / 0 fail）；变异 8 杀 0 存活 1 等价；审计 7 过 0 败。
+- 全套 **229 → 274**（273 pass / 1 主动 skip / 0 fail）；变异 8 杀 0 存活 1 等价；审计 7 过 0 败。
 
 ### 红队证伪（0.8.11）—— 7 条反例，全部已修
 
@@ -110,6 +110,34 @@ catch 吞掉，等价于 continue）。该行**不可被测试区分**，已在�
 
 新增 2 条用例（超限 → skip 且不得说损坏、且不产出 S1；预算内 → 照常 pass 不误杀）；
 对抗自检确认禁用闸门后正向用例变红。
+
+### Added（P26 / P26b：peer 依赖解析根，#10149）
+
+社区病例：profile 用 `pnpm` 且 `autoInstallPeers: false` 装出，`@deepseek-ai/cordis` 等 peer
+既不在 `node_modules` 也不在 lockfile。**常驻服务照常可用**（由全局 CLI 的 node_modules 兜住），
+但 Linux 私有 bootstrap 用裸 `node runner.js` 起子进程 → `ERR_MODULE_NOT_FOUND` → 父进程只看到
+`subprocess scope exited before its bootstrap consumed the launch request`，把矛头错误引向 systemd。
+
+**为什么 P19 判不出**：P19 只比较**版本区间**，解析不到就记"未知"而不报警。实测同一输入下
+P19 报"均可接受"，P26b 才把真问题说出来。
+
+判据用 **node 自己的解析器**（`createRequire(...).resolve`），不是手写"向上找 node_modules"——
+后者在真实机器上会命中共享 hoisted 层 `<home>/profiles/node_modules`（其中每个 `@deepseek-ai/*`
+都是指向全局 CLI 的软链），把"只有常驻服务能用"误判成"包自己能解析"，**原样复现 #10149 的假绿灯**。
+故必须再判 `insideProfile`。三态：
+- 在 profile 自己的解析根内可解析 → ok
+- 只能越界解析（共享层/全局 CLI）→ **P26b warn**："常驻服务能用，子进程会崩"
+- 任何根都没有 → **P26 error**
+
+刻意拆成两个 id 而不是给 P26 配 `catalogSeverity=warn`：那个 map 是**按 id 全局降级**，
+会把"哪儿都没有"的真 fail 一起降掉（P24 红队 R1 踩过同款）。
+
+**断链区分**（本轮实测新发现）：本机共享层里有 **14 条指向已被移除宿主包的软链**（dsh 升级残留）。
+"看起来装了、其实链断了"与"根本没装"的修复动作完全不同——前者补装 peer 无效，要重建该层。
+P26 会单独标注"断链：软链目标已不存在"，并给出针对性的修复建议。
+
+排除项：`peerDependenciesMeta[x].optional === true`（合法状态，绝不可报）；
+`ERR_PACKAGE_PATH_NOT_EXPORTED`（包在、入口解析不出，如 `@linxin666/… → @deepseek-ai/dsh`）走退路判位置。
 
 ### 已知未做（社区巡检发现，需进一步验证或决策）
 

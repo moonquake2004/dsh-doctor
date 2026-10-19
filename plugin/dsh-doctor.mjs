@@ -57,7 +57,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import net from 'node:net';
-import { basename, delimiter as PATH_DELIM, dirname, join, relative, resolve } from 'node:path';
+import { basename, delimiter as PATH_DELIM, dirname, join, relative, resolve, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
@@ -953,6 +953,185 @@ function checkProfile(name) {
     } else {
       reportSkip('profile', 'P25', '无 bundle 声明 patch 文件——无对象可查，跳过');
     }
+  }
+
+  /* P26：peer 依赖的**解析根**一致性（社区 #10149）。
+   *
+   * 病例：profile 用 pnpm 且 `settings.autoInstallPeers: false` 装出，`@deepseek-ai/cordis`
+   * 既不在 profile 的 node_modules、也不在 lockfile 的 packages 段；而
+   * `@deepseek-ai/dsh-subprocess/lib/index.js` 第一行就是 `import { Service } from "@deepseek-ai/cordis"`。
+   * 常驻服务由全局 CLI 启动，CLI 自己的 node_modules 兜住了这一层，**所以跑着的服务看不出问题**；
+   * 但私有 bootstrap 用**裸 `node runner.js`** 起子进程时没有那层兜底 → import 阶段
+   * `ERR_MODULE_NOT_FOUND` → 父进程只看到 "subprocess scope exited before its bootstrap consumed
+   * the launch request"，把矛头错误地指向 systemd scope（用户会去查一个根本没坏的东西）。
+   *
+   * **为什么 P19 判不出**：P19 只核对"声明范围 vs 实际提供的版本"，比对前要先 `resolveHostVersion`；
+   * 解析不到时它按设计记 `unknown19++` 且**不算兼容也不算不兼容**——于是这里出现
+   * "核对 2 条 host peer 声明，均可接受当前核心版本（2 条无法判定，按未知处理未计入）"，
+   * 状态恒 pass。**"版本是否匹配"与"能否解析到"是两个事实**：前者由 P19 管，后者此前**没有任何检查管**。
+   * 本检查只判后者（解析根），不重复 P19 的版本比对。
+   *
+   * 判据（三态），对每个已装包声明的 `@deepseek-ai/*` 非 optional peer：
+   *   ① 用 node 自己的解析器（createRequire(使用方包/package.json).resolve）能解析到，
+   *      **且命中路径在 `<profile>/node_modules/**` 之内** → ok；
+   *   ② 解析不到、或只解析到 profile 之外（`<home>/profiles/node_modules` 共享层 / 全局 CLI 树）
+   *      → **warn（P26b）**：常驻服务能用、子进程会崩（症状会伪装成 systemd 错）；
+   *   ③ 任何解析根（含宿主树）都没有 → **fail（P26）**：这个插件根本装不完整。
+   * ② 之所以把"越界命中"也算在内：共享 hoisted 层里的 @deepseek-ai/* 都是指向全局 CLI 的软链，
+   * 裸 node 从包目录向上**会**命中它——但那正是"常驻服务能用"的那条路径，不是包自身的解析根。
+   * 软链接必须跟随（pnpm 与 file:/dev 安装全是软链）。
+   *
+   * 口径：作用域名规则与 P19 一致（`@deepseek-ai/` 两段、`peerDependenciesMeta.optional` 排除）。
+   */
+  /* 解析用**node 自己的解析器**，不手写"向上找 node_modules"循环。
+   * 2026-10-19 实测教训（真实 profile）：手写循环会在 `~/.dsh/profiles/node_modules` 命中——
+   * 那是**共享 hoisted 层**，里面每个 @deepseek-ai/* 都是指向全局 CLI 那份的软链。于是
+   * "只有宿主兜底"被误判成"包自己能解析"，恰好制造 #10149 那种假绿灯。
+   * 用 createRequire(package.json).resolve() 有两个好处：
+   *   ① 与裸 `node runner.js` 子进程的解析语义**逐字一致**（含 exports 约束、软链跟随）；
+   *   ② 有客观真相可比对：对真实 profile 逐条跑过，node 判缺失的 4 条里我们原实现漏掉了 1 条
+   *      （`@linxin666/dsh-client-ui-task-board → @deepseek-ai/dsh`，package.json 无 main 时
+   *       `require.resolve` 会抛 ERR_PACKAGE_PATH_NOT_EXPORTED，而 existsSync 认为"在"）。
+   * 是否"在 profile 自己的解析根内"另判：命中路径落在 `<profile>/node_modules/**` 才算，
+   * 越界命中 = 只有宿主提供（常驻服务能用、子进程崩）。 */
+  /** 两条路径是否指向同一次安装：先按字面比，再按 realpath 比。
+   *  必须比 realpath —— macOS 的 tmpdir 是 `/var/...` 而 realpath 返回 `/private/var/...`，
+   *  只做字面 startsWith 会让"明明在 profile 里"的包被判成"不在"（实测踩到：用例①假红）。 */
+  function sameTree(a, b) {
+    const norm = (x) => String(x).split(sep).join('/');
+    if (norm(a).startsWith(norm(b) + '/')) return true;
+    try { return norm(realpathSync(a)).startsWith(norm(realpathSync(b)) + '/'); } catch { return false; }
+  }
+  function peerResolvableFrom(pkgDir, peerName) {
+    const profileNodeModules = join(dir, 'node_modules');
+    const req = createRequire(join(pkgDir, 'package.json'));
+    // ① 能否解析（用 node 自己的语义）。例外：ERR_PACKAGE_PATH_NOT_EXPORTED 表示**包在、入口解析不出来**
+    //    （真实例：@linxin666/dsh-client-ui-task-board → @deepseek-ai/dsh，宿主 dsh 包 exports 有约束），
+    //    那是"版本的 exports 问题"，不是"装没装"——不能当缺失（否则就是误报）。
+    try {
+      const at = req.resolve(peerName);
+      return { at, insideProfile: sameTree(at, profileNodeModules) };
+    } catch (e) {
+      if (e?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') return null;
+      return locatedByPath(pkgDir, peerName);
+    }
+  }
+  /** 包目录存在但入口不可解析时的退路：逐级找 `node_modules/<peer>/package.json`（跟随软链），
+   *  只为拿到"它装在哪"。路径分类口径与 ① 相同（profile/node_modules 之下才算自身可解析）。 */
+  function locatedByPath(pkgDir, peerName) {
+    let d = pkgDir;
+    for (let i = 0; i < 12; i++) {
+      const cand = join(d, 'node_modules', peerName, 'package.json');
+      if (existsSync(cand)) return { at: cand, insideProfile: sameTree(cand, join(dir, 'node_modules')) };
+      const up = dirname(d);
+      if (up === d) break;
+      d = up;
+    }
+    return null;
+  }
+  /* ===== 退出码语义（#10149 的决定，写在这里以免后来者"顺手修掉"）=====
+   * 本项在真机上**经常**报 fail，而且报的往往是**真的**：从 `<profile>/node_modules/dsh-better-sidebar`
+   * 解析 @deepseek-ai/* 的命中路径是 `/opt/homebrew/.../dsh/node_modules/...`（经
+   * `<home>/profiles/node_modules` 那层共享软链）。也就是说**连常驻服务都在用宿主兜底**——
+   * 这正是 #10149 的整个前提，而不是"这个 profile 配错了"。
+   *
+   * 为什么仍按 error：宿主私有 bootstrap 用裸 node 起子进程时，解析根里**没有**那层兜底，
+   * 于是 import 必炸、并被误报成 systemd scope 错误。工具的价值是在崩溃**之前**说出来。
+   * 为什么不会冤枉真实用户：`<home>/profiles/node_modules` 是**所有 profile 共享**的（不是某个
+   * profile 自己的缺陷）；它在就不 fail，它不在（全新机器/被清理过）才 fail。判据落在
+   * "共享层在不在"，而不是"用户装了什么"。
+   * 若将来决定不应翻退出码，请改 catalogSeverity（那会**全局**降级 P26，含"真的半个包都没装"
+   * 的情形），**不要**改成 report(ok:true)——那是假绿灯。
+   */
+  /** 宿主/CLI 安装树里有没有这个包（= 常驻服务能用的那条路径）。
+   *  顺序按"常驻服务实际会找的根"：PATH 里的 dsh 安装树 → profiles/<各>/node_modules（hoisted 层）。 */
+  function peerProvidedByHost(peerName) {
+    const hostRoot = hostInstallRoot();
+    if (hostRoot && existsSync(join(hostRoot, peerName, 'package.json'))) return join(hostRoot, peerName, 'package.json');
+    const profilesRoot = join(dirname(dir), 'node_modules');
+    if (existsSync(join(profilesRoot, peerName, 'package.json'))) return join(profilesRoot, peerName, 'package.json');
+    return null;
+  }
+  /* 判定收口（一条检查只发一条记录；两种命中拆成 P26 / P26b 两个 id，而不是靠
+   * catalogSeverity 按 id 全局降级——那会把"哪儿都没有"的真 fail 一起降成 warn，
+   * 见 P24 的红队 R1。两者互斥：有 ③ 时只报 P26，并在文案里带上 ② 的计数）。 */
+  const seen26 = new Set();
+  const dirsToScan26 = [];
+  for (const b of bundles) { const d26 = findPkg(b); if (d26 && !seen26.has(d26)) { seen26.add(d26); dirsToScan26.push({ name: b, dir: d26 }); } }
+  for (const depName of Object.keys(manifest.dependencies ?? {})) {
+    const d26 = findPkg(depName); if (d26 && !seen26.has(d26)) { seen26.add(d26); dirsToScan26.push({ name: depName, dir: d26 }); }
+  }
+  // 任何解析根都找不到的 peer（#10149）：常驻服务与私有 bootstrap 都会在 import 阶段炸
+  const gaps26 = [];
+  // 只在宿主/CLI 树里能找到的 peer（#10149）：常驻服务能用、子进程会崩
+  const warns26 = [];
+  let checked26 = 0;
+  /* 断链检测（2026-10-19，本机实测发现）：共享 hoisted 层 `<home>/profiles/node_modules`
+   * 里留有大量**指向已被移除的宿主包**的软链——dsh 升级后旧包消失，软链却留下。
+   * 本机实测：该层 614 条软链中 **197 条是断链**，其中 14 条属于 `@deepseek-ai/*`
+   * （其余是 @aws-crypto/*、@hono/node-server 等传递依赖的残留）。整层损坏程度远大于"14"。
+   *
+   * 为什么必须区分：`existsSync` 对断链返回 **false** —— 用"路径存在"的探针会得出"包不存在"的结论，
+   * 但两者的**修复动作完全不同**：
+   *   断链 → 删除失效软链、重建该层（补装 peer **无效**，因为"安装记录"还在）；
+   *   没装 → 补装该 peer。
+   * 注意这里必须用 `lstatSync`（**不跟随**软链），`existsSync` 恰好会把要查的形态吃掉。
+   */
+  const brokenLink26 = (peerName) => {
+    for (const root of [join(dir, 'node_modules'), join(dirname(dir), 'node_modules')]) {
+      const cand = join(root, peerName);
+      try {
+        if (lstatSync(cand).isSymbolicLink() && !existsSync(cand)) return { at: cand };
+      } catch { /* 不存在或不可读 */ }
+    }
+    return null;
+  };
+  for (const { name: pkgName, dir: pkgDir } of dirsToScan26) {
+    let pkg26;
+    try { pkg26 = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')); } catch { continue; }
+    const meta26 = pkg26?.peerDependenciesMeta ?? {};
+    for (const [peerName, range26] of Object.entries(pkg26?.peerDependencies ?? {})) {
+      if (!peerName.startsWith('@deepseek-ai/')) continue;            // 作用域名两段口径同 P19
+      if (meta26[peerName]?.optional === true) continue;              // optional 缺失是合法状态，绝不可报
+      checked26++;
+      const hit26 = peerResolvableFrom(pkgDir, peerName);
+      if (hit26 && hit26.insideProfile) continue;                    // ① 在 profile 自己的解析根内 → ok
+      const row = `${pkgName} → ${peerName} ${range26}`;
+      // 越过了 profile 才命中，或干脆只在宿主/CLI 树里 —— 常驻服务能用、子进程会崩（#10149）
+      if (hit26 || peerProvidedByHost(peerName)) warns26.push(row);
+      else {
+        const bl = brokenLink26(peerName);
+        gaps26.push({ row, broken: Boolean(bl) });                   // 任何解析根都没有（可能只是链断了）
+      }
+    }
+  }
+  if (gaps26.length) {
+    const brokenRows = gaps26.filter((g) => g.broken).map((g) => g.row);
+    const missingRows = gaps26.filter((g) => !g.broken).map((g) => g.row);
+    const detail26 = `peer 依赖在任何解析根下都找不到（${gaps26.length} 处，共核对 ${checked26} 条 @deepseek-ai/* peer 声明）：\n  `
+      + gaps26.slice(0, 8).map((g) => g.row + (g.broken ? '（断链：软链目标已不存在）' : '')).join('\n  ')
+      + `\n  后果：该插件 import 阶段即 ERR_MODULE_NOT_FOUND（社区 #10149），常驻服务与私有 bootstrap 都会失败`
+      + (brokenRows.length ? `\n  其中 ${brokenRows.length} 处是**断掉的软链**（多见于共享层 <home>/profiles/node_modules 指向已被移除的宿主包，dsh 升级残留）——这类"补装 peer"无效，要重建该层` : '')
+      + (warns26.length ? `\n  （另有 ${warns26.length} 处仅宿主树可解析——那批会让子进程崩，修好本项后 P26b 会单独报）` : '');
+    const fix26 = (missingRows.length && brokenRows.length)
+      ? `① 断链的：删除 <home>/profiles/node_modules 下这些失效软链后重装对应包（链目标已不存在，补装 peer 无效）；\n  ② 其余：在该 profile 里补装（dsh plugin --profile ${name} add <包名>），或把 pnpm 的 settings.autoInstallPeers 打开后重装`
+      : (brokenRows.length
+        ? `这些是**断链**不是缺包：删除 <home>/profiles/node_modules 下的失效软链后重装对应包（dsh 升级后旧宿主包消失，软链残留）`
+        : `在该 profile 里补装这些 peer（dsh plugin --profile ${name} add <包名>）；或把 pnpm 的 settings.autoInstallPeers 打开后重装`)
+        + `。注意 P19 只比版本区间，解析不到时记"未知"而不报警——"能不能解析到"只有 P26 报`;
+    report('profile', 'P26', false, detail26, fix26, undefined, checked26, 'host peer 声明');
+  } else if (warns26.length) {
+    report('profile', 'P26b', false,
+      `peer 依赖只有宿主/CLI 树里有，不在使用方包自己的解析根内（${warns26.length} 处，共核对 ${checked26} 条）：\n  `
+      + warns26.slice(0, 8).join('\n  ')
+      + `\n  后果：常驻服务（由全局 CLI 启动）照常可用，但私有 bootstrap 用裸 \`node runner.js\` 起子进程时 ERR_MODULE_NOT_FOUND，`
+      + `父进程只看到 "subprocess scope exited before its bootstrap consumed the launch request"，会把矛头错指向 systemd scope`,
+      `在该 profile 里补装这些 peer，让它们进入包自身的解析根（dsh plugin --profile ${name} add <包名>）；"全局 CLI 那份能用"不算修好`,
+      undefined, checked26, 'host peer 声明');
+  } else if (checked26) {
+    report('profile', 'P26', true, `核对 ${checked26} 条 @deepseek-ai/* peer 声明，均可从使用方包自身的解析根解析到`, undefined, undefined, checked26, 'host peer 声明');
+  } else {
+    reportSkip('profile', 'P26', '未见任何非 optional 的 @deepseek-ai/* peer 声明——无对象可查，跳过');
   }
 
   // P2 id 冲突（#1404 bundle↔user + #2315 bundle↔bundle）
@@ -2529,6 +2708,11 @@ catalogSeverity.set('P17', 'warn');
 catalogSeverity.set('P18', 'warn');
 catalogSeverity.set('P19', 'warn');
 catalogSeverity.set('P20', 'warn');
+/* P26b（#10149）：peer 只存在于宿主/CLI 安装树 → 常驻服务能用，但宿主私有 bootstrap 用裸 node
+ * 起子进程时会 ERR_MODULE_NOT_FOUND。这是**风险**而非此刻的失败（服务此刻是好的），与 P19 的
+ * "版本不匹配=风险信号"同级，故 warn；P26（任何解析根都找不到）按 error 计。
+ * 拆成两个 id 的理由见 P26 块的注释（catalogSeverity 是按 id 整体降级的，混用会把真 fail 一起降掉）。 */
+catalogSeverity.set('P26b', 'warn');
 // P21 不设 warn：它是在 apply() 内**同步抛出**、直接中断整棵装载链的致命类（#6693 实测 195+55 次），
 // 且我们两轮去误报（注释/字符串）后在真实 profile 的 8 个 host 入口 + 8 个 client 产物上零误报，故按 error 处理。 // #6678：声明不匹配是风险信号而非确定失败，提示但不阻断 // #6667：条件性风险（需游离本地模块才触发），提示但不翻退出码
 
