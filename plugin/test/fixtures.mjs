@@ -2167,3 +2167,111 @@ test('E4：宿主树里确实没有 node-pty → 失败（新解析根不得把 
   rmSync(home, { recursive: true, force: true });
   rmSync(root, { recursive: true, force: true });
 });
+
+/* ---------- P24 / P25：社区 #10159 / #6539（2026-10-19 新增） ----------
+ * 这两个检查来自真实社区病例，都是"装完就好、但其实没生效"的静默失败：
+ * #10159 形态B——`dsh plugin add` 中断后包在 dependencies 里、却永远进不了 dsh.profile.bundles
+ *               （plugin-manager 的 reconcile 见 beforeDeps.has(name) 就 continue，重跑不自愈）；
+ * #6539      ——bundle 声明了 dsh.bundle.patch 但该文件没被打进 tarball，启动即 ENOENT
+ *               （dsh-cad 实例：连 `dsh web --help` 都起不来）。
+ */
+
+const BUNDLE_PKG = (name, { patch = './cordis.patch.yml' } = {}) => JSON.stringify({
+  name, version: '1.0.0', dsh: { bundle: { patch } },
+});
+
+test('P24：依赖里装了、声明了 dsh.bundle、但不在 bundles 里 → 失败（#10159 形态B）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: {
+      name: 'web', version: '1.0.0',
+      dsh: { profile: { bundles: [] } },
+      dependencies: { 'dsh-lost': '1.0.0' },
+    },
+    nodeModules: {
+      'dsh-lost/package.json': BUNDLE_PKG('dsh-lost'),
+      'dsh-lost/cordis.patch.yml': '[]\n',
+    },
+  });
+  const { checks } = runCli({ home, args: ['--profile', 'web'] });
+  const c = checks.find((x) => x.id === 'P24');
+  assert.ok(c, '未产出 P24');
+  assert.equal(c.status, 'fail', `应报未登记，实际 ${c.status}: ${c.detail}`);
+  assert.match(String(c.detail), /dsh-lost/, `detail 应点名该依赖: ${c.detail}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P24 反向：普通依赖（不声明 dsh.bundle）不得被报 —— 防"装了依赖就报"的误报', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: {
+      name: 'web', version: '1.0.0',
+      dsh: { profile: { bundles: [] } },
+      dependencies: { 'plain-lib': '2.0.0' },
+    },
+    nodeModules: { 'plain-lib/package.json': JSON.stringify({ name: 'plain-lib', version: '2.0.0' }) },
+  });
+  const { checks } = runCli({ home, args: ['--profile', 'web'] });
+  const c = checks.find((x) => x.id === 'P24');
+  assert.ok(c, '未产出 P24');
+  assert.equal(c.status, 'pass', `普通依赖不该被报，实际 ${c.status}: ${c.detail}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P24 反向：scoped 包用裸名登记也须认（作用域名两段归一化）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: {
+      name: 'web', version: '1.0.0',
+      dsh: { profile: { bundles: ['dsh-scoped'] } }, // 登记的是裸名
+      dependencies: { '@acme/dsh-scoped': '1.0.0' },  // 装的是 scoped 名
+    },
+    nodeModules: {
+      '@acme/dsh-scoped/package.json': BUNDLE_PKG('@acme/dsh-scoped'),
+      '@acme/dsh-scoped/cordis.patch.yml': '[]\n',
+    },
+  });
+  const { checks } = runCli({ home, args: ['--profile', 'web'] });
+  const c = checks.find((x) => x.id === 'P24');
+  assert.ok(c, '未产出 P24');
+  assert.equal(c.status, 'pass', `裸名登记应被视为已登记，实际 ${c.status}: ${c.detail}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P25：bundle 声明了 patch 但文件不存在 → 失败（#6539 dsh-cad：连 --help 都起不来）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: {
+      name: 'web', version: '1.0.0',
+      dsh: { profile: { bundles: ['dsh-cad-like'] } },
+      dependencies: { 'dsh-cad-like': '0.11.0' },
+    },
+    nodeModules: { 'dsh-cad-like/package.json': BUNDLE_PKG('dsh-cad-like') }, // 故意不写 patch 文件
+  });
+  const { checks } = runCli({ home, args: ['--profile', 'web'] });
+  const c = checks.find((x) => x.id === 'P25');
+  assert.ok(c, '未产出 P25');
+  assert.equal(c.status, 'fail', `应报 patch 缺失，实际 ${c.status}: ${c.detail}`);
+  assert.match(String(c.detail), /dsh-cad-like/, `detail 应点名该 bundle: ${c.detail}`);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test('P25 反向：patch 文件在位 → 通过（正向锚点，防"一律 fail"）', () => {
+  const home = tempHome();
+  profileFixture(home, 'web', {
+    manifest: {
+      name: 'web', version: '1.0.0',
+      dsh: { profile: { bundles: ['dsh-good'] } },
+      dependencies: { 'dsh-good': '1.0.0' },
+    },
+    nodeModules: {
+      'dsh-good/package.json': BUNDLE_PKG('dsh-good'),
+      'dsh-good/cordis.patch.yml': '[]\n',
+    },
+  });
+  const { checks } = runCli({ home, args: ['--profile', 'web'] });
+  const c = checks.find((x) => x.id === 'P25');
+  assert.ok(c, '未产出 P25');
+  assert.equal(c.status, 'pass', `patch 在位应通过，实际 ${c.status}: ${c.detail}`);
+  rmSync(home, { recursive: true, force: true });
+});

@@ -3,7 +3,7 @@
 > R1 来源律 / R5 唯一归属律的机制：**加检查前先查这里**。
 > 覆盖范围：以字面量出现的 id + `DYNAMIC` 显式列出的动态 id；若新增检查后本文件未更新，CI 会红。`source` 为空表示该检查尚未标注权威来源（待补，见 docs/check-authoring-rules.md §2）。
 
-共 52 项。
+共 54 项。
 
 | id | 段 | 范围（取自代码注释） | 来源 |
 |---|---|---|---|
@@ -36,10 +36,12 @@
 | `P17` | profile |  | #5719 |
 | `P18` | profile | DeepSeek 请求以 REQUEST_EXTENSION 失败（#6667 报告的最小复 | #1197 #880 |
 | `P19` | profile | 不生成发现——声明与否是作者的选择，消费者该做的是别把它读成"已核对"。 | — |
-| `P2` | profile | bundle vs 用户 patch 冲突（#1404） | #1377 #1404 |
+| `P2` | profile | bundle vs 用户 patch 冲突（#1404） | #1404 #2315 |
 | `P20` | profile | 注意 | — |
 | `P21` | profile | client 侧还常通过 ctx.get('host'/'styles') 取沙箱服务 | — |
 | `P23` | profile | 只有当同一包名**沿祖先链也能解析到**时，才是"两个实例"（宿主也提供它） | — |
+| `P24` | profile | 已装但未登记的 bundle（#10159/#6539） | #9753 #10159 |
+| `P25` | profile | bundle 声明的 patch 文件缺失（#6539） | #6539 #6539 |
 | `P3` | profile | 并向上找一层以覆盖 profile 根安装（~/.dsh/profiles/node_mod | #1197 #880 |
 | `P4` | profile | P4 file | #1197 |
 | `P5` | profile | symlink 指向宿主同一份（#1697 的 link | #1197 #1486 |

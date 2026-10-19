@@ -16,6 +16,75 @@
 
 ---
 
+## [0.8.11] — 2026-10-19
+
+**社区巡检驱动的一轮：新增两个"装了却没生效"类的检查，并清掉一处指向已撤销检查的文案。**
+
+### Added
+
+- **P24 bundle 未登记**（社区 #10159 形态B / #6539 形态4）。P1 只查"bundles 里的条目能不能解析"，
+  **反方向没人查**：包已装进 `dependencies`、也声明了 `dsh.bundle`，却没出现在 `dsh.profile.bundles` 里。
+  后果静默且恶性——插件**永不加载**，且 `dsh plugin add` 重跑也不自愈（plugin-manager 的 reconcile
+  见到 `beforeDeps.has(name)` 就 `continue`）；更糟的是 P3/P16/P19/P20/P21 都以 bundleDirs 为遍历集，
+  **没登记的插件对整棵检查树都是隐形的**。
+  三条件同时成立才报（已装 + 声明 dsh.bundle + 未登记，含去 scope 的裸名比对）；
+  命中 ≥3 个时降级为 warn 并提示可能是 #9753 的 boot recovery 把 bundles 重置了。
+
+- **P25 bundle 声明的 patch 文件缺失**（社区 #6539 / `dsh-cad` 实例）。P1 只判"声明了 dsh.bundle"，
+  不判"它指向的文件在"。dsh-cad 把 `cordis.patch.yml` 漏打包，`loadOverlayPatches` 抛 ENOENT，
+  **连 `dsh web --help` 都起不来**。
+
+### Fixed
+
+- **P0 的失败文案指向已撤销的 P22**。P22 早在 0.8.x 就并入 P15（BOM 检测），但 P0 仍写着
+  「见 P22」——用户会去找一条不存在的检查。已改指 P15，并清掉给 P22 设 severity 的死代码。
+- `plugin/package.json` 版本号：0.8.10 提交时漏改，现为 0.8.11。
+
+- **E11：从"恒 skip"改为真正守护 sudo 属主风险**
+
+E11 原本查 `{home}/settings.yaml` 的可写性。这个前提**已经不成立**：
+`dsh-settings/lib/index.js:346-363` 的 `importLegacyDocument()` 会把该文件 rename 成
+`settings.yaml.imported`，且第 349 行 `if (!existsSync(path)) return` —— **新装机器根本没有它**。
+于是 E11 在健康机上恒 skip，从没检出过它要守护的那件事。现役设置落盘在
+`<profile>/cordis.patch.yml`，写入走 `writeFileAtomic`（同目录临时文件 + rename 覆盖）。
+
+**为什么不能简单地把 `file-writable` 指向现役文件**——实测两条相反的结论：
+
+| 场景 | `open('a')`（旧 `file-writable` 语义） | 实际能否写 | 结论 |
+|---|---|---|---|
+| 文件 0444、父目录可写 | EACCES | **能**（rename 覆盖成功） | 旧语义**误报** |
+| 父目录 0555 | ok（追加只改元数据） | **不能**（rename EACCES） | 旧语义**漏报** |
+
+故新增原语 **`dir-writable`**：在目标目录建 `wx` 临时兄弟文件再删掉（与 `writeFileAtomic` 同形），
+E11 改用它 + `{profile}/cordis.patch.yml`。
+
+**另修一处同族假 fail**：`dir-writable` 在目录不存在时最初按 `required:true` 报 fail，
+把"没装 profile"说成"目录不可写"。现统一为 skip —— **目录不存在不是权限问题**，
+"该存在却不存在"由 P0 负责。
+
+**以及一个只有实跑才会暴露的坑**：在本会话的 macOS 沙箱里，对属主与权限都正常的目录执行
+`open('wx')` 会得到 `EPERM`，E11 直接把用户的健康环境报成 fail。现已区分：
+`EACCES`/`EROFS` 或权限位本身矛盾 → fail；**仅 EPERM 且权限位正常 → skip（"运行环境拒绝，无法判定"）**。
+与 E4/E6 属于同一族问题：**环境受限导致的结论，不能当作用户的问题**。
+
+### 验证
+
+- 真机零误报：P24 核对 16 个依赖、P25 核对 13 个 bundle，均 pass。
+- 新增 5 条用例（P24 正/反向 + scoped 裸名、P25 正/反向），**对抗自检**：禁用检测后恰好那 2 条
+  正向用例变红，反向用例仍绿。
+- 全套 **229 → 257**（256 pass / 1 主动 skip / 0 fail）；变异 8 杀 0 存活 1 等价；审计 7 过 0 败。
+
+### 已知未做（社区巡检发现，需进一步验证或决策）
+
+- **#10149 缺 peer 依赖**（profile 用 `autoInstallPeers:false` 装出、`cordis` 不在 lockfile，runner
+  被裸 node 启动时 import 即 ERR_MODULE_NOT_FOUND，却报成误导性的 systemd scope 错误）：
+  P19 判的是**版本区间**，不看**解析根**。需要新检查（按"谁去 import"分两个上下文），未实现。
+- **大日志/大语料**（#10182/#10152/#9660）：单会话可达 438 MiB、迁移产物单帧占明文 100%，
+  S 段全量读取会放大误判风险。规划：S1 加"未读完 ⇒ 不判"闸门、S11 超限降级。
+- **#9753 boot recovery 重置 bundles**：会与 P24 叠加刷屏；需先确认 0.2.1-rc.2 是否仍写 `.bak`。
+
+---
+
 ## [0.8.10] — 2026-10-18
 
 **一次针对"假绿灯 / 假告警"的定向修复。三条都是**在健康环境上给出错误结论**，不是崩溃。**
@@ -55,33 +124,6 @@
 - 全套 **229 → 252**（251 pass / 1 主动 skip / 0 fail；基线 229 含 1 条主动 skip）。
 - **对抗自检**：逐条回退修复确认用例会变红——包括"只修一半"（S1 只认 `data.toolCallId`）
   与"过度解除"（有 result 就放行）两种半吊子修法，确认都被拦住。
-
-### Fixed（E11：从"恒 skip"改为真正守护 sudo 属主风险）
-
-E11 原本查 `{home}/settings.yaml` 的可写性。这个前提**已经不成立**：
-`dsh-settings/lib/index.js:346-363` 的 `importLegacyDocument()` 会把该文件 rename 成
-`settings.yaml.imported`，且第 349 行 `if (!existsSync(path)) return` —— **新装机器根本没有它**。
-于是 E11 在健康机上恒 skip，从没检出过它要守护的那件事。现役设置落盘在
-`<profile>/cordis.patch.yml`，写入走 `writeFileAtomic`（同目录临时文件 + rename 覆盖）。
-
-**为什么不能简单地把 `file-writable` 指向现役文件**——实测两条相反的结论：
-
-| 场景 | `open('a')`（旧 `file-writable` 语义） | 实际能否写 | 结论 |
-|---|---|---|---|
-| 文件 0444、父目录可写 | EACCES | **能**（rename 覆盖成功） | 旧语义**误报** |
-| 父目录 0555 | ok（追加只改元数据） | **不能**（rename EACCES） | 旧语义**漏报** |
-
-故新增原语 **`dir-writable`**：在目标目录建 `wx` 临时兄弟文件再删掉（与 `writeFileAtomic` 同形），
-E11 改用它 + `{profile}/cordis.patch.yml`。
-
-**另修一处同族假 fail**：`dir-writable` 在目录不存在时最初按 `required:true` 报 fail，
-把"没装 profile"说成"目录不可写"。现统一为 skip —— **目录不存在不是权限问题**，
-"该存在却不存在"由 P0 负责。
-
-**以及一个只有实跑才会暴露的坑**：在本会话的 macOS 沙箱里，对属主与权限都正常的目录执行
-`open('wx')` 会得到 `EPERM`，E11 直接把用户的健康环境报成 fail。现已区分：
-`EACCES`/`EROFS` 或权限位本身矛盾 → fail；**仅 EPERM 且权限位正常 → skip（"运行环境拒绝，无法判定"）**。
-与 E4/E6 属于同一族问题：**环境受限导致的结论，不能当作用户的问题**。
 
 ### 已知未修（本轮范围外，已记台账）
 

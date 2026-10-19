@@ -741,11 +741,11 @@ function checkProfile(name) {
   const manifestPath = join(dir, 'package.json');
   if (!existsSync(manifestPath)) { report('profile', 'P0', false, `profile 不存在: ${dir}`); return; }
   // 用**带 BOM 感知**的读取：带 BOM 的 manifest 会让 DSH 启动硬失败（#6758），
-  // 而诊断工具更不能被它要诊断的那份输入打败——剥离 BOM 后继续工作，并由 P22 单独报出病因。
+  // 而诊断工具更不能被它要诊断的那份输入打败——剥离 BOM 后继续工作，并由 P15 单独报出病因（P22 已撤销，同一事实只留一个归属）。
   const mainRead = readJsonReportingBom(manifestPath);
   const manifest = mainRead.data;
   if (manifest === null) {
-    report('profile', 'P0', false, `profile manifest 无法解析为 JSON${mainRead.hadBom ? '（且带 UTF-8 BOM —— 见 P22，这正是 DSH 启动硬失败的原因 #6758）' : ''}`);
+    report('profile', 'P0', false, `profile manifest 无法解析为 JSON${mainRead.hadBom ? '（且带 UTF-8 BOM —— 见 P15，这正是 DSH 启动硬失败的原因 #6758）' : ''}`);
     return;
   }
   const bundles = manifest.dsh?.profile?.bundles ?? [];
@@ -833,6 +833,74 @@ function checkProfile(name) {
       }
     }
   }
+  /* P24 bundle 未登记（2026-10-19，社区 #10159 形态B / #6539 形态4 / #9451）
+   *
+   * P1 只有一个方向：bundles 里声明的条目能不能解析。**反方向没人查**——
+   * "包已装进 dependencies、也声明了 dsh.bundle，但没有出现在 dsh.profile.bundles 里"。
+   * 后果是静默的：插件**装了但永不加载**，而且 `dsh plugin add` 重跑也不自愈
+   * （#10159 根因：plugin-manager 的 reconcile 见到 `beforeDeps.has(name)` 就 continue）。
+   * 更糟的是它让**整棵检查树对该插件失明**：P3/P16/P19/P20/P21 都以 bundleDirs 为遍历集，
+   * 没登记的插件不会被任何一项检查看到。
+   * 三条件同时成立才报（任一不成立都可能是有意为之，报出去就是误报）：
+   *   ① 在 profile manifest 的 dependencies/devDependencies 里（= 装过）
+   *   ② 该包 package.json 可读且声明了 dsh.bundle.patch（= 本该被自动登记）
+   *   ③ 其名字（含去掉 scope 的裸名）不在 bundles 里（= 没登记）
+   * 已知会误伤的宿主行为：#9753 的 boot recovery 会把 bundles 重置成内建最小集——
+   * 那种情况下 ③ 对多个包同时成立。故**命中 ≥3 个时降为 warn** 并提示可能是恢复重置，避免一次误报刷屏。
+   */
+  {
+    const deps = { ...(manifest.dependencies ?? {}), ...(manifest.devDependencies ?? {}) };
+    const bundleBare = new Set(bundles.map((b) => String(b).replace(/^@[^/]+\//, '')));
+    const unregistered = [];
+    for (const depName of Object.keys(deps)) {
+      if (bundleBare.has(depName) || bundleBare.has(depName.replace(/^@[^/]+\//, ''))) continue;
+      const depDir = findPkg(depName);
+      if (!depDir) continue;                       // 装了但没落盘：不是本检查的事（P1/P3 管）
+      let depPkg;
+      try { depPkg = JSON.parse(readFileSync(join(depDir, 'package.json'), 'utf8')); } catch { continue; }
+      if (!depPkg?.dsh?.bundle?.patch) continue;   // 不声明 bundle = 普通依赖，本就不该登记
+      unregistered.push(depName);
+    }
+    if (unregistered.length) {
+      const many = unregistered.length >= 3;
+      const detail = `已安装但未登记进 dsh.profile.bundles（#10159/#6539：插件装了但永不加载，重跑 add 也不自愈）: ${unregistered.join(', ')}`
+        + (many ? '\n  （命中 ≥3 个 —— 也可能是 #9753 的 boot recovery 把 bundles 重置成了内建最小集，请先确认是否刚发生过启动恢复）' : '');
+      // 已装但未登记的 bundle（#10159/#6539）：插件装了却永不加载，其余检查也看不见它
+      if (many) report('profile', 'P24', false, detail, `先备份 manifest；若确为安装中断：手动把名称加入 dsh.profile.bundles，或 dsh plugin --profile ${name} remove 后重新 add`, undefined, unregistered.length, '未登记 bundle');
+      else report('profile', 'P24', false, detail, `手动把名称加入 dsh.profile.bundles（或 dsh plugin --profile ${name} remove 后重新 add）`, undefined, unregistered.length, '未登记 bundle');
+    } else {
+      report('profile', 'P24', true, `已装且声明 dsh.bundle 的依赖均已登记进 bundles（核对 ${Object.keys(deps).length} 个依赖）`, undefined, undefined, Object.keys(deps).length, '依赖');
+    }
+  }
+
+  /* P25 bundle 声明的 patch 文件缺失（2026-10-19，社区 #6539 / dsh-cad 实例）
+   * 插件在 package.json 里写 `dsh.bundle.patch: "./cordis.patch.yml"` 但该文件没被打进 tarball，
+   * dsh 启动时 loadOverlayPatches 抛 ENOENT，**连 `dsh web --help` 都起不来**。
+   * P1 只判"声明了 dsh.bundle"，不判"它指向的文件在"—— 这是两个事实。
+   */
+  {
+    let checked25 = 0;
+    const missing25 = [];
+    for (const b of bundles) {
+      const d25 = findPkg(b);
+      if (!d25) continue;
+      let pkg25;
+      try { pkg25 = JSON.parse(readFileSync(join(d25, 'package.json'), 'utf8')); } catch { continue; }
+      const rel = pkg25?.dsh?.bundle?.patch;
+      if (typeof rel !== 'string' || !rel) continue;
+      checked25++;
+      if (!existsSync(join(d25, rel))) missing25.push(`${b} → ${rel}`);
+    }
+    // bundle 声明的 patch 文件缺失（#6539）：启动时 ENOENT，连 --help 都起不来
+    if (missing25.length) {
+      report('profile', 'P25', false, `bundle 声明的 patch 文件不存在（#6539：启动时 ENOENT，连 --help 都起不来）: ${missing25.join('; ')}`, '该包发布时漏打包了 patch 文件：升级到修复版，或从 bundles 移除该条目', undefined, checked25, 'bundle patch');
+    } else if (checked25) {
+      report('profile', 'P25', true, `bundle 声明的 patch 文件均在（检查 ${checked25} 个）`, undefined, undefined, checked25, 'bundle patch');
+    } else {
+      reportSkip('profile', 'P25', '无 bundle 声明 patch 文件——无对象可查，跳过');
+    }
+  }
+
   // P2 id 冲突（#1404 bundle↔user + #2315 bundle↔bundle）
   const bundleIdSources = new Map(); // id → Set<bundle name>
   for (const b of bundles) {
@@ -2366,7 +2434,6 @@ catalogSeverity.set('P17', 'warn');
 catalogSeverity.set('P18', 'warn');
 catalogSeverity.set('P19', 'warn');
 catalogSeverity.set('P20', 'warn');
-catalogSeverity.set('P22', 'error'); // #6758：BOM 会让启动硬失败，零误报 → 按 error // #6693：client 格式问题在浏览器才炸，服务端零痕迹——高价值提示但不阻断 CI
 // P21 不设 warn：它是在 apply() 内**同步抛出**、直接中断整棵装载链的致命类（#6693 实测 195+55 次），
 // 且我们两轮去误报（注释/字符串）后在真实 profile 的 8 个 host 入口 + 8 个 client 产物上零误报，故按 error 处理。 // #6678：声明不匹配是风险信号而非确定失败，提示但不阻断 // #6667：条件性风险（需游离本地模块才触发），提示但不翻退出码
 
@@ -3118,7 +3185,7 @@ function classifyReadAttempts(attemptLog) {
  *
  * 我们自己也踩同一个坑：此前直接 `JSON.parse(readFileSync(...))` 失败后置 null，于是 P18 会报
  * "未找到 profile manifest"——**错误结论**。诊断工具在它要诊断的输入上给出错判，正是最该避免的。
- * 所以：**剥离 BOM 后再解析**（让其余检查继续工作），并把 hadBom 单独报出来（P22）。
+ * 所以：**剥离 BOM 后再解析**（让其余检查继续工作），并把 hadBom 单独报出来（由 P15 报出；P22 已撤销）。
  */
 function readJsonReportingBom(file) {
   let raw;
